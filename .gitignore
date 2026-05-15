@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+*.pyc
+.env
+*.log
+logs/
+*.db
+
+# Large binary data files — keep in data/ locally but don't commit
+data/argos_translate/
+data/*.xlsx
+data/*.csv
+data/work_order_imports/
+data/translation_cache.json
+data/equipment_maintenance_cache.json
+
+# Keep these smaller reference files in version control
+!data/AssetList.xlsx
+!data/equipment_maintenance_source_copy.xlsx

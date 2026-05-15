@@ -1,0 +1,2272 @@
+import json
+import os
+import re
+import threading
+from glob import glob
+from datetime import datetime, timedelta
+
+import pandas as pd
+
+try:
+    from deep_translator import GoogleTranslator as _GoogleTranslator
+    _DEEP_TRANSLATOR_AVAILABLE = True
+except ImportError:
+    _DEEP_TRANSLATOR_AVAILABLE = False
+
+from downtime_management import build_management_downtime_payload, enrich_work_order_records, get_grouped_machine_mapping_meta
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
+# Standalone: cache written to data/ since there is no Downtime frontend folder here
+DOWNTIME_CACHE_OUTPUT_FILE = os.path.abspath(
+    os.path.join(BASE_DIR, "..", "data", "downtime-cache.json")
+)
+ARGOS_TRANSLATE_DIR = os.path.join(DATA_DIR, "argos_translate")
+os.environ.setdefault("XDG_CONFIG_HOME", os.path.join(ARGOS_TRANSLATE_DIR, "config"))
+os.environ.setdefault("XDG_DATA_HOME", os.path.join(ARGOS_TRANSLATE_DIR, "data"))
+os.environ.setdefault("XDG_CACHE_HOME", os.path.join(ARGOS_TRANSLATE_DIR, "cache"))
+os.environ.setdefault("ARGOS_STANZA_AVAILABLE", "0")
+os.environ.setdefault("ARGOS_CHUNK_TYPE", "MINISBD")
+
+_DOWNTIME_CACHE = {}
+DOWNTIME_CACHE_VERSION = "2026-05-11-dynamics-machine-explorer-3-assetlist-translation-cache"
+STATUS_DERIVED_SOURCE = "Status-derived"
+DOWNTIME_EXPORT_YEAR = 2026
+
+
+ASSET_CONFIGS = [
+    {
+        "machine_code": "MDB-EMDB-1",
+        "machine_name": "Main MDB-1",
+        "system": "MDB / Power",
+        "area": "Main Electrical Control Room",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "mdb_emdb.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "MDB-06",
+        "machine_name": "MDB 6",
+        "system": "MDB / Power",
+        "area": "Main Electrical Control Room",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "mdb6_energy.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "MDB-07",
+        "machine_name": "MDB 7",
+        "system": "MDB / Power",
+        "area": "Main Electrical Control Room",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "mdb7_energy.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "MDB-08",
+        "machine_name": "MDB 8",
+        "system": "MDB / Power",
+        "area": "Main Electrical Control Room",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "mdb8_energy.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "MDB-09",
+        "machine_name": "MDB 9",
+        "system": "MDB / Power",
+        "area": "Main Electrical Control Room",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "mdb9_energy.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "MDB-10",
+        "machine_name": "MDB 10",
+        "system": "MDB / Power",
+        "area": "Main Electrical Control Room",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "mdb10_energy.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "SBF-01",
+        "machine_name": "Spiral Freezer 1",
+        "system": "Freezer / Refrigeration",
+        "area": "Spiral Blast Freezer",
+        "source": "Status-derived",
+        "series_kind": "freezer_activity",
+        "file_name": "sbf_spiral1_Data.csv",
+    },
+    {
+        "machine_code": "SBF-02",
+        "machine_name": "Spiral Freezer 2",
+        "system": "Freezer / Refrigeration",
+        "area": "Spiral Blast Freezer",
+        "source": "Status-derived",
+        "series_kind": "freezer_activity",
+        "file_name": "sbf_spiral2_Data.csv",
+    },
+    {
+        "machine_code": "SBF-03",
+        "machine_name": "Spiral Freezer 3",
+        "system": "Freezer / Refrigeration",
+        "area": "Spiral Blast Freezer",
+        "source": "Status-derived",
+        "series_kind": "freezer_activity",
+        "file_name": "sbf_spiral3_Data.csv",
+    },
+    {
+        "machine_code": "WTP-RO-01",
+        "machine_name": "RO Water Supply",
+        "system": "Water / Wastewater",
+        "area": "Water Treatment Plant",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "FIT-103-ROWaterSupply_Total.csv",
+        "preferred_values": ["Value (m3)", "m3", "Value"],
+    },
+    {
+        "machine_code": "WTP-SW1-01",
+        "machine_name": "Softwater 1",
+        "system": "Water / Wastewater",
+        "area": "Water Treatment Plant",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "FIT-102-SoftWaterSupply-01_Total.csv",
+        "preferred_values": ["Value (m3)", "m3", "Value"],
+    },
+    {
+        "machine_code": "WTP-SW2-02",
+        "machine_name": "Softwater 2",
+        "system": "Water / Wastewater",
+        "area": "Water Treatment Plant",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "FIT-104-SoftWaterSupply-02_Total.csv",
+        "preferred_values": ["Value (m3)", "m3", "Value"],
+    },
+    {
+        "machine_code": "WWTP-EP-01",
+        "machine_name": "Effluent Pump",
+        "system": "Water / Wastewater",
+        "area": "Wastewater Treatment Plant",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "EffluentPump_Total.csv",
+        "preferred_values": ["EffluentPump_Total(m3)", "Value", "m3"],
+    },
+    {
+        "machine_code": "WWTP-RAW-01",
+        "machine_name": "Raw Water Waste Pump",
+        "system": "Water / Wastewater",
+        "area": "Wastewater Treatment Plant",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "_RawWaterWastePump-01_Total.csv",
+        "preferred_values": ["RawWaterWastePump01_Total(m3)", "Value", "m3"],
+    },
+    {
+        "machine_code": "BLR-DIR-01",
+        "machine_name": "Boiler Direct Panel",
+        "system": "Boiler / Compressor",
+        "area": "Boiler Building",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "boiler_direct_energy.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "BLR-IND-02",
+        "machine_name": "Boiler Indirect Panel",
+        "system": "Boiler / Compressor",
+        "area": "Boiler Building",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "boiler_indirect_energy.csv",
+        "preferred_values": ["Value (kW-hr)", "Value", "kWh"],
+    },
+    {
+        "machine_code": "COMP-01",
+        "machine_name": "Air Compressor",
+        "system": "Boiler / Compressor",
+        "area": "Air Pump Room",
+        "source": "Energy-derived",
+        "series_kind": "cumulative",
+        "file_name": "airmeter_flow.csv",
+        "preferred_values": ["Value (m3)", "Value", "m3"],
+    },
+]
+
+PRIMARY_WORK_ORDER_DOWNTIME_FILE = os.path.join(DATA_DIR, "data downtime.csv")
+FALLBACK_WORK_ORDER_DOWNTIME_FILE = os.path.abspath(os.path.join(os.path.expanduser("~"), "Downloads", "data downtime.csv"))
+WORK_ORDER_IMPORT_DIR = os.path.join(DATA_DIR, "work_order_imports")
+SUPPORTED_EVENT_SERIES_KINDS = {"freezer_activity", "status"}
+WORK_ORDER_IMPORT_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+
+WORK_ORDER_COLUMN_ALIASES = {
+    "Request State": ["Request State", "Status", "WO Status", "Work Order Status", "Request Status", "Current lifecycle state", "Current lifecycle state2", "Current lifecycle state3", "Lifecycle State", "request_state"],
+    "Request ID": ["Request ID", "Request No", "Request Number", "Maintenance Request", "Maintenance Request ID", "MNT ID", "maintenance_order_id"],
+    "WO ID": ["WO ID", "Work Order ID", "WorkOrder ID", "Work Order", "Work order", "Work Order No", "WO No", "WO Number", "work_order_id"],
+    "Machine ID": ["Machine ID", "Machine Code", "Asset", "Asset ID", "AssetID", "Equipment ID", "Equipment Code", "machine_code"],
+    "Machine Name": ["Machine Name", "Name", "Asset Name", "Equipment Name", "Machine", "Asset Description", "machine_name"],
+    "Description": ["Description", "Work Description", "Problem Description", "Job Description", "Notes", "Remarks"],
+    "Location": ["Location", "Building", "Area", "Production Line", "Work Area", "Functional location"],
+    "JobTrade": ["JobTrade", "Job Trade", "Trade", "System", "Work Type", "Maintenance Type", "Job Category"],
+    "JobTypeId": ["JobTypeId", "Job Type ID", "Job Type", "JobType", "Maintenance job type", "Maintenance job type variant", "Maintenance request type"],
+    "Priority": ["Priority", "Priority No", "Priority Number", "Priority Level", "Severity", "SeverityLevel", "Service level", "severity"],
+    "Started By": ["Started By", "Started by", "started_by", "StartedBy"],
+    "Created By": ["Created By", "Created by", "created_by", "CreatedBy"],
+    "Request Created Date": ["Request Created Date", "Created date and time", "Created Date", "Created On", "Reported Date", "Request Date"],
+    "Actual Start Date": ["Actual Start Date", "Actual Start", "Actual start", "Maintenance Start Date", "Start Date"],
+    "Actual End Date": ["Actual End Date", "Actual End", "Actual end", "Maintenance End Date", "End Date", "Closed Date", "Completed Date"],
+    "TTR(hr)": ["TTR(hr)", "TTR", "TTR Hours", "TTR Hour", "Time to Resolution", "Resolution Time", "Downtime Hours", "Duration Hours", "downtime_hours"],
+    "TTR Minutes": ["TTR Minutes", "TTR(min)", "TTR Minute", "TTR Mins", "Duration Minutes", "Downtime Minutes"],
+}
+WORK_ORDER_REQUIRED_CANONICAL_COLUMNS = {
+    "Request State", "Request ID", "WO ID", "Machine ID", "Machine Name",
+    "Priority", "Actual Start Date", "Actual End Date", "TTR(hr)",
+}
+
+
+def normalize_period(value):
+    cleaned = str(value or "").strip().lower()
+    if cleaned in {"this_month", "this month", "current month", "mtd", "month to date", "monthtodate"}:
+        return "this_month"
+    if cleaned in {"last_month", "last month", "previous month"}:
+        return "last_month"
+    if cleaned in {"7d", "week", "next week", "last 7 days"}:
+        return "7d"
+    if cleaned in {"last12", "last_12_months", "last 12 months", "12m", "rolling12"}:
+        return "last12"
+    if cleaned in {"previous_year", "previous year", "last year"}:
+        return "previous_year"
+    if cleaned in {"custom", "custom_range", "custom date range"}:
+        return "custom"
+    if cleaned in {"all_years", "all years", "all", "historical"}:
+        return "all_years"
+    if cleaned in {"90d", "quarter", "qtr", "last 90 days"}:
+        return "90d"
+    if cleaned in {"ytd", "year", "year to date", "full year"}:
+        return "ytd"
+    if cleaned in {"30d", "last 30 days"}:
+        return "30d"
+    return "ytd"
+
+
+def get_period_days(period):
+    return {"7d": 7, "30d": 30, "90d": 90, "last12": 365}.get(period, 30)
+
+
+def get_period_label(period):
+    return {
+        "this_month": "This Month",
+        "last_month": "Last Month",
+        "7d": "Last 7 Days",
+        "30d": "Last 30 Days",
+        "90d": "Quarter",
+        "ytd": "Current Year / YTD",
+        "last12": "Last 12 Months",
+        "previous_year": "Previous Year",
+        "custom": "Custom Date Range",
+        "all_years": "All Years",
+    }.get(period, "Current Year / YTD")
+
+
+def normalize_date_filter(value):
+    parsed = pd.to_datetime(str(value or "").strip(), errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def normalize_month_filter(value):
+    cleaned = str(value or "").strip()
+    if not cleaned or cleaned.lower() == "all":
+        return None
+    parsed = pd.to_datetime(f"{cleaned}-01", errors="coerce")
+    if pd.isna(parsed):
+        return None
+    return parsed.strftime("%Y-%m")
+
+
+def format_month_label(month_key):
+    parsed = pd.to_datetime(f"{month_key}-01", errors="coerce")
+    if pd.isna(parsed):
+        return month_key
+    return parsed.strftime("%b %Y")
+
+
+def build_year_month_options(reference_dt):
+    if reference_dt is None:
+        return []
+    year = reference_dt.year
+    current_month = reference_dt.month
+    return [f"{year}-{month:02d}" for month in range(1, current_month + 1)]
+
+
+def build_year_month_options_from_events(events, reference_dt):
+    timestamps = []
+    for event in events or []:
+        parsed = parse_iso_datetime(event.get("start_time") or event.get("end_time"))
+        if parsed is not None:
+            timestamps.append(parsed)
+    if not timestamps:
+        return build_year_month_options(reference_dt)
+    start = min(timestamps).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    end = (reference_dt.to_pydatetime() if hasattr(reference_dt, "to_pydatetime") else reference_dt) or max(timestamps)
+    end = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    values = []
+    current = start
+    while current <= end:
+        values.append(f"{current.year}-{current.month:02d}")
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    return values
+
+
+def parse_iso_datetime(value):
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None) if value.tzinfo else value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=None) if parsed.tzinfo else parsed
+    except ValueError:
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.isna(parsed):
+            return None
+        parsed_dt = parsed.to_pydatetime()
+        return parsed_dt.replace(tzinfo=None) if parsed_dt.tzinfo else parsed_dt
+
+
+def infer_default_year_from_path(path):
+    match = re.search(r"(20\d{2}|19\d{2})", os.path.basename(str(path)))
+    if match:
+        return int(match.group(1))
+    return DOWNTIME_EXPORT_YEAR
+
+
+def get_work_order_source_paths():
+    imported_candidates = []
+    if os.path.isdir(WORK_ORDER_IMPORT_DIR):
+        for extension in WORK_ORDER_IMPORT_EXTENSIONS:
+            imported_candidates.extend(glob(os.path.join(WORK_ORDER_IMPORT_DIR, f"*{extension}")))
+
+    if imported_candidates:
+        candidates = sorted(imported_candidates, key=lambda path: os.path.getmtime(path), reverse=True)
+    else:
+        candidates = []
+        data_patterns = [
+            os.path.join(DATA_DIR, "data downtime.csv"),
+            os.path.join(DATA_DIR, "data downtime *.csv"),
+            os.path.join(DATA_DIR, "data_downtime*.csv"),
+        ]
+        for pattern in data_patterns:
+            candidates.extend(glob(pattern))
+        if os.path.exists(FALLBACK_WORK_ORDER_DOWNTIME_FILE):
+            candidates.append(FALLBACK_WORK_ORDER_DOWNTIME_FILE)
+    ordered = []
+    seen = set()
+    for path in candidates:
+        normalized = os.path.abspath(path)
+        if normalized in seen or not os.path.exists(normalized):
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def read_work_order_source_file(path):
+    extension = os.path.splitext(path)[1].lower()
+    if extension == ".csv":
+        df = pd.read_csv(path, encoding="utf-8-sig")
+    elif extension in {".xlsx", ".xls"}:
+        sheets = pd.read_excel(path, sheet_name=None)
+        if not sheets:
+            raise ValueError("Workbook contains no readable sheets.")
+        sheet_name, df = max(sheets.items(), key=lambda item: score_work_order_dataframe(item[1]))
+        if score_work_order_dataframe(df) == 0:
+            raise ValueError("Workbook does not contain recognizable work order columns.")
+    else:
+        raise ValueError(f"Unsupported work order import file type: {extension}")
+    return canonicalize_work_order_dataframe(df)
+
+
+def normalize_work_order_column_key(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def build_work_order_alias_lookup():
+    lookup = {}
+    for canonical, aliases in WORK_ORDER_COLUMN_ALIASES.items():
+        lookup[normalize_work_order_column_key(canonical)] = canonical
+        for alias in aliases:
+            lookup[normalize_work_order_column_key(alias)] = canonical
+    return lookup
+
+
+WORK_ORDER_ALIAS_LOOKUP = build_work_order_alias_lookup()
+
+
+def score_work_order_dataframe(df):
+    columns = {
+        WORK_ORDER_ALIAS_LOOKUP.get(normalize_work_order_column_key(column), str(column).strip())
+        for column in getattr(df, "columns", [])
+    }
+    return sum(1 for column in WORK_ORDER_REQUIRED_CANONICAL_COLUMNS if column in columns)
+
+
+def canonicalize_work_order_dataframe(df):
+    df = df.copy()
+    renamed_columns = []
+    seen = set()
+    for column in df.columns:
+        original = str(column).replace("\ufeff", "").strip()
+        canonical = WORK_ORDER_ALIAS_LOOKUP.get(normalize_work_order_column_key(original), original)
+        # Keep duplicate aliases under their original names so no source column is silently overwritten.
+        if canonical in seen and canonical != original:
+            canonical = original
+        seen.add(canonical)
+        renamed_columns.append(canonical)
+    df.columns = renamed_columns
+    unnamed = [column for column in df.columns if str(column).lower().startswith("unnamed:") and df[column].isna().all()]
+    if unnamed:
+        df = df.drop(columns=unnamed)
+    return df
+
+
+def get_work_order_import_status():
+    paths = get_work_order_source_paths()
+    import_root = os.path.abspath(WORK_ORDER_IMPORT_DIR)
+    return {
+        "source_count": len(paths),
+        "using_uploaded_imports": bool(paths) and all(os.path.abspath(path).startswith(import_root) for path in paths),
+        "sources": [
+            {
+                "name": os.path.basename(path),
+                "path": path,
+                "last_modified": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(),
+                "size": os.path.getsize(path),
+            }
+            for path in paths
+        ],
+    }
+
+
+def build_mtbf_work_order_history_payload():
+    payload = load_work_order_downtime()
+    records = []
+    years = set()
+    months = set()
+
+    for row in payload.get("records") or []:
+        start_time = row.get("actual_start_time") or row.get("maintenance_start_time") or row.get("start_time")
+        end_time = row.get("actual_end_time") or row.get("maintenance_end_time") or row.get("end_time")
+        start_dt = parse_iso_datetime(start_time)
+        if start_dt is not None:
+            years.add(str(start_dt.year))
+            months.add(f"{start_dt.year}-{start_dt.month:02d}")
+
+        records.append(
+            {
+                "asset_id": row.get("asset_id"),
+                "machine_group": row.get("machine_group") or row.get("machine_name_display") or row.get("machine_name"),
+                "criticality": row.get("criticality"),
+                "raw_criticality": row.get("raw_criticality"),
+                "start_time": start_time,
+                "end_time": end_time,
+                "actual_start_time": row.get("actual_start_time"),
+                "actual_end_time": row.get("actual_end_time"),
+                "work_order_id": row.get("work_order_id"),
+            }
+        )
+
+    return {
+        "available": payload.get("available", False),
+        "last_synced": payload.get("last_synced"),
+        "years": sorted(years, reverse=True),
+        "months": sorted(months, reverse=True),
+        "work_order_count": len(records),
+        "work_orders": records,
+        "sources": get_work_order_import_status().get("sources", []),
+    }
+
+
+def get_first_present(row, *names):
+    for name in names:
+        if name in row and not pd.isna(row.get(name)):
+            value = row.get(name)
+            if str(value).strip():
+                return value
+    return None
+
+
+def has_present_value(value):
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(str(value).strip())
+
+
+def parse_work_order_datetime(value, end_of_day=False):
+    if value is None or pd.isna(value):
+        return None
+    parsed = pd.to_datetime(value, errors="coerce", dayfirst=False)
+    if pd.isna(parsed):
+        parsed = pd.to_datetime(value, errors="coerce", dayfirst=True)
+    if pd.isna(parsed):
+        return None
+    dt = parsed.to_pydatetime()
+    if end_of_day and dt.hour == 0 and dt.minute == 0 and dt.second == 0 and dt.microsecond == 0:
+        dt = dt.replace(hour=23, minute=59, second=59)
+    return dt
+
+
+def parse_work_order_datetime_with_quality(value, end_of_day=False):
+    if not has_present_value(value):
+        return None, False
+    parsed = parse_work_order_datetime(value, end_of_day=end_of_day)
+    return parsed, parsed is None
+
+
+def normalize_lifecycle_state(value):
+    return re.sub(r"\s+", " ", clean_ascii_text(value).strip().lower())
+
+
+def is_new_lifecycle(value):
+    return normalize_lifecycle_state(value) == "new"
+
+
+def is_in_progress_lifecycle(value):
+    return normalize_lifecycle_state(value).replace(" ", "") == "inprogress"
+
+
+def is_finished_lifecycle(value):
+    return normalize_lifecycle_state(value) == "finished"
+
+
+def is_review_lifecycle(value):
+    normalized = normalize_lifecycle_state(value)
+    return normalized in {"confirm", "rework", "re work", "rejected", "reject"}
+
+
+def calculate_acknowledgement_status(status, work_order_id):
+    has_work_order = has_present_value(work_order_id)
+    if is_new_lifecycle(status) and not has_work_order:
+        return "Not Acknowledged"
+    if is_in_progress_lifecycle(status) and has_work_order:
+        return "Acknowledged / In Progress"
+    if is_finished_lifecycle(status):
+        return "Closed"
+    return "Review"
+
+
+def build_work_order_quality_flags(
+    status,
+    request_created_raw,
+    request_created_time,
+    request_created_invalid,
+    actual_start_raw,
+    actual_start_time,
+    actual_start_invalid,
+    actual_end_raw,
+    actual_end_time,
+    actual_end_invalid,
+):
+    # Dynamics lifecycle rules keep acknowledgement, TTR, and reliability history separate.
+    flags = []
+    if request_created_invalid or actual_start_invalid or actual_end_invalid:
+        flags.append("Invalid date format")
+    if not request_created_time:
+        flags.append("Missing raised date")
+    if is_finished_lifecycle(status):
+        if not actual_start_time:
+            flags.append("Missing start date for finished MR")
+        if not actual_end_time:
+            flags.append("Missing finished date for finished MR")
+        if actual_start_time and actual_end_time and actual_end_time < actual_start_time:
+            flags.append("Finished date before start date")
+        if request_created_time and actual_end_time and actual_end_time < request_created_time:
+            flags.append("Finished date before raised date")
+    elif is_new_lifecycle(status) or is_in_progress_lifecycle(status):
+        if has_present_value(actual_end_raw) and actual_end_time:
+            flags.append("Unexpected finished date for New/In Progress MR")
+    else:
+        flags.append("Review status")
+    return flags or ["Valid"]
+
+
+def import_work_order_file(file_storage, replace=True):
+    filename = os.path.basename(getattr(file_storage, "filename", "") or "")
+    extension = os.path.splitext(filename)[1].lower()
+    if extension not in WORK_ORDER_IMPORT_EXTENSIONS:
+        return {
+            "ok": False,
+            "message": "Unsupported file type. Upload a CSV, XLSX, or XLS work order export.",
+        }
+
+    os.makedirs(WORK_ORDER_IMPORT_DIR, exist_ok=True)
+    safe_base = re.sub(r"[^A-Za-z0-9_.-]+", "_", os.path.splitext(filename)[0]).strip("._") or "work_orders"
+    target_name = f"{safe_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}{extension}"
+    target_path = os.path.join(WORK_ORDER_IMPORT_DIR, target_name)
+    file_storage.save(target_path)
+
+    try:
+        df = read_work_order_source_file(target_path)
+    except Exception as exc:
+        try:
+            os.remove(target_path)
+        except OSError:
+            pass
+        return {
+            "ok": False,
+            "message": f"Work order file could not be read: {exc}",
+        }
+
+    if replace:
+        import_root = os.path.abspath(WORK_ORDER_IMPORT_DIR)
+        for existing in get_work_order_source_paths():
+            existing_path = os.path.abspath(existing)
+            if existing_path == os.path.abspath(target_path):
+                continue
+            if existing_path.startswith(import_root):
+                try:
+                    os.remove(existing)
+                except OSError:
+                    pass
+
+    _DOWNTIME_CACHE.clear()
+    return {
+        "ok": True,
+        "message": f"Imported {len(df)} work order row(s).",
+        "file": target_name,
+        "rows": int(len(df)),
+        "columns": [str(col) for col in df.columns],
+    }
+
+
+def normalize_key(value):
+    return "".join(ch for ch in str(value).strip().lower() if ch.isalnum())
+
+
+def has_thai_text(value):
+    return bool(re.search(r"[\u0E00-\u0E7F]", str(value or "")))
+
+
+def thai_char_count(value):
+    return len(re.findall(r"[\u0E00-\u0E7F]", str(value or "")))
+
+
+def clean_ascii_text(value, fallback=""):
+    if value is None:
+        return fallback
+    try:
+        if pd.isna(value):
+            return fallback
+    except (TypeError, ValueError):
+        pass
+    text = str(value or "").replace("\ufeff", "").strip()
+    text = text.replace("Producton", "Production").replace("producton", "Production")
+    text = text.replace("Buiding", "Building").replace("buiding", "Building")
+    text = re.sub(r"[^\x20-\x7E]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -_/")
+    return text or fallback
+
+
+def clean_unicode_text(value, fallback=""):
+    if value is None:
+        return fallback
+    try:
+        if pd.isna(value):
+            return fallback
+    except (TypeError, ValueError):
+        pass
+    text = str(value or "").replace("\ufeff", " ").strip()
+    text = text.replace("Producton", "Production").replace("producton", "Production")
+    text = text.replace("Buiding", "Building").replace("buiding", "Building")
+    text = re.sub(r"\s+", " ", text).strip(" -_/")
+    return text or fallback
+
+
+_TRANSLATION_CACHE_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "translation_cache.json"))
+_translation_cache: dict[str, str] = {}
+_translation_cache_dirty = False
+_translation_cache_mtime = None
+_translation_lock = threading.Lock()
+_translation_pending: set = set()
+_translation_worker_active = False
+_argos_translate_module = None
+# Clear downtime payload cache every N background translations so browsers pick up new translations.
+_BG_TRANSLATE_CLEAR_EVERY = 200
+
+
+def _load_translation_cache():
+    global _translation_cache, _translation_cache_mtime
+    for path in (_TRANSLATION_CACHE_FILE, _TRANSLATION_CACHE_FILE + ".tmp"):
+        try:
+            if os.path.exists(path):
+                with open(path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and data:
+                    _translation_cache = data
+                    _translation_cache_mtime = os.path.getmtime(path)
+                    return
+        except Exception:
+            pass
+    _translation_cache = {}
+    _translation_cache_mtime = None
+
+
+def _save_translation_cache():
+    global _translation_cache_dirty
+    if not _translation_cache_dirty:
+        return
+    try:
+        with _translation_lock:
+            snapshot = dict(_translation_cache)
+            _translation_cache_dirty = False
+        tmp_path = _TRANSLATION_CACHE_FILE + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _TRANSLATION_CACHE_FILE)
+    except Exception:
+        pass
+
+
+_load_translation_cache()
+
+
+def _refresh_translation_cache_if_changed():
+    """Pick up translations saved by the background worker without requiring a backend restart."""
+    try:
+        if not os.path.exists(_TRANSLATION_CACHE_FILE):
+            return
+        mtime = os.path.getmtime(_TRANSLATION_CACHE_FILE)
+        if _translation_cache_mtime is None or mtime > _translation_cache_mtime:
+            _load_translation_cache()
+    except Exception:
+        pass
+
+
+def _clean_translation_output(value: str) -> str:
+    text = clean_unicode_text(value)
+    text = re.sub(r"\bAir\s*blast\s*(\d+)", r"Air Blast \1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bAir\s*blast\s+one\b", "Air Blast 1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bBratt\s*Pan\s*(\d+)", r"Bratt Pan \1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\bCold\s*(\d+)", r"Cold Room \1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+([,./)])", r"\1", text)
+    text = re.sub(r"([(])\s+", r"\1", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _translate_with_argos(text: str) -> str:
+    """Offline Thai-to-English fallback using the downloaded Argos model."""
+    global _argos_translate_module
+    if _argos_translate_module is False:
+        return ""
+    try:
+        if _argos_translate_module is None:
+            import argostranslate.translate as argos_translate
+            _argos_translate_module = argos_translate
+        translated = _argos_translate_module.translate(text, "th", "en")
+        return _clean_translation_output(translated)
+    except Exception:
+        _argos_translate_module = False
+        return ""
+
+
+def _bg_translation_worker():
+    """Daemon thread: drains _translation_pending using the Google Translate API."""
+    global _translation_worker_active, _translation_cache_dirty
+    completed = 0
+    while True:
+        with _translation_lock:
+            if not _translation_pending:
+                _translation_worker_active = False
+                break
+            text = next(iter(_translation_pending))
+            _translation_pending.discard(text)
+
+        if text in _translation_cache:
+            continue
+
+        translated = ""
+        try:
+            result = _GoogleTranslator(source="th", target="en").translate(text)
+            translated = _clean_translation_output(str(result or text).strip())
+        except Exception:
+            translated = _translate_with_argos(text)
+
+        if translated:
+            with _translation_lock:
+                _translation_cache[text] = translated
+                _translation_cache_dirty = True
+            completed += 1
+
+        if completed > 0 and completed % _BG_TRANSLATE_CLEAR_EVERY == 0:
+            _save_translation_cache()
+            _DOWNTIME_CACHE.clear()
+
+    _save_translation_cache()
+    if completed > 0:
+        _DOWNTIME_CACHE.clear()
+
+
+def _queue_background_translation(text: str) -> None:
+    """Add text to the background translation queue and start the worker if idle."""
+    global _translation_worker_active
+    if not _DEEP_TRANSLATOR_AVAILABLE:
+        return
+    with _translation_lock:
+        _translation_pending.add(text)
+        if _translation_worker_active:
+            return
+        _translation_worker_active = True
+    t = threading.Thread(target=_bg_translation_worker, daemon=True, name="translate-bg")
+    t.start()
+
+
+def _local_dict_translate(text: str) -> str:
+    """Best-effort partial translation using the local dictionary (instant, offline)."""
+    translated = text
+    for thai, english in sorted(THAI_MAINTENANCE_TRANSLATIONS.items(), key=lambda item: len(item[0]), reverse=True):
+        translated = translated.replace(thai, f" {english} ")
+    translated = re.sub(r"\bAir\s*blast\s*(\d+)", r"Air Blast \1", translated, flags=re.IGNORECASE)
+    translated = re.sub(r"\bFreezer\b", "freezer", translated, flags=re.IGNORECASE)
+    translated = re.sub(r"\bChiller\b", "chiller", translated, flags=re.IGNORECASE)
+    translated = re.sub(r"\bCold\b", "cold room / cold area", translated, flags=re.IGNORECASE)
+    return _clean_translation_output(translated)
+
+
+def translate_maintenance_description(value):
+    original = clean_unicode_text(value)
+    if not original:
+        return ""
+    if not has_thai_text(original):
+        return original
+    _refresh_translation_cache_if_changed()
+    # Return cached translation instantly.
+    cached = _translation_cache.get(original)
+    if cached is not None:
+        return _clean_translation_output(cached)
+    # Not yet cached: queue for background Google Translate and return local-dict result now.
+    _queue_background_translation(original)
+    return _local_dict_translate(original)
+
+
+THAI_MAINTENANCE_TRANSLATIONS = {
+    "แรงดันน้ำยาต่ำ": "refrigerant pressure low",
+    "แรงดันน้ำยา": "refrigerant pressure",
+    "ตรวจเช็ค": "inspect / check",
+    "น้ำรั่ว": "water leaking",
+    "ไม่ทำงาน": "not working",
+    "ไม่ติด": "not turning on / not lighting",
+    "หลอดไฟ": "light bulb",
+    "สายยาง": "hose",
+    "ก๊อกน้ำ": "water tap",
+    "ก็อกน้ำ": "water tap",
+    "น้ำยา": "refrigerant",
+    "เช็ค": "check",
+    "แก้ไข": "repair / fix",
+    "เปลี่ยน": "replace",
+    "ซ่อม": "repair",
+    "พัง": "broken / faulty",
+    "เสีย": "faulty",
+    "รั่ว": "leaking",
+    "ห้อง": "room",
+    "ประตู": "door",
+    "ไฟ": "light / electricity",
+    "ตู้": "cabinet / unit",
+    "คอมเพรสเซอร์": "compressor",
+    "คอม": "compressor",
+    "คอยล์": "coil",
+    "พัดลม": "fan",
+    "มอเตอร์": "motor",
+    "ปั๊ม": "pump",
+    "วาล์ว": "valve",
+    "ท่อ": "pipe",
+    "สตีม": "steam",
+    "หลุด": "loose / disconnected",
+    "ตก": "fallen / dropped",
+    "ราง": "rail",
+    "ฝั่งดิบ": "raw side",
+    "ฝั่งสุก": "cooked side",
+    "ทางไป": "to",
+    "จุด": "points",
+}
+
+
+def clean_job_trade(value):
+    cleaned = clean_ascii_text(value, "Work Order")
+    normalized = normalize_key(cleaned)
+    mapping = {
+        "building": "Building",
+        "aircondition": "Air Condition",
+        "electricalsystem": "Electrical System",
+        "coolingmachine": "Cooling Machine",
+        "productionmachine": "Production Machine",
+        "toolandequipment": "Tool and Equipment",
+        "watersystem": "Water System",
+        "utilitymachine": "Utility Machine",
+    }
+    return mapping.get(normalized, cleaned.title() if cleaned.islower() else cleaned)
+
+
+def parse_ttr_hours(value):
+    if value is None or pd.isna(value):
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    is_negative = bool(re.match(r"^-\s*\d", text))
+
+    numeric = pd.to_numeric(text, errors="coerce")
+    if pd.notna(numeric):
+        return float(numeric)
+
+    hours = 0.0
+    minutes = 0.0
+    hour_match = re.search(r"([\d.]+)\s*(?:hr|hour|hours|h)\b", text)
+    minute_match = re.search(r"([\d.]+)\s*(?:min|minute|minutes|m)\b", text)
+    if hour_match:
+        hours = float(hour_match.group(1))
+    if minute_match:
+        minutes = float(minute_match.group(1))
+    if not hour_match and not minute_match:
+        compact = re.findall(r"[\d.]+", text)
+        if compact:
+            hours = float(compact[0])
+
+    total = hours + (minutes / 60)
+    if is_negative:
+        return -abs(total) if total else None
+    return total if total > 0 else None
+
+
+def parse_work_order_date_parts(row, suffix="", default_year=None):
+    year_value = row.get(f"Year{suffix}")
+    month_value = row.get(f"Month{suffix}")
+    day_value = row.get(f"Day{suffix}")
+
+    year = pd.to_numeric(year_value, errors="coerce")
+    day = pd.to_numeric(day_value, errors="coerce")
+    if pd.isna(month_value) or pd.isna(day):
+        return None
+    if pd.isna(year):
+        if default_year is None:
+            return None
+        year = default_year
+
+    parsed = pd.to_datetime(
+        f"{int(day)} {str(month_value).strip()} {int(year)}",
+        errors="coerce",
+        dayfirst=True,
+    )
+    if pd.isna(parsed):
+        return None
+    return parsed.to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+def infer_risk_area(*values):
+    haystack = " ".join(str(value or "") for value in values).lower()
+    if "high risk" in haystack:
+        return "High Risk"
+    if "medium risk" in haystack or "มีเดียม" in haystack:
+        return "Medium Risk"
+    if "low risk" in haystack:
+        return "Low Risk"
+    return None
+
+
+def extract_english_description_name(description):
+    cleaned = clean_ascii_text(description)
+    if not cleaned:
+        return ""
+
+    stop_words = {
+        "fix", "repair", "install", "replace", "change", "check", "broken", "leak",
+        "abnormal", "not", "working", "work", "area", "side", "room",
+    }
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9-]*|\d+", cleaned)
+    useful = [token for token in tokens if token.lower() not in stop_words]
+    if not useful:
+        return ""
+    return " ".join(useful[:5])
+
+
+def match_known_asset(*values):
+    haystack = normalize_key(" ".join(str(value or "") for value in values))
+    if not haystack:
+        return None
+
+    best_match = None
+    best_score = 0
+    for asset in ASSET_CONFIGS:
+        candidates = [asset.get("machine_code"), asset.get("machine_name")]
+        for candidate in candidates:
+            key = normalize_key(candidate)
+            if not key:
+                continue
+            if key in haystack or haystack in key:
+                score = len(key)
+                if score > best_score:
+                    best_score = score
+                    best_match = asset
+    return best_match
+
+
+def parse_dashboard_timestamp(value):
+    if value is None or pd.isna(value):
+        return pd.NaT
+
+    cleaned = str(value).replace(" ICT", "").strip()
+    parsed = pd.to_datetime(cleaned, format="%d-%b-%y %I:%M:%S %p", errors="coerce")
+    if pd.isna(parsed):
+        parsed = pd.to_datetime(cleaned, dayfirst=True, errors="coerce")
+    return parsed
+
+
+def get_path_signature(path):
+    try:
+        stat = os.stat(path)
+    except (FileNotFoundError, OSError):
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def percentile(values, fraction):
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = int(round((len(ordered) - 1) * fraction))
+    return ordered[max(0, min(index, len(ordered) - 1))]
+
+
+def format_hours(hours):
+    if hours is None:
+        return None
+    if hours < 1:
+        return f"{round(hours * 60)} min"
+    if hours >= 24:
+        days = max(1, round(hours / 24))
+        return f"{days} {'day' if days == 1 else 'days'}"
+
+    whole_hours = int(hours)
+    minutes = round((hours - whole_hours) * 60)
+    if minutes == 60:
+        return f"{whole_hours + 1} hr"
+    if minutes > 0:
+        return f"{whole_hours} hr {minutes} min"
+    return f"{whole_hours} hr"
+
+
+def load_numeric_timeseries(file_name, preferred_value_names=None):
+    path = os.path.join(DATA_DIR, file_name)
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["dt", "value"])
+
+    preferred = [normalize_key(name) for name in (preferred_value_names or [])]
+
+    for skiprows in (0, 1, 2):
+        try:
+            df = pd.read_csv(path, skiprows=skiprows, encoding="utf-8-sig")
+            df.columns = [str(col).strip().replace("\ufeff", "") for col in df.columns]
+        except Exception:
+            continue
+
+        normalized = {normalize_key(col): col for col in df.columns if str(col).strip()}
+        time_col = next(
+            (
+                original
+                for key, original in normalized.items()
+                if key in {"timestamp", "time", "datetime", "date", "datetimestamp"} or "timestamp" in key
+            ),
+            None,
+        )
+        if not time_col:
+            continue
+
+        meta_keys = {"timestamp", "time", "datetime", "date", "trendflags", "trendflagstag", "status", "statustag"}
+        value_col = next((normalized[name] for name in preferred if name in normalized), None)
+        if value_col is None:
+            value_col = next(
+                (
+                    original
+                    for key, original in normalized.items()
+                    if key not in meta_keys and "timestamp" not in key
+                ),
+                None,
+            )
+        if value_col is None:
+            continue
+
+        working = df[[time_col, value_col]].copy()
+        working["dt"] = working[time_col].apply(parse_dashboard_timestamp)
+        working["value"] = pd.to_numeric(working[value_col], errors="coerce")
+        working = working.dropna(subset=["dt", "value"]).sort_values("dt")
+        if not working.empty:
+            return working[["dt", "value"]].reset_index(drop=True)
+
+    return pd.DataFrame(columns=["dt", "value"])
+
+
+def load_status_timeseries(file_name):
+    path = os.path.join(DATA_DIR, file_name)
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["dt", "status"])
+
+    for skiprows in (0, 1, 2):
+        try:
+            df = pd.read_csv(path, skiprows=skiprows, encoding="utf-8-sig")
+            df.columns = [str(col).strip().replace("\ufeff", "") for col in df.columns]
+        except Exception:
+            continue
+
+        normalized = {normalize_key(col): col for col in df.columns if str(col).strip()}
+        time_col = next(
+            (
+                original
+                for key, original in normalized.items()
+                if key in {"timestamp", "time", "datetime", "date", "datetimestamp"} or "timestamp" in key
+            ),
+            None,
+        )
+        status_col = next((original for key, original in normalized.items() if key == "status" or "status" in key), None)
+        if not time_col or not status_col:
+            continue
+
+        working = df[[time_col, status_col]].copy()
+        working["dt"] = working[time_col].apply(parse_dashboard_timestamp)
+        working["status"] = working[status_col].astype(str).str.strip()
+        working = working.dropna(subset=["dt"]).sort_values("dt")
+        if not working.empty:
+            return working[["dt", "status"]].reset_index(drop=True)
+
+    return pd.DataFrame(columns=["dt", "status"])
+
+
+def load_freezer_activity_series(file_name):
+    path = os.path.join(DATA_DIR, file_name)
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=["dt", "value"])
+
+    try:
+        df = pd.read_csv(path, skiprows=[1], encoding="latin1")
+        df.columns = [str(col).strip().lower().replace(" ", "_") for col in df.columns]
+    except Exception:
+        return pd.DataFrame(columns=["dt", "value"])
+
+    if "time" not in df.columns:
+        return pd.DataFrame(columns=["dt", "value"])
+
+    base_date = datetime.fromtimestamp(os.path.getmtime(path)).date()
+    df["parsed_time"] = pd.to_datetime(df["time"], format="%H:%M:%S", errors="coerce")
+    df["main_drive"] = pd.to_numeric(df.get("main_drive"), errors="coerce")
+    df["sub_drive"] = pd.to_numeric(df.get("sub_drive"), errors="coerce")
+    df["value"] = df[["main_drive", "sub_drive"]].max(axis=1, skipna=True)
+    df = df.dropna(subset=["parsed_time", "value"]).copy()
+    if df.empty:
+        return pd.DataFrame(columns=["dt", "value"])
+
+    df["dt"] = df["parsed_time"].apply(lambda ts: datetime.combine(base_date, ts.time()))
+    return df[["dt", "value"]].sort_values("dt").reset_index(drop=True)
+
+
+def build_intervals(series_df, kind):
+    if series_df is None or series_df.empty:
+        return []
+
+    ordered = series_df.sort_values("dt").reset_index(drop=True)
+    intervals = []
+
+    if kind == "cumulative":
+        for index in range(1, len(ordered)):
+            prev_row = ordered.iloc[index - 1]
+            curr_row = ordered.iloc[index]
+            start_dt = pd.Timestamp(prev_row["dt"])
+            end_dt = pd.Timestamp(curr_row["dt"])
+            if start_dt.date() != end_dt.date():
+                continue
+
+            interval_minutes = (end_dt - start_dt).total_seconds() / 60
+            if interval_minutes <= 0 or interval_minutes > 240:
+                continue
+
+            delta_value = max(float(curr_row["value"]) - float(prev_row["value"]), 0.0)
+            intervals.append(
+                {
+                    "date": end_dt.date().isoformat(),
+                    "start": start_dt,
+                    "end": end_dt,
+                    "interval_minutes": interval_minutes,
+                    "metric": delta_value,
+                }
+            )
+        return intervals
+
+    for index in range(len(ordered) - 1):
+        curr_row = ordered.iloc[index]
+        next_row = ordered.iloc[index + 1]
+        start_dt = pd.Timestamp(curr_row["dt"])
+        end_dt = pd.Timestamp(next_row["dt"])
+        if start_dt.date() != end_dt.date():
+            continue
+
+        interval_minutes = (end_dt - start_dt).total_seconds() / 60
+        if interval_minutes <= 0 or interval_minutes > 240:
+            continue
+
+        intervals.append(
+            {
+                "date": start_dt.date().isoformat(),
+                "start": start_dt,
+                "end": end_dt,
+                "interval_minutes": interval_minutes,
+                "metric": max(float(curr_row["value"]), 0.0),
+            }
+        )
+
+    return intervals
+
+
+def derive_activity_threshold(intervals, kind):
+    if not intervals:
+        return None
+
+    if kind == "cumulative":
+        # For cumulative counters, zero-delta intervals are the only reliable
+        # downtime signal in the imported data.
+        return 0.0
+
+    positive_values = [row["metric"] for row in intervals if row["metric"] > 0]
+    if len(positive_values) < 5:
+        return 0.0
+
+    median_positive = percentile(positive_values, 0.5) or 0.0
+    return round(median_positive * 0.05, 3)
+
+
+def get_operating_hours_for_system(intervals, threshold):
+    windows = {}
+    by_date = {}
+    for row in intervals:
+        by_date.setdefault(row["date"], []).append(row)
+
+    for date_key, rows in by_date.items():
+        active_rows = [row for row in rows if row["metric"] > (threshold or 0)]
+        if not active_rows:
+            continue
+        windows[date_key] = {
+            "start": min(row["start"] for row in active_rows),
+            "end": max(row["end"] for row in active_rows),
+        }
+    return windows
+
+
+def interval_overlaps_window(interval_row, window):
+    if not window:
+        return False
+    return min(interval_row["end"], window["end"]) > max(interval_row["start"], window["start"])
+
+
+def group_consecutive_downtime_intervals(intervals):
+    if not intervals:
+        return []
+
+    ordered = sorted(intervals, key=lambda row: row["start"])
+    median_interval = percentile([row["interval_minutes"] for row in ordered], 0.5) or 0
+    max_gap_minutes = max(median_interval * 1.5, 1)
+
+    groups = []
+    current = None
+
+    for row in ordered:
+        if current is None:
+            current = {
+                "start": row["start"],
+                "end": row["end"],
+                "duration_minutes": row["interval_minutes"],
+            }
+            continue
+
+        gap_minutes = (row["start"] - current["end"]).total_seconds() / 60
+        if gap_minutes <= max_gap_minutes:
+            current["end"] = max(current["end"], row["end"])
+            current["duration_minutes"] += row["interval_minutes"]
+        else:
+            groups.append(current)
+            current = {
+                "start": row["start"],
+                "end": row["end"],
+                "duration_minutes": row["interval_minutes"],
+            }
+
+    if current is not None:
+        groups.append(current)
+
+    return groups
+
+
+def get_min_downtime_minutes(kind, median_interval_minutes):
+    if kind == "freezer_activity":
+        return max(median_interval_minutes * 5, 10)
+    return max(median_interval_minutes * 2, 30)
+
+
+def build_confirmed_downtime_candidates(rows, threshold, kind):
+    if not rows:
+        return []
+
+    median_interval = percentile([row["interval_minutes"] for row in rows], 0.5) or 0
+    minimum_duration = get_min_downtime_minutes(kind, median_interval)
+    active_flags = [row["metric"] > (threshold or 0) for row in rows]
+
+    flagged = []
+    block = []
+
+    for index, row in enumerate(rows):
+        if active_flags[index]:
+            if block:
+                flagged.extend(_confirm_candidate_block(block, active_flags, rows, minimum_duration))
+                block = []
+            continue
+        block.append(index)
+
+    if block:
+        flagged.extend(_confirm_candidate_block(block, active_flags, rows, minimum_duration))
+
+    return flagged
+
+
+def _confirm_candidate_block(block_indexes, active_flags, rows, minimum_duration):
+    has_active_before = any(active_flags[:block_indexes[0]])
+    has_active_after = any(active_flags[block_indexes[-1] + 1 :])
+    if not (has_active_before and has_active_after):
+        return []
+
+    block_rows = [rows[index] for index in block_indexes]
+    duration_minutes = sum(row["interval_minutes"] for row in block_rows)
+    if duration_minutes < minimum_duration:
+        return []
+
+    return block_rows
+
+
+def is_production_critical(machine_name):
+    normalized = str(machine_name or "").strip().lower()
+    if not normalized:
+        return False
+    return "combi" in normalized or "brattpan" in normalized
+
+
+def status_indicates_downtime(status_value):
+    normalized = str(status_value or "").strip().lower()
+    return "down" in normalized or "fault" in normalized
+
+
+def detect_status_downtime_events(asset_config):
+    status_df = load_status_timeseries(asset_config["file_name"])
+    if status_df.empty:
+        return [], [], None, None
+
+    latest_dt = pd.Timestamp(status_df.iloc[-1]["dt"])
+    ordered = status_df.sort_values("dt").reset_index(drop=True)
+    intervals = []
+    interval_minutes = []
+
+    for index in range(len(ordered) - 1):
+        curr_row = ordered.iloc[index]
+        next_row = ordered.iloc[index + 1]
+        start_dt = pd.Timestamp(curr_row["dt"])
+        end_dt = pd.Timestamp(next_row["dt"])
+        minutes = (end_dt - start_dt).total_seconds() / 60
+        if minutes <= 0 or minutes > 240:
+            continue
+        interval_minutes.append(minutes)
+        intervals.append(
+            {
+                "start": start_dt,
+                "end": end_dt,
+                "status": curr_row["status"],
+                "is_down": status_indicates_downtime(curr_row["status"]),
+                "interval_minutes": minutes,
+            }
+        )
+
+    median_interval = percentile(interval_minutes, 0.5) or 15
+    candidate_rows = []
+    event_rows = []
+    active_block = []
+
+    def flush_block():
+        nonlocal active_block
+        if not active_block:
+            return
+        duration_minutes = sum(row["interval_minutes"] for row in active_block)
+        event_rows.append(
+            {
+                "system": asset_config["system"],
+                "machine_code": asset_config["machine_code"],
+                "machine_name": asset_config["machine_name"],
+                "area": asset_config["area"],
+                "source": STATUS_DERIVED_SOURCE,
+                "status": "Downtime Detected",
+                "detection_type": "Fault / Down status",
+                "start_time": active_block[0]["start"].isoformat(),
+                "end_time": active_block[-1]["end"].isoformat(),
+                "duration_hours": round(duration_minutes / 60, 3),
+                "is_critical": is_production_critical(asset_config["machine_name"]),
+            }
+        )
+        active_block = []
+
+    for row in intervals:
+        if row["is_down"]:
+            candidate_rows.append(
+                {
+                    "date": row["start"].date().isoformat(),
+                    "system": asset_config["system"],
+                    "machine_code": asset_config["machine_code"],
+                    "machine_name": asset_config["machine_name"],
+                    "area": asset_config["area"],
+                    "source": STATUS_DERIVED_SOURCE,
+                    "start_time": row["start"].isoformat(),
+                    "end_time": row["end"].isoformat(),
+                    "duration_hours": round(row["interval_minutes"] / 60, 3),
+                    "within_operating_hours": True,
+                }
+            )
+            if active_block:
+                gap_minutes = (row["start"] - active_block[-1]["end"]).total_seconds() / 60
+                if gap_minutes <= max(median_interval * 1.5, 1):
+                    active_block.append(row)
+                else:
+                    flush_block()
+                    active_block = [row]
+            else:
+                active_block = [row]
+        else:
+            flush_block()
+
+    flush_block()
+    return candidate_rows, event_rows, latest_dt, None
+
+
+def detect_asset_downtime_events(asset_config):
+    status_candidates, status_events, status_latest_dt, _ = detect_status_downtime_events(asset_config)
+    if status_events or status_latest_dt is not None:
+        return status_candidates, status_events, status_latest_dt, None
+
+    if asset_config["series_kind"] not in SUPPORTED_EVENT_SERIES_KINDS:
+        if asset_config["series_kind"] == "freezer_activity":
+            series_df = load_freezer_activity_series(asset_config["file_name"])
+        else:
+            series_df = load_numeric_timeseries(asset_config["file_name"], asset_config.get("preferred_values"))
+
+        latest_dt = pd.Timestamp(series_df.iloc[-1]["dt"]) if not series_df.empty else None
+        return [], [], latest_dt, None
+
+    if asset_config["series_kind"] == "freezer_activity":
+        series_df = load_freezer_activity_series(asset_config["file_name"])
+    else:
+        series_df = load_numeric_timeseries(asset_config["file_name"], asset_config.get("preferred_values"))
+
+    if series_df.empty:
+        return [], [], None, None
+
+    intervals = build_intervals(series_df, asset_config["series_kind"])
+    if not intervals:
+        latest_dt = pd.Timestamp(series_df.iloc[-1]["dt"])
+        return [], [], latest_dt, None
+
+    threshold = derive_activity_threshold(intervals, asset_config["series_kind"])
+    windows = get_operating_hours_for_system(intervals, threshold)
+    latest_dt = pd.Timestamp(series_df.iloc[-1]["dt"])
+
+    candidate_rows = []
+    event_rows = []
+    detection_type = "Zero activity" if (threshold or 0) <= 0 else "Below activity threshold"
+
+    by_date = {}
+    for row in intervals:
+        by_date.setdefault(row["date"], []).append(row)
+
+    for date_key, rows in by_date.items():
+        window = windows.get(date_key)
+        if not window:
+            continue
+
+        in_window_rows = [row for row in rows if interval_overlaps_window(row, window)]
+        confirmed_candidates = build_confirmed_downtime_candidates(
+            in_window_rows,
+            threshold,
+            asset_config["series_kind"],
+        )
+
+        for row in confirmed_candidates:
+            candidate_rows.append(
+                {
+                    "date": date_key,
+                    "system": asset_config["system"],
+                    "machine_code": asset_config["machine_code"],
+                    "machine_name": asset_config["machine_name"],
+                    "area": asset_config["area"],
+                    "source": asset_config["source"],
+                    "start_time": row["start"].isoformat(),
+                    "end_time": row["end"].isoformat(),
+                    "duration_hours": round(row["interval_minutes"] / 60, 3),
+                    "within_operating_hours": True,
+                }
+            )
+
+        for grouped in group_consecutive_downtime_intervals(confirmed_candidates):
+            event_rows.append(
+                {
+                    "system": asset_config["system"],
+                    "machine_code": asset_config["machine_code"],
+                    "machine_name": asset_config["machine_name"],
+                    "area": asset_config["area"],
+                    "source": asset_config["source"],
+                    "status": "Downtime Detected",
+                    "detection_type": detection_type,
+                    "start_time": grouped["start"].isoformat(),
+                    "end_time": grouped["end"].isoformat(),
+                    "duration_hours": round(grouped["duration_minutes"] / 60, 3),
+                    "is_critical": is_production_critical(asset_config["machine_name"]),
+                }
+            )
+
+    operating_window = None
+    latest_date_key = latest_dt.date().isoformat()
+    if latest_date_key in windows:
+        latest_window = windows[latest_date_key]
+        operating_window = {
+            "start": latest_window["start"].strftime("%H:%M"),
+            "end": latest_window["end"].strftime("%H:%M"),
+        }
+
+    return candidate_rows, event_rows, latest_dt, operating_window
+
+
+def load_work_order_downtime():
+    records = []
+    source_paths = []
+    read_errors = []
+
+    work_order_sources = get_work_order_source_paths()
+
+    for exported_path in (path for path in work_order_sources if os.path.exists(path)):
+        source_paths.append(exported_path)
+        try:
+            df = read_work_order_source_file(exported_path)
+            file_end_time = datetime.fromtimestamp(os.path.getmtime(exported_path))
+            default_year = infer_default_year_from_path(exported_path)
+            has_start_date = {"Month", "Day"}.issubset(set(df.columns))
+            has_end_date = {"Month.1", "Day.1"}.issubset(set(df.columns))
+            has_request_created_column = "Request Created Date" in df.columns
+
+            for _, row in df.iterrows():
+                raw_ttr_value = get_first_present(row, "TTR(hr)", "TTR", "downtime_hours")
+                imported_ttr_hours = parse_ttr_hours(raw_ttr_value)
+                if imported_ttr_hours is None:
+                    ttr_minutes = pd.to_numeric(get_first_present(row, "TTR Minutes", "TTR(min)", "TTR Minutes "), errors="coerce")
+                    if pd.notna(ttr_minutes) and float(ttr_minutes) > 0:
+                        imported_ttr_hours = float(ttr_minutes) / 60
+
+                request_created_raw = get_first_present(row, "Request Created Date")
+                if not has_request_created_column:
+                    request_created_raw = get_first_present(row, "Actual Start Date", "Maintenance Start Date", "Start Date")
+                request_created_time, request_created_invalid = parse_work_order_datetime_with_quality(request_created_raw)
+
+                actual_start_raw = get_first_present(row, "Actual Start Date", "Maintenance Start Date", "Start Date")
+                actual_start_time, actual_start_invalid = parse_work_order_datetime_with_quality(actual_start_raw)
+                if actual_start_time is None and has_start_date:
+                    actual_start_time = parse_work_order_date_parts(row, "", default_year=default_year)
+                    actual_start_invalid = False
+
+                actual_end_raw = get_first_present(row, "Actual End Date", "Maintenance End Date", "End Date", "Closed Date", "Completed Date")
+                actual_end_time, actual_end_invalid = parse_work_order_datetime_with_quality(actual_end_raw, end_of_day=True)
+                if actual_end_time is None and has_end_date:
+                    actual_end_time = parse_work_order_date_parts(row, ".1", default_year=default_year)
+                    if actual_end_time is not None:
+                        actual_end_time = actual_end_time.replace(hour=23, minute=59, second=59)
+                    actual_end_invalid = False
+
+                raw_machine_id = get_first_present(row, "Machine ID", "machine_code", "Asset ID", "AssetID") or ""
+                raw_machine_name = get_first_present(row, "Machine Name", "machine_name", "Asset Name", "Equipment Name") or ""
+                description = get_first_present(row, "Description", "Notes", "Remarks") or ""
+                matched_asset = match_known_asset(raw_machine_id, raw_machine_name, description)
+                risk_area = infer_risk_area(raw_machine_name, description)
+                job_trade = clean_job_trade(get_first_present(row, "JobTrade", "Job Trade", "system", "System"))
+                maintenance_job_type = clean_unicode_text(get_first_present(row, "JobTypeId", "Maintenance job type", "Maintenance job type variant", "Maintenance request type"))
+                raw_location_value = get_first_present(row, "Location", "Building", "Area", "Functional location")
+                description_original = clean_unicode_text(description)
+                translated_description = translate_maintenance_description(description_original)
+                machine_equipment_name = clean_unicode_text(raw_machine_name)
+
+                if matched_asset:
+                    machine_code = matched_asset["machine_code"]
+                    machine_name = matched_asset["machine_name"]
+                    default_area = matched_asset["area"]
+                else:
+                    machine_code = clean_ascii_text(raw_machine_id, "WO-Asset")
+                    clean_machine_name = clean_ascii_text(raw_machine_name)
+                    if risk_area:
+                        machine_name = f"{risk_area} Production Area"
+                    elif clean_machine_name and not has_thai_text(raw_machine_name):
+                        machine_name = clean_machine_name
+                    else:
+                        machine_name = extract_english_description_name(description) or machine_code or "Work Order Asset"
+                    default_area = clean_ascii_text(get_first_present(row, "Location", "Building", "Area"), "Work Area")
+
+                area = risk_area or default_area or "Unassigned"
+                status = clean_ascii_text(get_first_present(row, "Request State", "Status", "request_state"), "Review")
+                work_order_id = clean_ascii_text(get_first_present(row, "WO ID", "work_order_id", "Work Order ID"))
+                maintenance_request_id = clean_ascii_text(get_first_present(row, "Request ID", "maintenance_order_id", "Request No"))
+                acknowledgement_status = calculate_acknowledgement_status(status, work_order_id)
+                data_quality_flags = build_work_order_quality_flags(
+                    status,
+                    request_created_raw,
+                    request_created_time,
+                    request_created_invalid,
+                    actual_start_raw,
+                    actual_start_time,
+                    actual_start_invalid,
+                    actual_end_raw,
+                    actual_end_time,
+                    actual_end_invalid,
+                )
+                valid_finished_record = (
+                    data_quality_flags == ["Valid"]
+                    and is_finished_lifecycle(status)
+                    and request_created_time is not None
+                    and actual_start_time is not None
+                    and actual_end_time is not None
+                    and actual_end_time >= actual_start_time
+                    and actual_end_time >= request_created_time
+                )
+
+                raw_priority = get_first_present(row, "Priority", "priority", "Priority No", "Priority Number")
+                try:
+                    priority = int(float(str(raw_priority).strip())) if raw_priority is not None else None
+                    if priority is not None and not (1 <= priority <= 10):
+                        priority = None
+                except (ValueError, TypeError):
+                    priority = None
+
+                downtime_hours = None
+                ttr_source = "excluded_status"
+                if valid_finished_record:
+                    if imported_ttr_hours is not None and imported_ttr_hours > 0:
+                        downtime_hours = imported_ttr_hours
+                        ttr_source = "imported_ttr"
+                    else:
+                        downtime_hours = (actual_end_time - actual_start_time).total_seconds() / 3600
+                        ttr_source = "date_derived"
+                elif is_finished_lifecycle(status):
+                    ttr_source = "invalid_finished_dates"
+
+                # Created date drives MR demand and open-load selection; Actual dates drive TTR/MTBF only for valid Finished MR.
+                downtime_start_time = actual_start_time if valid_finished_record else request_created_time
+                downtime_end_time = actual_end_time if valid_finished_record else None
+                maintenance_start_time = actual_start_time
+                maintenance_end_time = actual_end_time
+
+                records.append(
+                    {
+                        "system": job_trade,
+                        "machine_code": machine_code,
+                        "machine_name": machine_name,
+                        "area": area,
+                        "source": "Work Order",
+                        "status": status,
+                        "detection_type": "Work Order",
+                        "start_time": downtime_start_time.isoformat() if downtime_start_time else None,
+                        "end_time": downtime_end_time.isoformat() if downtime_end_time else None,
+                        "maintenance_start_time": maintenance_start_time.isoformat() if maintenance_start_time else None,
+                        "maintenance_end_time": maintenance_end_time.isoformat() if maintenance_end_time else None,
+                        "request_created_time": request_created_time.isoformat() if request_created_time else None,
+                        "timing_context": "Created date used for MR demand/open load; Actual start/end used for valid Finished MR",
+                        "duration_context": "Maintenance resolution time from work-order TTR" if ttr_source == "imported_ttr" else ("Maintenance resolution time derived from valid Finished start/end dates" if ttr_source == "date_derived" else "Excluded from MTTR/TTR by lifecycle or data-quality rule"),
+                        "duration_hours": round(float(downtime_hours), 3) if downtime_hours is not None else None,
+                        "ttr_source": ttr_source or "missing",
+                        "raw_ttr": raw_ttr_value,
+                        "is_critical": is_production_critical(machine_name) or area == "High Risk",
+                        "priority": priority,
+                        "service_level": clean_ascii_text(raw_priority),
+                        "work_order_id": work_order_id,
+                        "maintenance_order_id": maintenance_request_id,
+                        "started_by": clean_ascii_text(get_first_present(row, "Started By", "started_by")),
+                        "created_by": clean_ascii_text(get_first_present(row, "Created By", "created_by")),
+                        "machine_equipment_name": machine_equipment_name,
+                        "description_original": description_original,
+                        "translated_description": translated_description,
+                        "maintenance_job_type": maintenance_job_type,
+                        "raw_functional_location": clean_unicode_text(raw_location_value),
+                        "acknowledgement_status": acknowledgement_status,
+                        "data_quality_flag": "Valid" if data_quality_flags == ["Valid"] else "; ".join(data_quality_flags),
+                        "data_quality_flags": data_quality_flags,
+                        "valid_mttr_ttr": valid_finished_record,
+                        "status_category": "Open" if is_new_lifecycle(status) or is_in_progress_lifecycle(status) else ("Closed" if is_finished_lifecycle(status) else "Review"),
+                        "remarks": description_original,
+                        "raw_machine_id": clean_ascii_text(raw_machine_id),
+                        "raw_machine_name": machine_equipment_name,
+                        "raw_location": clean_unicode_text(raw_location_value),
+                        "source_path": exported_path,
+                    }
+                )
+        except Exception as exc:
+            read_errors.append(str(exc))
+
+    if not source_paths:
+        return {
+            "available": False,
+            "records": [],
+            "message": "No work order downtime source connected yet.",
+            "last_synced": None,
+        }
+
+    latest_synced = max(datetime.fromtimestamp(os.path.getmtime(path)) for path in source_paths)
+    if not records and read_errors:
+        return {
+            "available": False,
+            "records": [],
+            "message": "Work order downtime source could not be read.",
+            "last_synced": latest_synced.isoformat(),
+        }
+
+    records = enrich_work_order_records(records, DATA_DIR)
+
+    return {
+        "available": True,
+        "records": records,
+        "message": "Work order downtime source loaded.",
+        "last_synced": latest_synced.isoformat(),
+    }
+
+
+def within_period(iso_string, start_dt, end_dt):
+    dt = parse_iso_datetime(iso_string)
+    if dt is None:
+        return False
+    return start_dt <= dt <= end_dt
+
+
+def overlaps_period(start_iso, end_iso, start_dt, end_dt):
+    start_value = parse_iso_datetime(start_iso)
+    end_value = parse_iso_datetime(end_iso)
+    if start_value is None and end_value is None:
+        return False
+    if start_value is None:
+        start_value = end_value
+    if end_value is None:
+        end_value = start_value
+    return start_value <= end_dt and end_value >= start_dt
+
+
+def summarize_downtime_metrics(events, candidate_rows, reference_dt):
+    if reference_dt is None:
+        return {
+            "this_week_hours": None,
+            "this_month_hours": None,
+            "within_operating_pct": None,
+        }
+
+    week_start = (reference_dt - timedelta(days=reference_dt.weekday())).replace(hour=0, minute=0, second=0, microsecond=0)
+    week_end = week_start + timedelta(days=7)
+    month_start = reference_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if reference_dt.month == 12:
+        next_month = reference_dt.replace(year=reference_dt.year + 1, month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    else:
+        next_month = reference_dt.replace(month=reference_dt.month + 1, day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    week_hours = sum(event["duration_hours"] for event in events if within_period(event.get("start_time"), week_start, week_end))
+    month_hours = sum(event["duration_hours"] for event in events if within_period(event.get("start_time"), month_start, next_month))
+
+    candidate_in_window = sum(row["duration_hours"] for row in candidate_rows if row.get("within_operating_hours"))
+    candidate_all = sum(row["duration_hours"] for row in candidate_rows)
+    within_pct = round((candidate_in_window / candidate_all) * 100, 1) if candidate_all > 0 else None
+
+    return {
+        "this_week_hours": round(week_hours, 3),
+        "this_month_hours": round(month_hours, 3),
+        "within_operating_pct": within_pct,
+    }
+
+
+def build_asset_breakdown(events):
+    grouped = {}
+    for event in events:
+        key = event["machine_code"]
+        row = grouped.setdefault(
+            key,
+            {
+                "machine_code": event["machine_code"],
+                "machine_name": event["machine_name"],
+                "system": event["system"],
+                "area": event["area"],
+                "downtime_hours": 0.0,
+                "event_count": 0,
+                "is_critical": bool(event.get("is_critical")),
+            },
+        )
+        row["downtime_hours"] += float(event.get("duration_hours") or 0)
+        row["event_count"] += 1
+
+    rows = sorted(grouped.values(), key=lambda item: (-item["downtime_hours"], -item["event_count"], item["machine_name"]))
+    for row in rows:
+        row["downtime_hours"] = round(row["downtime_hours"], 3)
+    return rows
+
+
+def build_breakdown_rows(events, key_name):
+    grouped = {}
+    for event in events:
+        label = event.get(key_name) or "Unassigned"
+        row = grouped.setdefault(label, {"label": label, "downtime_hours": 0.0, "event_count": 0})
+        row["downtime_hours"] += float(event.get("duration_hours") or 0)
+        row["event_count"] += 1
+
+    rows = sorted(grouped.values(), key=lambda item: (-item["downtime_hours"], -item["event_count"], item["label"]))
+    for row in rows:
+        row["downtime_hours"] = round(row["downtime_hours"], 3)
+    return rows
+
+
+def build_trend_series(events, start_dt, end_dt):
+    labels = []
+    hours = []
+    counts = []
+
+    current = start_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = end_dt.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    while current <= end_date:
+        next_day = current + timedelta(days=1)
+        day_events = [event for event in events if within_period(event.get("start_time"), current, next_day)]
+        labels.append(current.strftime("%d %b"))
+        hours.append(round(sum(event["duration_hours"] for event in day_events), 3))
+        counts.append(len(day_events))
+        current = next_day
+
+    return {"labels": labels, "downtime_hours": hours, "event_counts": counts}
+
+
+def build_cache_signature(period, month_filter=None, start_filter=None, end_filter=None, work_orders_only=False):
+    signatures = [DOWNTIME_CACHE_VERSION, period, month_filter, start_filter, end_filter, bool(work_orders_only)]
+    if not work_orders_only:
+        for config in ASSET_CONFIGS:
+            signatures.append(get_path_signature(os.path.join(DATA_DIR, config["file_name"])))
+    signatures.append(get_path_signature(os.path.join(DATA_DIR, "AssetList.xlsx")))
+    signatures.append(get_path_signature(os.path.join(os.path.dirname(__file__), "AssetList.xlsx")))
+    signatures.append(get_path_signature(os.path.join(os.path.expanduser("~"), "Downloads", "AssetList.xlsx")))
+    for source_path in get_work_order_source_paths():
+        signatures.append((source_path, get_path_signature(source_path)))
+    return tuple(signatures)
+
+
+def build_downtime_payload(period=None, month=None, start=None, end=None, work_orders_only=False):
+    normalized_period = normalize_period(period)
+    normalized_month = normalize_month_filter(month)
+    custom_start = normalize_date_filter(start)
+    custom_end = normalize_date_filter(end)
+    custom_start_key = custom_start.strftime("%Y-%m-%d") if custom_start else None
+    custom_end_key = custom_end.strftime("%Y-%m-%d") if custom_end else None
+    cache_signature = build_cache_signature(normalized_period, normalized_month, custom_start_key, custom_end_key, work_orders_only)
+    cached = _DOWNTIME_CACHE.get(cache_signature)
+    if cached is not None:
+        return cached
+
+    candidate_rows = []
+    energy_events = []
+    latest_timestamps = []
+    operating_windows = []
+
+    if not work_orders_only:
+        for asset in ASSET_CONFIGS:
+            asset_candidates, asset_events, latest_dt, operating_window = detect_asset_downtime_events(asset)
+            candidate_rows.extend(asset_candidates)
+            energy_events.extend(asset_events)
+            if latest_dt is not None:
+                latest_timestamps.append(pd.Timestamp(latest_dt))
+            if operating_window:
+                operating_windows.append(
+                    {
+                        "machine_code": asset["machine_code"],
+                        "machine_name": asset["machine_name"],
+                        "system": asset["system"],
+                        "window": operating_window,
+                    }
+                )
+
+    work_order_payload = load_work_order_downtime()
+    work_order_events = list(work_order_payload["records"])
+    if work_order_payload.get("last_synced"):
+        latest_timestamps.append(pd.Timestamp(work_order_payload["last_synced"]))
+
+    reference_dt = max(latest_timestamps) if latest_timestamps else None
+    if reference_dt is None:
+        payload = {
+            "meta": {
+                "period": normalized_period,
+                "period_label": get_period_label(normalized_period),
+                "month": normalized_month,
+                "month_label": format_month_label(normalized_month) if normalized_month else "All Months",
+                "reference_end": None,
+                "last_synced": None,
+                "work_order_available": work_order_payload["available"],
+            },
+            "summary": {
+                "total_hours": None,
+                "this_week_hours": None,
+                "this_month_hours": None,
+                "event_count": 0,
+                "avg_event_hours": None,
+                "longest_event_hours": None,
+                "highest_system": None,
+                "within_operating_pct": None,
+                "energy_hours": None,
+                "work_order_hours": None,
+                "work_order_record_count": 0,
+                "energy_status": "UNAVAILABLE",
+                "energy_downtime_pct": None,
+                "expected_active_hours": None,
+                "energy_event_status": "UNAVAILABLE",
+                "energy_event_count": 0,
+                "baseline_energy_event_count": 0,
+            },
+            "alerts": [],
+            "trend": {"labels": [], "downtime_hours": [], "event_counts": []},
+            "system_breakdown": [],
+            "source_breakdown": [
+                {"label": "Status-derived", "downtime_hours": None, "available": False, "message": "No supported status/activity source is available"},
+                {
+                    "label": "Work Order",
+                    "downtime_hours": None,
+                    "available": work_order_payload["available"],
+                    "message": work_order_payload["message"],
+                },
+            ],
+            "area_breakdown": [],
+            "asset_breakdown": [],
+            "events": [],
+            "filters": {"systems": [], "areas": [], "sources": ["Status-derived", "Work Order"]},
+            "months": [],
+            "work_order_source": work_order_payload,
+            "operating_windows": [],
+            "management": {
+                "summary": {
+                    "total_downtime_hours": 0.0,
+                    "total_work_orders": 0,
+                    "overall_mttr_hours": None,
+                    "critical_downtime_hours": 0.0,
+                    "non_critical_facility_downtime_hours": 0.0,
+                    "open_work_orders": 0,
+                    "highest_mttr_machine_group": None,
+                    "highest_mttr_hours": None,
+                    "most_affected_location": None,
+                    "most_affected_location_hours": None,
+                    "critical_machine_groups_with_repeats": 0,
+                },
+                "criticality_rows": [],
+                "machine_group_rows": [],
+                "location_rows": [],
+                "trend": {"labels": [], "downtime_hours": [], "work_order_counts": [], "bucket_mode": "day"},
+                "work_orders": [],
+                "filters": {"criticalities": [], "machine_groups": [], "locations": [], "asset_ids": [], "statuses": []},
+                "alerts": [],
+                "mapping_meta": get_grouped_machine_mapping_meta(DATA_DIR),
+            },
+        }
+        _DOWNTIME_CACHE[cache_signature] = payload
+        return payload
+
+    month_options = list(reversed(build_year_month_options_from_events(work_order_events + energy_events, reference_dt)))
+
+    if normalized_period == "custom":
+        if custom_start and custom_end:
+            period_start = custom_start
+            period_end = custom_end.replace(hour=23, minute=59, second=59, microsecond=999999)
+            if period_end < period_start:
+                first = period_end.replace(hour=0, minute=0, second=0, microsecond=0)
+                second = period_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+                period_start, period_end = first, second
+        else:
+            normalized_period = "ytd"
+            period_end = reference_dt
+            period_start = reference_dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif normalized_period == "this_month":
+        target_month = normalized_month or reference_dt.strftime("%Y-%m")
+        month_start = pd.to_datetime(f"{target_month}-01").to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+        if month_start.year == reference_dt.year and month_start.month == reference_dt.month:
+            period_end = reference_dt
+        elif month_start.month == 12:
+            period_end = month_start.replace(year=month_start.year + 1, month=1) - timedelta(microseconds=1)
+        else:
+            period_end = month_start.replace(month=month_start.month + 1) - timedelta(microseconds=1)
+        period_start = month_start
+        normalized_month = target_month
+    elif normalized_period == "last_month":
+        current_month_start = reference_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        if current_month_start.month == 1:
+            period_start = current_month_start.replace(year=current_month_start.year - 1, month=12)
+        else:
+            period_start = current_month_start.replace(month=current_month_start.month - 1)
+        period_end = current_month_start - timedelta(microseconds=1)
+    elif normalized_month:
+        month_start = pd.to_datetime(f"{normalized_month}-01").to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0)
+        if month_start.month == 12:
+            period_end = month_start.replace(year=month_start.year + 1, month=1) - timedelta(microseconds=1)
+        else:
+            period_end = month_start.replace(month=month_start.month + 1) - timedelta(microseconds=1)
+        period_start = month_start
+    elif normalized_period == "ytd":
+        period_end = reference_dt
+        period_start = reference_dt.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0)
+    elif normalized_period == "previous_year":
+        previous_year = reference_dt.year - 1
+        period_start = datetime(previous_year, 1, 1)
+        period_end = datetime(previous_year, 12, 31, 23, 59, 59, 999999)
+    elif normalized_period == "all_years":
+        all_timestamps = []
+        for event in work_order_events + energy_events:
+            for key in ("start_time", "end_time"):
+                parsed = parse_iso_datetime(event.get(key))
+                if parsed is not None:
+                    all_timestamps.append(parsed)
+                    break
+        period_start = min(all_timestamps).replace(hour=0, minute=0, second=0, microsecond=0) if all_timestamps else reference_dt
+        period_end = reference_dt
+    else:
+        period_days = get_period_days(normalized_period)
+        period_end = reference_dt
+        period_start = (reference_dt - timedelta(days=period_days - 1)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    selected_energy_events = [event for event in energy_events if within_period(event.get("start_time"), period_start, period_end)]
+    selected_work_orders = (
+        list(work_order_events)
+        if normalized_period == "all_years"
+        else [event for event in work_order_events if overlaps_period(event.get("start_time"), event.get("end_time"), period_start, period_end)]
+    )
+    selected_valid_work_orders = [event for event in selected_work_orders if event.get("duration_hours") is not None]
+    selected_events = selected_energy_events + selected_valid_work_orders
+    management_work_orders = selected_work_orders
+    management_payload = build_management_downtime_payload(
+        management_work_orders,
+        selected_energy_events,
+        period_start,
+        period_end,
+        DATA_DIR,
+        mtbf_records=selected_work_orders,
+        historical_records=work_order_events,
+    )
+    selected_candidate_rows = [row for row in candidate_rows if within_period(row.get("start_time"), period_start, period_end)]
+    summarized = summarize_downtime_metrics(energy_events, candidate_rows, reference_dt)
+    selected_candidate_in_window = sum(row["duration_hours"] for row in selected_candidate_rows if row.get("within_operating_hours"))
+    selected_candidate_all = sum(row["duration_hours"] for row in selected_candidate_rows)
+    selected_within_pct = round((selected_candidate_in_window / selected_candidate_all) * 100, 1) if selected_candidate_all > 0 else None
+
+    total_hours = round(sum(float(event.get("duration_hours") or 0) for event in selected_events), 3) if selected_events else 0.0
+    event_count = len(selected_events)
+    longest_event_hours = max((float(event.get("duration_hours") or 0) for event in selected_events), default=None)
+    avg_event_hours = round(total_hours / event_count, 3) if event_count else None
+
+    system_breakdown = build_breakdown_rows(selected_events, "system")
+    area_breakdown = build_breakdown_rows(selected_events, "area")
+    asset_breakdown = build_asset_breakdown(selected_events)
+    highest_system = system_breakdown[0]["label"] if system_breakdown else None
+
+    energy_hours = round(sum(event["duration_hours"] for event in selected_energy_events), 3) if selected_energy_events else 0.0
+    work_order_hours = None
+    if work_order_payload["available"]:
+        work_order_hours = round(sum(float(event.get("duration_hours") or 0) for event in selected_valid_work_orders), 3) if selected_valid_work_orders else 0.0
+
+    period_hours = max((period_end - period_start).total_seconds() / 3600, 0)
+    active_machine_codes = {
+        row.get("machine_code")
+        for row in selected_candidate_rows
+        if row.get("machine_code") and row.get("within_operating_hours")
+    } or {
+        event.get("machine_code")
+        for event in selected_energy_events
+        if event.get("machine_code")
+    }
+    expected_active_hours = round(period_hours * len(active_machine_codes), 3) if active_machine_codes else None
+    energy_downtime_pct = (
+        round((energy_hours / expected_active_hours) * 100, 2)
+        if expected_active_hours and expected_active_hours > 0
+        else None
+    )
+    if energy_downtime_pct is None:
+        energy_status = "UNAVAILABLE"
+    elif energy_downtime_pct > 10:
+        energy_status = "WARNING"
+    elif energy_downtime_pct > 5:
+        energy_status = "ATTENTION"
+    else:
+        energy_status = "NORMAL"
+
+    period_duration = period_end - period_start
+    baseline_start = period_start - period_duration
+    baseline_end = period_start
+    baseline_energy_events = [
+        event
+        for event in energy_events
+        if within_period(event.get("start_time"), baseline_start, baseline_end)
+    ]
+    energy_event_count = len(selected_energy_events)
+    baseline_energy_event_count = len(baseline_energy_events)
+    if baseline_energy_event_count > 0:
+        event_ratio = energy_event_count / baseline_energy_event_count
+        if event_ratio > 1.40:
+            energy_event_status = "WARNING"
+        elif event_ratio > 1.20:
+            energy_event_status = "ATTENTION"
+        else:
+            energy_event_status = "NORMAL"
+    else:
+        energy_event_status = "UNAVAILABLE"
+
+    source_rows = [
+        {
+            "label": "Status-derived",
+            "downtime_hours": energy_hours,
+            "available": not work_orders_only,
+            "message": (
+                "Calculated from imported fault/down status tags first, then supported activity traces where no status field exists."
+                if not work_orders_only
+                else "Skipped for live work-order refresh so imported maintenance data can load quickly."
+            ),
+        },
+        {
+            "label": "Work Order",
+            "downtime_hours": work_order_hours,
+            "available": work_order_payload["available"],
+            "message": "Imported work order TTR logged as maintenance resolution time.",
+        },
+    ]
+
+    alerts = []
+    alert_metric_label = "TTR logged" if work_orders_only else "downtime"
+    if highest_system and system_breakdown and system_breakdown[0]["downtime_hours"] >= 3:
+        alerts.append(
+            {
+                "level": "warning",
+                "message": f"{highest_system} has the highest {alert_metric_label} in the selected period ({format_hours(system_breakdown[0]['downtime_hours'])}).",
+            }
+        )
+    if longest_event_hours and longest_event_hours >= 2:
+        longest_event = max(selected_events, key=lambda event: event["duration_hours"])
+        alerts.append(
+            {
+                "level": "critical",
+                "message": f"{longest_event['machine_name']} recorded the longest {alert_metric_label} record ({format_hours(longest_event_hours)}).",
+            }
+        )
+
+    filters = {
+        "systems": sorted({event["system"] for event in selected_events}),
+        "areas": sorted({event["area"] for event in selected_events}),
+        "sources": ["Status-derived"] + (["Work Order"] if work_order_payload["available"] else []),
+    }
+
+    payload = {
+        "meta": {
+            "period": normalized_period,
+            "period_label": get_period_label(normalized_period),
+            "month": normalized_month,
+            "month_label": format_month_label(normalized_month) if normalized_month else "All Months",
+            "period_start": period_start.isoformat(),
+            "period_end": period_end.isoformat(),
+            "custom_start": custom_start_key,
+            "custom_end": custom_end_key,
+            "reference_end": period_end.isoformat(),
+            "last_synced": max(latest_timestamps).isoformat(),
+            "work_order_available": work_order_payload["available"],
+            "work_orders_only": bool(work_orders_only),
+            "all_years_warning": (
+                "All Years view is for long-term reliability analysis. It should not be interpreted as current facility downtime."
+                if normalized_period == "all_years"
+                else None
+            ),
+        },
+        "summary": {
+            "total_hours": total_hours,
+            "this_week_hours": summarized["this_week_hours"],
+            "this_month_hours": summarized["this_month_hours"],
+            "event_count": event_count,
+            "avg_event_hours": avg_event_hours,
+            "longest_event_hours": round(longest_event_hours, 3) if longest_event_hours is not None else None,
+            "highest_system": highest_system,
+            "within_operating_pct": selected_within_pct if selected_within_pct is not None else summarized["within_operating_pct"],
+            "energy_hours": energy_hours,
+            "work_order_hours": work_order_hours,
+            "work_order_record_count": len(selected_work_orders),
+            "energy_status": energy_status,
+            "energy_downtime_pct": energy_downtime_pct,
+            "expected_active_hours": expected_active_hours,
+            "energy_event_status": energy_event_status,
+            "energy_event_count": energy_event_count,
+            "baseline_energy_event_count": baseline_energy_event_count,
+        },
+        "alerts": alerts,
+        "trend": build_trend_series(selected_events, period_start, period_end),
+        "system_breakdown": system_breakdown,
+        "source_breakdown": source_rows,
+        "area_breakdown": area_breakdown,
+        "asset_breakdown": asset_breakdown[:8],
+        "events": sorted(selected_events, key=lambda event: (event.get("start_time") or "", event.get("machine_name") or ""), reverse=True),
+        "filters": filters,
+        "months": [{"value": value, "label": format_month_label(value)} for value in month_options],
+        "work_order_source": work_order_payload,
+        "operating_windows": operating_windows,
+        "management": management_payload,
+    }
+
+    _DOWNTIME_CACHE[cache_signature] = payload
+    return payload
+
+
+def build_downtime_cache_document():
+    default_payload = build_downtime_payload("ytd")
+    month_values = [row["value"] for row in default_payload.get("months", [])]
+
+    payloads = {}
+    for period in ("this_month", "last_month", "ytd", "last12", "previous_year", "all_years"):
+        payloads[period] = build_downtime_payload(period)
+
+    for month_value in month_values:
+        payloads[f"this_month:{month_value}"] = build_downtime_payload("this_month", month_value)
+
+    return {
+        "generated_at": datetime.now().isoformat(),
+        "months": month_values,
+        "payloads": payloads,
+    }
+
+
+def write_downtime_cache_file(output_path=None):
+    target_path = output_path or DOWNTIME_CACHE_OUTPUT_FILE
+    os.makedirs(os.path.dirname(target_path), exist_ok=True)
+    document = build_downtime_cache_document()
+    with open(target_path, "w", encoding="utf-8") as handle:
+        json.dump(document, handle, ensure_ascii=False)
+    return target_path
