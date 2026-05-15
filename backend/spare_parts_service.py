@@ -173,7 +173,7 @@ FUTURE_SOURCE_SPECS = {
         "env": "SPARE_PARTS_EQUIPMENT_MASTER_PATH",
         "label": "Equipment Master",
         "missing": "Equipment master not uploaded",
-        "fallback": lambda: DEFAULT_DATA_DIR / "AssetList.xlsx",
+        "fallback": lambda: DEFAULT_DATA_DIR / "AssetList_Edit.xlsx",
     },
 }
 FLEXIBLE_COLUMN_ALIASES = {
@@ -2196,34 +2196,22 @@ _ASSET_ID_RE = re.compile(r"[A-Z]{2,}[A-Z0-9]*-\d+")
 
 
 def _load_asset_list_lookup() -> dict[str, dict]:
-    """Return {asset_id: {name, criticality, location}} from AssetList.xlsx."""
-    path = DEFAULT_DATA_DIR / "AssetList.xlsx"
-    if not path.exists():
-        return {}
-    sig = _file_signature(path)
-    if _ASSET_LIST_CACHE["result"] is not None and _ASSET_LIST_CACHE["sig"] == sig:
-        return _ASSET_LIST_CACHE["result"]
-    lookup: dict[str, dict] = {}
+    """Return {asset_id: {name, criticality, location}} from AssetList_Edit.xlsx via asset_mapping."""
     try:
-        df = pd.read_excel(path, dtype=str)
-        for _, row in df.iterrows():
-            raw_id = str(row.iloc[0] if len(row) > 0 else "").strip()
-            name = str(row.iloc[1] if len(row) > 1 else "").strip()
-            location = str(row.iloc[2] if len(row) > 2 else "").strip()
-            criticality = str(row.iloc[3] if len(row) > 3 else "").strip()
-            if not name or name == "nan":
-                continue
-            for asset_id in _ASSET_ID_RE.findall(raw_id):
-                lookup[asset_id] = {
-                    "name": name,
-                    "criticality": criticality if criticality != "nan" else "",
-                    "location": location if location != "nan" else "",
-                }
+        from asset_mapping import load_asset_mapping
+        mapping = load_asset_mapping(str(DEFAULT_DATA_DIR))
+        asset_map = mapping.get("asset_map", {})
+        lookup = {
+            asset_id: {
+                "name": entry.get("display_name", asset_id),
+                "criticality": entry.get("raw_criticality", ""),
+                "location": entry.get("location", ""),
+            }
+            for asset_id, entry in asset_map.items()
+        }
+        return lookup
     except Exception:
-        pass
-    _ASSET_LIST_CACHE["result"] = lookup
-    _ASSET_LIST_CACHE["sig"] = sig
-    return lookup
+        return {}
 
 try:
     from downtime_service import translate_maintenance_description as _translate_desc  # type: ignore
@@ -2410,7 +2398,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
 
     _PT_CACHE_V = 3  # bump to invalidate stale cache after code changes
     try:
-        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList.xlsx")
+        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList_Edit.xlsx")
         _wo_sig = _pt_work_order_sources_signature()
         current_mtime = (_PT_CACHE_V, _file_signature(path), _al_sig, _wo_sig)
         if _PT_CACHE["result"] is not None and _PT_CACHE["mtime"] == current_mtime:
@@ -2536,7 +2524,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
     except Exception as exc:
         errors.append(f"Work order linking failed: {exc}")
 
-    # Enrich equipment fields from AssetList.xlsx for any still-unlinked records
+    # Enrich equipment fields from AssetList_Edit.xlsx for any still-unlinked records
     try:
         al = _load_asset_list_lookup()
         for rec in records:
@@ -2816,7 +2804,7 @@ def build_all_years_transactions_payload() -> dict:
 
     _AY_CACHE_V = 2  # bump to invalidate stale cache after code changes
     try:
-        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList.xlsx")
+        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList_Edit.xlsx")
         _wo_sig = _pt_work_order_sources_signature()
         current_mtime = (
             _AY_CACHE_V,
@@ -2966,7 +2954,7 @@ def build_all_years_transactions_payload() -> dict:
     except Exception as exc:
         errors.append(f"WO linking failed: {exc}")
 
-    # Enrich equipment fields from AssetList.xlsx for any still-unlinked records
+    # Enrich equipment fields from AssetList_Edit.xlsx for any still-unlinked records
     try:
         al = _load_asset_list_lookup()
         for rec in records:

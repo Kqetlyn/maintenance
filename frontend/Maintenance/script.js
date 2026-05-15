@@ -84,8 +84,18 @@ document.addEventListener("DOMContentLoaded", () => {
         "UL-PP-07": [{ month: 3, week: "last" }, { month: 6, week: "last" }, { month: 9, week: "last" }, { month: 12, week: "last" }],
     };
     const ANALYSIS_TOP_LIST_LIMIT = 10;
+    const DOWNTIME_EMBED_SRC = "/Downtime/index.html?embed=1";
+    const DOWNTIME_PERIOD_OPTIONS = [
+        { value: "all_years", label: "All Years" },
+        { value: "ytd", label: "Current Year / YTD" },
+        { value: "last12", label: "Last 12 Months" },
+        { value: "previous_year", label: "Previous Year" },
+        { value: "this_month", label: "This Month" },
+        { value: "last_month", label: "Last Month" },
+        { value: "custom", label: "Custom Range" },
+    ];
     const state = {
-        activeView: ["overview", "utility", "equipment", "spare_parts", "analysis"].includes(initialView) ? initialView : "overview",
+        activeView: ["overview", "utility", "equipment", "spare_parts", "analysis", "downtime"].includes(initialView) ? initialView : "overview",
         overviewMonth: "",
         overviewCategory: "all",
         overviewStatus: "all",
@@ -141,6 +151,18 @@ document.addEventListener("DOMContentLoaded", () => {
             search: "",
         },
         ptCurrency: "THB",
+        downtimeData: null,
+        downtimeImportStatus: null,
+        downtimeFilters: {
+            period: "all_years",
+            startDate: "",
+            endDate: "",
+            criticality: "all",
+            machineGroup: "all",
+            location: "all",
+            status: "all",
+            search: "",
+        },
         analysisLoaded: false,
         analysisRows: [],
         analysisIntervals: [],
@@ -189,6 +211,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function initialize() {
         bindControls();
+        bindDowntimeEmbedFrame();
         await loadActiveView();
     }
 
@@ -219,18 +242,21 @@ document.addEventListener("DOMContentLoaded", () => {
         const isEquipment = state.activeView === "equipment";
         const isSpareParts = state.activeView === "spare_parts";
         const isAnalysis = state.activeView === "analysis";
+        const isDowntime = state.activeView === "downtime";
         document.body.classList.toggle("maintenance-equipment", isEquipment);
         document.body.classList.toggle("maintenance-spare-parts", isSpareParts);
         document.body.classList.toggle("maintenance-analysis", isAnalysis);
+        document.body.classList.toggle("maintenance-downtime", isDowntime);
         document.body.dataset.maintenanceView = state.activeView;
         const weeklyCompletionCard = document.getElementById("summary-card-3");
         if (weeklyCompletionCard) {
             weeklyCompletionCard.hidden = !isOverview && !isEquipment;
         }
         document.getElementById("overview-view")?.classList.toggle("hidden", !isOverview);
-        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis);
+        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis || isDowntime);
         document.getElementById("spare-parts-view")?.classList.toggle("hidden", !isSpareParts);
         document.getElementById("analysis-view")?.classList.toggle("hidden", !isAnalysis);
+        document.getElementById("downtime-view")?.classList.toggle("hidden", !isDowntime);
         document.querySelectorAll("[data-view-tab]").forEach((button) => {
             button.classList.toggle("active", (button.dataset.viewTab || "utility") === state.activeView);
         });
@@ -242,6 +268,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 ? "Spare Parts"
                 : isAnalysis
                 ? "Maintenance Analysis"
+                : isDowntime
+                ? "Downtime"
                 : (isEquipment ? "Production Equipment Maintenance" : "Utility Maintenance")
         );
         setText(
@@ -252,6 +280,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 ? "Inventory and external spare-parts management view"
                 : isAnalysis
                 ? "Minitab-style maintenance reliability analysis inside the dashboard"
+                : isDowntime
+                ? "Local work-order downtime tracking and review inside the Maintenance dashboard"
                 : isEquipment
                 ? "Production equipment preventive maintenance planning with risk-based schedule visibility"
                 : "Utility preventive maintenance planning and schedule visibility for management review"
@@ -303,6 +333,11 @@ document.addEventListener("DOMContentLoaded", () => {
         resetViewState();
         updateViewCopy();
 
+        if (state.activeView === "downtime") {
+            await loadEmbeddedDowntimeView();
+            return;
+        }
+
         if (state.activeView === "overview") {
             await loadOverviewView();
             return;
@@ -338,10 +373,6 @@ document.addEventListener("DOMContentLoaded", () => {
         document.querySelectorAll("[data-view-tab]").forEach((button) => {
             button.addEventListener("click", async () => {
                 const nextView = button.dataset.viewTab || "utility";
-                if (nextView === "downtime") {
-                    window.location.href = "/Downtime/index.html";
-                    return;
-                }
                 if (nextView === state.activeView) return;
                 state.activeView = nextView;
                 const nextUrl = new URL(window.location.href);
@@ -557,7 +588,90 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         });
 
+        bindDowntimeControls();
         bindAnalysisControls();
+    }
+
+    function bindDowntimeEmbedFrame() {
+        const frame = document.getElementById("maintenance-downtime-frame");
+        if (!frame || frame.dataset.bound === "true") return;
+        frame.dataset.bound = "true";
+
+        const syncHeight = () => syncDowntimeFrameHeight(frame);
+        frame.addEventListener("load", () => {
+            syncHeight();
+            window.setTimeout(syncHeight, 250);
+            window.setTimeout(syncHeight, 1200);
+        });
+
+        window.addEventListener("message", (event) => {
+            if (event.origin !== window.location.origin) return;
+            if (event.data?.type !== "maintenance-downtime-height") return;
+            const nextHeight = Math.max(Number(event.data.height) || 0, 900);
+            frame.style.height = `${nextHeight}px`;
+        });
+
+        window.addEventListener("resize", debounce(syncHeight, 120));
+    }
+
+    function syncDowntimeFrameHeight(frame = document.getElementById("maintenance-downtime-frame")) {
+        if (!frame) return;
+        try {
+            const doc = frame.contentDocument;
+            if (!doc) return;
+            const height = Math.max(
+                doc.documentElement?.scrollHeight || 0,
+                doc.body?.scrollHeight || 0,
+                900
+            );
+            frame.style.height = `${height}px`;
+        } catch (error) {
+            console.debug("Downtime frame height sync skipped:", error);
+        }
+    }
+
+    async function loadEmbeddedDowntimeView() {
+        const frame = document.getElementById("maintenance-downtime-frame");
+        if (!frame) return;
+        const targetSrc = frame.dataset.src || DOWNTIME_EMBED_SRC;
+        if (frame.getAttribute("src") !== targetSrc) {
+            frame.setAttribute("src", targetSrc);
+            return;
+        }
+        syncDowntimeFrameHeight(frame);
+    }
+
+    function bindDowntimeControls() {
+        document.getElementById("downtime-period-filter")?.addEventListener("change", (event) => {
+            state.downtimeFilters.period = event.target.value || "all_years";
+            syncDowntimeInputs();
+        });
+        document.getElementById("downtime-start-date")?.addEventListener("input", (event) => {
+            state.downtimeFilters.startDate = event.target.value || "";
+        });
+        document.getElementById("downtime-end-date")?.addEventListener("input", (event) => {
+            state.downtimeFilters.endDate = event.target.value || "";
+        });
+        [
+            ["downtime-criticality-filter", "criticality"],
+            ["downtime-machine-group-filter", "machineGroup"],
+            ["downtime-location-filter", "location"],
+            ["downtime-status-filter", "status"],
+        ].forEach(([id, key]) => {
+            document.getElementById(id)?.addEventListener("change", (event) => {
+                state.downtimeFilters[key] = event.target.value || "all";
+                renderDowntimeDashboard(state.downtimeData);
+            });
+        });
+        document.getElementById("downtime-search-filter")?.addEventListener("input", debounce((event) => {
+            state.downtimeFilters.search = event.target.value.trim().toLowerCase();
+            renderDowntimeDashboard(state.downtimeData);
+        }, 200));
+        document.getElementById("apply-downtime-filters")?.addEventListener("click", async () => {
+            readDowntimeFilterInputs();
+            await loadDowntimeView(true);
+        });
+        document.getElementById("downtime-import-form")?.addEventListener("submit", handleDowntimeImport);
     }
 
     function bindAnalysisControls() {
@@ -598,6 +712,352 @@ document.addEventListener("DOMContentLoaded", () => {
             if (node.type === "number" || node.type === "date") node.addEventListener("input", rerender);
         });
         document.getElementById("analysis-export-btn")?.addEventListener("click", exportAnalysisTables);
+    }
+
+    async function loadDowntimeView(forceReload = false) {
+        if (forceReload || !state.downtimeData) {
+            const payload = await fetchJson(`/api/downtime?${buildDowntimeParams().toString()}`);
+            state.downtimeData = payload;
+        }
+        await loadDowntimeImportStatus();
+        hydrateDowntimeFilterOptions(state.downtimeData || {});
+        syncDowntimeInputs();
+        renderDowntimeDashboard(state.downtimeData);
+    }
+
+    function buildDowntimeParams() {
+        const params = new URLSearchParams();
+        params.set("period", state.downtimeFilters.period || "all_years");
+        params.set("work_orders_only", "1");
+        if (state.downtimeFilters.period === "custom") {
+            if (state.downtimeFilters.startDate) params.set("start", state.downtimeFilters.startDate);
+            if (state.downtimeFilters.endDate) params.set("end", state.downtimeFilters.endDate);
+        }
+        return params;
+    }
+
+    async function loadDowntimeImportStatus() {
+        try {
+            state.downtimeImportStatus = await fetchJson("/api/downtime/import-work-orders");
+        } catch (error) {
+            state.downtimeImportStatus = {
+                source_count: 0,
+                using_uploaded_imports: false,
+                sources: [],
+                error: String(error?.message || error),
+            };
+        }
+    }
+
+    function readDowntimeFilterInputs() {
+        const getValue = (id, fallback = "all") => document.getElementById(id)?.value || fallback;
+        state.downtimeFilters.period = getValue("downtime-period-filter", "all_years");
+        state.downtimeFilters.startDate = getValue("downtime-start-date", "");
+        state.downtimeFilters.endDate = getValue("downtime-end-date", "");
+        state.downtimeFilters.criticality = getValue("downtime-criticality-filter", "all");
+        state.downtimeFilters.machineGroup = getValue("downtime-machine-group-filter", "all");
+        state.downtimeFilters.location = getValue("downtime-location-filter", "all");
+        state.downtimeFilters.status = getValue("downtime-status-filter", "all");
+        state.downtimeFilters.search = getValue("downtime-search-filter", "").trim().toLowerCase();
+    }
+
+    function hydrateDowntimeFilterOptions(payload) {
+        const filters = payload?.management?.filters || {};
+        populateSelect("downtime-period-filter", DOWNTIME_PERIOD_OPTIONS, true);
+        populateSelect(
+            "downtime-criticality-filter",
+            [{ value: "all", label: "All Criticalities" }, ...((filters.criticalities || []).map((value) => ({ value, label: value })))],
+            true
+        );
+        populateSelect(
+            "downtime-machine-group-filter",
+            [{ value: "all", label: "All Machine Groups" }, ...((filters.machine_groups || []).map((value) => ({ value, label: value })))],
+            true
+        );
+        populateSelect(
+            "downtime-location-filter",
+            [{ value: "all", label: "All Locations" }, ...((filters.locations || []).map((value) => ({ value, label: value })))],
+            true
+        );
+        populateSelect(
+            "downtime-status-filter",
+            [{ value: "all", label: "All Statuses" }, ...((filters.statuses || []).map((value) => ({ value, label: value })))],
+            true
+        );
+    }
+
+    function syncDowntimeInputs() {
+        const setValue = (id, value, fallback = "all") => {
+            const node = document.getElementById(id);
+            if (!node) return;
+            const validValues = Array.from(node.options || []).map((option) => option.value);
+            node.value = validValues.includes(String(value)) ? String(value) : fallback;
+        };
+        setValue("downtime-period-filter", state.downtimeFilters.period, "all_years");
+        setValue("downtime-criticality-filter", state.downtimeFilters.criticality, "all");
+        setValue("downtime-machine-group-filter", state.downtimeFilters.machineGroup, "all");
+        setValue("downtime-location-filter", state.downtimeFilters.location, "all");
+        setValue("downtime-status-filter", state.downtimeFilters.status, "all");
+        const startNode = document.getElementById("downtime-start-date");
+        const endNode = document.getElementById("downtime-end-date");
+        const searchNode = document.getElementById("downtime-search-filter");
+        if (startNode) startNode.value = state.downtimeFilters.startDate || "";
+        if (endNode) endNode.value = state.downtimeFilters.endDate || "";
+        if (searchNode) searchNode.value = state.downtimeFilters.search || "";
+        const showCustomDates = state.downtimeFilters.period === "custom";
+        document.getElementById("downtime-start-field")?.classList.toggle("hidden", !showCustomDates);
+        document.getElementById("downtime-end-field")?.classList.toggle("hidden", !showCustomDates);
+    }
+
+    function renderDowntimeDashboard(payload) {
+        if (!payload) return;
+        const rows = getFilteredDowntimeRows(payload);
+        renderDowntimeSourceStatus(payload);
+        renderDowntimeAlerts(payload, rows);
+        renderDowntimeSummary(rows);
+        renderDowntimeTrend(rows);
+        renderDowntimeBreakdowns(rows);
+        renderDowntimeTable(rows, payload);
+    }
+
+    function getFilteredDowntimeRows(payload) {
+        const rows = [...(payload?.management?.work_orders || [])];
+        const { criticality, machineGroup, location, status, search } = state.downtimeFilters;
+        const filtered = rows.filter((row) => {
+            if (criticality !== "all" && String(row.criticality || "") !== criticality) return false;
+            if (machineGroup !== "all" && String(row.machine_group || "") !== machineGroup) return false;
+            if (location !== "all" && String(row.location || "") !== location) return false;
+            if (status !== "all" && String(row.request_state || "") !== status) return false;
+            if (search) {
+                const haystack = [
+                    row.work_order_id,
+                    row.request_id,
+                    row.asset_id,
+                    row.machine_group,
+                    row.machine_name,
+                    row.location,
+                    row.description,
+                    row.translated_description,
+                ].join(" ").toLowerCase();
+                if (!haystack.includes(search)) return false;
+            }
+            return true;
+        });
+        return filtered.sort((a, b) => {
+            const aTime = getDowntimeRowDate(a)?.getTime() || 0;
+            const bTime = getDowntimeRowDate(b)?.getTime() || 0;
+            return bTime - aTime;
+        });
+    }
+
+    function renderDowntimeSourceStatus(payload) {
+        const source = payload?.work_order_source || {};
+        const importStatus = state.downtimeImportStatus || {};
+        const sources = importStatus.sources || [];
+        const summary = sources.length
+            ? `${formatInteger(sources.length)} local work-order source file(s) loaded.`
+            : "No local work-order downtime file is currently loaded.";
+        const details = sources.length
+            ? sources
+                .slice(0, 3)
+                .map((item) => `${escapeHtml(item.name)} | ${escapeHtml(formatShortDate(item.last_modified))} | ${escapeHtml(formatInteger(Math.round((item.size || 0) / 1024)))} KB`)
+                .join("<br>")
+            : "Import a local CSV/XLSX work-order export to populate this downtime tab.";
+        const lastSynced = source.last_synced ? `<br><strong>Last synced:</strong> ${escapeHtml(formatShortDate(source.last_synced))}` : "";
+        const errorLine = importStatus.error ? `<br><strong>Import status error:</strong> ${escapeHtml(importStatus.error)}` : "";
+        setHtml(
+            "downtime-source-status",
+            `<strong>${escapeHtml(summary)}</strong><br>${escapeHtml(source.message || "No work-order downtime source connected yet.")}<br>${details}${lastSynced}${errorLine}`
+        );
+    }
+
+    function renderDowntimeAlerts(payload, rows) {
+        const notes = [];
+        const availableRows = payload?.management?.work_orders || [];
+        if (!availableRows.length) {
+            notes.push(payload?.work_order_source?.message || "No local work-order downtime data is available yet.");
+        } else if (!rows.length) {
+            notes.push("No downtime work orders match the current filters.");
+        }
+        (payload?.management?.alerts || []).forEach((alert) => {
+            if (alert?.message) notes.push(alert.message);
+        });
+        const node = document.getElementById("downtime-alerts");
+        if (!node) return;
+        node.innerHTML = notes.map((message) => `<div class="analysis-note">${escapeHtml(message)}</div>`).join("");
+    }
+
+    function renderDowntimeSummary(rows) {
+        const ttrValues = rows.map((row) => row.ttr_hours).filter(isFiniteNumber).map(Number);
+        const totalHours = ttrValues.length ? sum(ttrValues) : null;
+        const criticalHours = rows
+            .filter((row) => String(row.criticality || "").toLowerCase() === "critical")
+            .map((row) => row.ttr_hours)
+            .filter(isFiniteNumber)
+            .map(Number);
+        setText("downtime-total-work-orders", formatInteger(rows.length));
+        setText("downtime-total-hours", totalHours === null ? "--" : formatAnalysisHours(totalHours));
+        setText("downtime-median-mttr", formatAnalysisHours(median(ttrValues)));
+        setText("downtime-mean-mttr", formatAnalysisHours(mean(ttrValues)));
+        setText("downtime-open-work-orders", formatInteger(rows.filter((row) => row.is_open).length));
+        setText("downtime-critical-hours", criticalHours.length ? formatAnalysisHours(sum(criticalHours)) : "--");
+    }
+
+    function renderDowntimeTrend(rows) {
+        const trend = buildDowntimeTrendRows(rows);
+        renderLineChart(
+            "downtime-trend-chart",
+            trend.map((bucket) => bucket.label),
+            [{
+                label: "Downtime Hours",
+                data: trend.map((bucket) => round1(bucket.hours)),
+                borderColor: "#0f766e",
+                backgroundColor: "rgba(15, 118, 110, 0.10)",
+                fill: true,
+            }],
+            "Hours"
+        );
+        setText(
+            "downtime-trend-note",
+            trend.length
+                ? `${trend[0].bucket_mode === "day" ? "Daily" : "Monthly"} buckets based on work-order start dates. ${formatInteger(rows.length)} work order(s) included.`
+                : "No dated work orders are available for the selected filters."
+        );
+    }
+
+    function buildDowntimeTrendRows(rows) {
+        const datedRows = rows
+            .map((row) => ({ row, date: getDowntimeRowDate(row) }))
+            .filter((item) => item.date instanceof Date && !Number.isNaN(item.date.getTime()));
+        if (!datedRows.length) return [];
+        const minTime = Math.min(...datedRows.map((item) => item.date.getTime()));
+        const maxTime = Math.max(...datedRows.map((item) => item.date.getTime()));
+        const daySpan = Math.max(0, Math.round((maxTime - minTime) / 86400000));
+        const useDaily = daySpan <= 45;
+        const buckets = new Map();
+        datedRows.forEach(({ row, date }) => {
+            const key = useDaily
+                ? `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`
+                : `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+            const label = useDaily
+                ? date.toLocaleDateString(undefined, { day: "2-digit", month: "short" })
+                : date.toLocaleDateString(undefined, { month: "short", year: "numeric" });
+            const bucket = buckets.get(key) || { key, label, hours: 0, count: 0, bucket_mode: useDaily ? "day" : "month" };
+            bucket.hours += Number(row.ttr_hours || 0);
+            bucket.count += 1;
+            buckets.set(key, bucket);
+        });
+        return [...buckets.values()]
+            .sort((a, b) => a.key.localeCompare(b.key))
+            .map((bucket) => ({ ...bucket, hours: round1(bucket.hours) }));
+    }
+
+    function renderDowntimeBreakdowns(rows) {
+        renderDowntimeBreakdownChart("downtime-criticality-chart", "downtime-criticality-table", rows, "criticality", "Criticality", "#8b5cf6");
+        renderDowntimeBreakdownChart("downtime-machine-group-chart", "downtime-machine-group-table", rows, "machine_group", "Machine Group", "#2563eb");
+        renderDowntimeBreakdownChart("downtime-location-chart", "downtime-location-table", rows, "location", "Location", "#f59e0b");
+    }
+
+    function renderDowntimeBreakdownChart(chartId, tableId, rows, field, label, color) {
+        const aggregated = aggregateAnalysis(rows, field, "ttr_hours", "sum");
+        renderHorizontalBarChart(
+            chartId,
+            aggregated.map((row) => row.label),
+            aggregated.map((row) => round1(row.value)),
+            "Downtime Hours",
+            color,
+            {
+                tableId,
+                tableHeaders: ["Rank", label, "Downtime"],
+                tableRows: aggregated.map((row, index) => [formatInteger(index + 1), row.label, formatAnalysisHours(row.value)]),
+                note: aggregated.length ? analysisTopListNote(aggregated.length, analysisGroupNoun(label)) : "No records available.",
+            }
+        );
+    }
+
+    function renderDowntimeTable(rows, payload) {
+        const body = document.getElementById("downtime-table-body");
+        if (!body) return;
+        if (!rows.length) {
+            const baseRows = payload?.management?.work_orders || [];
+            body.innerHTML = `<tr><td colspan="9" class="empty-row">${escapeHtml(baseRows.length ? "No downtime work orders match the current filters." : "No local work-order downtime data is available yet.")}</td></tr>`;
+            return;
+        }
+        body.innerHTML = rows.slice(0, 250).map((row) => {
+            const description = row.translated_description || row.description || "--";
+            const originalDescription = row.description && row.description !== description
+                ? `<span class="table-subtext">${escapeHtml(row.description)}</span>`
+                : "";
+            return `
+                <tr>
+                    <td>${escapeHtml(formatShortDate(getDowntimeRowDate(row) || row.request_created_time || row.latest_event_time))}</td>
+                    <td>${escapeHtml(row.work_order_id || "--")}</td>
+                    <td>${escapeHtml(row.asset_id || "--")}</td>
+                    <td>${escapeHtml(row.machine_group || row.machine_name || "--")}</td>
+                    <td>${escapeHtml(row.location || "--")}</td>
+                    <td>${escapeHtml(row.criticality || "--")}</td>
+                    <td>${escapeHtml(formatAnalysisHours(row.ttr_hours))}</td>
+                    <td><span class="status-pill ${downtimeStatusClass(row)}">${escapeHtml(row.request_state || (row.is_open ? "Open" : "Closed"))}</span></td>
+                    <td>
+                        <strong>${escapeHtml(description)}</strong>
+                        ${originalDescription}
+                    </td>
+                </tr>
+            `;
+        }).join("");
+    }
+
+    function getDowntimeRowDate(row) {
+        return parseDateValue(
+            row?.actual_start_time
+            || row?.start_time
+            || row?.latest_event_time
+            || row?.request_created_time
+            || row?.actual_end_time
+            || row?.end_time
+        );
+    }
+
+    function downtimeStatusClass(row) {
+        if (row?.requires_attention) return "status-overdue";
+        if (row?.is_open) return "status-pending";
+        return "status-done";
+    }
+
+    async function handleDowntimeImport(event) {
+        event.preventDefault();
+        const input = document.getElementById("downtime-import-file");
+        const file = input?.files?.[0];
+        if (!file) {
+            setSpareImportStatus("downtime-import-status", "Choose a CSV, XLSX, or XLS file first.", "error");
+            return;
+        }
+        const formData = new FormData();
+        formData.append("file", file);
+        formData.append("replace", "true");
+        setSpareImportStatus("downtime-import-status", "Importing work-order file...", "");
+        try {
+            const response = await fetch("/api/downtime/import-work-orders", { method: "POST", body: formData });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok || !result.ok) {
+                throw new Error(result.message || `HTTP ${response.status}`);
+            }
+            if (input) input.value = "";
+            setSpareImportStatus(
+                "downtime-import-status",
+                `${result.message || "Import complete."}${result.rows ? ` ${formatInteger(result.rows)} rows loaded.` : ""}`,
+                "ok"
+            );
+            state.downtimeData = null;
+            state.analysisLoaded = false;
+            state.analysisRows = [];
+            state.analysisIntervals = [];
+            state.analysisFilteredRows = [];
+            state.analysisFilteredIntervals = [];
+            await loadDowntimeView(true);
+        } catch (error) {
+            setSpareImportStatus("downtime-import-status", `Import failed: ${error.message}`, "error");
+        }
     }
 
     async function loadAnalysisView() {

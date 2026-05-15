@@ -3,9 +3,9 @@ Standalone Maintenance Dashboard — Flask backend.
 Serves only the Maintenance page and its required API endpoints.
 """
 
-from flask import Flask, jsonify, send_from_directory, request
+from datetime import datetime
+from flask import Flask, jsonify, redirect, send_from_directory, request
 import os
-import re
 
 # ── Service imports (all kept — Maintenance page depends on all of them) ────────
 from maintenance_service import (
@@ -20,10 +20,6 @@ from maintenance_service import (
     build_equipment_monthly_payload,
     build_equipment_summary_payload,
     build_equipment_timeline_payload,
-    build_non_scheduled_filter_payload,
-    build_non_scheduled_list_payload,
-    build_non_scheduled_monthly_payload,
-    build_non_scheduled_summary_payload,
 )
 from spare_parts_service import (
     build_spare_parts_payload,
@@ -35,20 +31,22 @@ from spare_parts_service import (
     import_project_transactions_file,
     get_maintenance_import_status,
 )
-# downtime_service is needed by the Maintenance "Analysis" tab
+# downtime_service is needed by the Maintenance "Analysis" and "Downtime" tabs
 # (/api/downtime?period=all_years&work_orders_only=1) and by spare_parts_service
 from downtime_service import (
     build_downtime_payload,
-    DOWNTIME_CACHE_OUTPUT_FILE,
-    import_work_order_file,
-    get_work_order_import_status,
     build_mtbf_work_order_history_payload,
+    get_work_order_import_status,
+    import_work_order_file,
 )
 
 # ── Path configuration ────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
-DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
+# DATA_DIR can be overridden via environment variable for deployed environments
+# (e.g. Railway persistent volume mounted at /data)
+DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
@@ -70,6 +68,16 @@ def root():
     return send_from_directory(os.path.join(FRONTEND_DIR, "Maintenance"), "index.html")
 
 
+@app.route("/Downtime")
+@app.route("/Downtime/index.html")
+def downtime_root():
+    """Downtime is part of the Maintenance page; embed mode still serves the HTML file."""
+    embed_mode = str(request.args.get("embed", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if embed_mode:
+        return send_from_directory(os.path.join(FRONTEND_DIR, "Downtime"), "index.html")
+    return redirect("/?view=downtime")
+
+
 @app.route("/<path:path>")
 def frontend_files(path):
     """Catch-all static file server for CSS, JS, shared assets, etc."""
@@ -77,49 +85,40 @@ def frontend_files(path):
 
 
 # ── Asset list (shared by Maintenance Analysis tab and Downtime) ──────────────
+from asset_mapping import load_asset_mapping, build_refrigeration_tree, get_asset_mapping_meta
+
+# ── Downtime routes (needed by Maintenance "Analysis" tab) ───────────────────
 
 @app.route("/api/asset-list")
 def asset_list_api():
-    import openpyxl
-    candidates = [
-        os.path.join(DATA_DIR, "AssetList.xlsx"),
-        os.path.join(BASE_DIR, "AssetList.xlsx"),
-    ]
-    path = next((p for p in candidates if os.path.exists(p)), None)
-    if not path:
-        return jsonify({"machines": [], "error": "AssetList.xlsx not found"}), 404
     try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        ws = wb["Machine Criticality"]
+        mapping = load_asset_mapping(DATA_DIR)
+        if not mapping["available"]:
+            return jsonify({"machines": [], "error": mapping["message"]}), 404
+
+        # Build grouped machine list matching the old response shape
         machines = []
-        for r in range(2, ws.max_row + 1):
-            raw_asset_id = ws.cell(r, 1).value
-            machine_name = str(ws.cell(r, 2).value or "").strip()
-            location = str(ws.cell(r, 3).value or "").strip()
-            criticality = str(ws.cell(r, 4).value or "").strip()
-            if not machine_name:
-                continue
-            asset_lines = [line.strip() for line in str(raw_asset_id or "").split("\n") if line.strip()]
-            assets = []
-            for line in asset_lines:
-                ids = re.findall(r"[A-Z]{2,}[A-Z0-9]*-\d+", line)
-                label_part = re.split(r":\s*", line, maxsplit=1)
-                label = label_part[0].strip() if len(label_part) > 1 else ""
-                for aid in ids:
-                    assets.append({"asset_id": aid, "label": label or aid})
+        for group in mapping["groups"]:
+            assets = [
+                {"asset_id": e["asset_id"], "label": e["asset_display_name"]}
+                for e in group.get("asset_entries", [])
+            ]
             machines.append({
-                "machine_name": machine_name,
-                "location": location,
-                "criticality": criticality,
+                "machine_name": group["machine_group"],
+                "location": group["location"],
+                "criticality": group["criticality"],
                 "asset_count": len(assets),
                 "assets": assets,
             })
-        return jsonify({"machines": machines})
+
+        return jsonify({
+            "machines": machines,
+            "refrigeration_tree": build_refrigeration_tree(mapping),
+            "meta": get_asset_mapping_meta(DATA_DIR),
+        })
     except Exception as exc:
         return jsonify({"machines": [], "error": str(exc)}), 500
 
-
-# ── Downtime routes (needed by Maintenance "Analysis" tab) ───────────────────
 
 @app.route("/api/downtime")
 def downtime_data():
@@ -144,6 +143,32 @@ def downtime_import_work_orders():
 @app.route("/api/downtime/mtbf-history")
 def downtime_mtbf_history():
     return jsonify(build_mtbf_work_order_history_payload())
+
+
+def get_path_mtime_iso(path):
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(path)).isoformat()
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+
+
+def get_page_last_synced(page_key):
+    key = (page_key or "").strip().lower()
+
+    if key == "maintenance":
+        return get_maintenance_import_status().get("last_synced")
+
+    if key == "downtime":
+        sources = get_work_order_import_status().get("sources") or []
+        latest_source = max((source.get("last_modified") for source in sources if source.get("last_modified")), default=None)
+        return latest_source or get_path_mtime_iso(os.path.join(DATA_DIR, "AssetList_Edit.xlsx"))
+
+    return None
+
+
+@app.route("/api/page-sync/<page_key>")
+def page_sync(page_key):
+    return jsonify({"page": page_key, "last_synced": get_page_last_synced(page_key)})
 
 
 # ── Maintenance API routes ────────────────────────────────────────────────────
@@ -238,36 +263,6 @@ def maintenance_equipment_timeline():
 @app.route("/api/maintenance/equipment/filters")
 def maintenance_equipment_filters():
     return jsonify(build_equipment_filter_payload(request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/non_scheduled/summary")
-def maintenance_non_scheduled_summary():
-    return jsonify(build_non_scheduled_summary_payload(request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/non_scheduled/monthly")
-def maintenance_non_scheduled_monthly():
-    return jsonify(build_non_scheduled_monthly_payload(request.args.get("month"), request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/non_scheduled/list")
-def maintenance_non_scheduled_list():
-    return jsonify(
-        build_non_scheduled_list_payload(
-            month_value=request.args.get("month"),
-            status=request.args.get("status", "all"),
-            priority=request.args.get("priority", "all"),
-            area=request.args.get("area", "all"),
-            search=request.args.get("search", ""),
-            year=request.args.get("year", type=int),
-            sort=request.args.get("sort", "due_date_asc"),
-        )
-    )
-
-
-@app.route("/api/maintenance/non_scheduled/filters")
-def maintenance_non_scheduled_filters():
-    return jsonify(build_non_scheduled_filter_payload(request.args.get("year", type=int)))
 
 
 @app.route("/api/maintenance/spare_parts")

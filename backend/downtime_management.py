@@ -2,68 +2,29 @@ import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pandas as pd
 
+from asset_mapping import (
+    load_asset_mapping,
+    classify_work_order,
+    get_asset_mapping_meta,
+    MACHINE_GROUPS,
+)
 
-GROUPED_MACHINE_MAPPING_FILE = "AssetList.xlsx"
 CRITICALITY_CRITICAL = "Critical"
 CRITICALITY_NON_CRITICAL = "Non-Critical / Facility"
-GROUPED_MACHINE_MAPPING_CANDIDATES = [
-    Path(__file__).resolve().parents[1] / "data" / GROUPED_MACHINE_MAPPING_FILE,
-    Path(__file__).resolve().parent / GROUPED_MACHINE_MAPPING_FILE,
-    Path.home() / "Downloads" / GROUPED_MACHINE_MAPPING_FILE,
-]
-CRITICALITY_ORDER = [
-    CRITICALITY_CRITICAL,
-    CRITICALITY_NON_CRITICAL,
-]
+CRITICALITY_ORDER = [CRITICALITY_CRITICAL, CRITICALITY_NON_CRITICAL]
 CRITICALITY_RANK = {label: index for index, label in enumerate(CRITICALITY_ORDER, start=1)}
 CRITICALITY_RANK["Support Systems"] = CRITICALITY_RANK[CRITICALITY_NON_CRITICAL]
 CRITICALITY_RANK["Facility / Non-Critical"] = CRITICALITY_RANK[CRITICALITY_NON_CRITICAL]
 CRITICALITY_RANK["Facility/Non-Critical"] = CRITICALITY_RANK[CRITICALITY_NON_CRITICAL]
+CRITICALITY_RANK["Non-Critical"] = CRITICALITY_RANK[CRITICALITY_NON_CRITICAL]
+CRITICALITY_RANK["Facility"] = CRITICALITY_RANK[CRITICALITY_NON_CRITICAL]
 CRITICALITY_RANK["Unclassified"] = CRITICALITY_RANK[CRITICALITY_NON_CRITICAL]
 CRITICALITY_RANK["Unmapped"] = CRITICALITY_RANK[CRITICALITY_NON_CRITICAL]
 ASSET_ID_PATTERN = re.compile(r"([A-Z]{2,}[A-Z0-9]*-\d+)")
-PRODUCTION_RISK_AREA_KEYS = {
-    "productionhighrisk",
-    "productionhighriskarea",
-    "productionlowrisk",
-    "productionlowriskarea",
-    "productionmediumrisk",
-    "productionmediumriskarea",
-    "productonhighrisk",
-    "productonhighriskarea",
-    "productonlowrisk",
-    "productonlowriskarea",
-    "productonmediumrisk",
-    "productonmediumriskarea",
-}
 REFRIGERATION_GROUP = "Refrigeration"
-REFRIGERATION_KEYWORDS = [
-    "air blast",
-    "airblast",
-    "blast freezer",
-    "freezer",
-    "chiller",
-    "chill",
-    "cold room",
-    "cold",
-    "refrigeration",
-    "cooling machine",
-    "condenser",
-    "condencer",
-    "evaporator",
-    "compressor",
-    "cdu",
-    "refrigerant",
-    "น้ำยา",
-    "แรงดันน้ำยา",
-    "sbf",
-    "spiral blast freezer",
-    "qa freezer",
-]
 
 HIGH_MTTR_THRESHOLD_HOURS = 48.0
 HIGH_DOWNTIME_THRESHOLD_HOURS = 72.0
@@ -72,68 +33,8 @@ REPEATED_WORK_ORDER_THRESHOLD = 3
 LOW_MTBF_THRESHOLD_HOURS = 168.0
 HIGH_MTBF_THRESHOLD_HOURS = 720.0
 
-_GROUPED_MAPPING_CACHE = {"signature": None, "payload": None}
-GROUP_NAME_ALIASES = {
-    "Bratt pan": ["bratt pan", "brattpan", "battpan", "bran pan", "round batt pan", "round bratts", "bratts pan"],
-    "Check weight": ["check weight", "checkweight"],
-    "X-Ray": ["x-ray", "xray"],
-    "Swing Vacuum": ["swing vacuum", "swing vaccuum", "vaccuum"],
-    "Combi oven": ["combi oven", "combi"],
-    "Steambox": ["steam box", "steambox"],
-    "Blast chiller": ["blast chill", "blast chiller"],
-    "Air blast freezer": ["air blast", "blast freezer"],
-    "Holding chiller": ["holding chill", "holding chill room"],
-    "Conveyor": ["conveyor", "สายพาน"],
-}
-DESCRIPTION_MACHINE_HINTS = [
-    (r"\bholding\s*chill\b", "Holding chill"),
-    (r"\bassembly\b", "Assembly"),
-    (r"\bcheck\s*weight\b", "Check weight"),
-    (r"\bx[\s-]*ray\b", "X-Ray"),
-    (r"\bsteam\s*box\b", "Steambox"),
-    (r"\bbratt\.?\s*pan\s*\d*\b", "Bratt pan"),
-    (r"\bround\s*bratt", "Round bratt pan"),
-    (r"\bswing\s*vac", "Swing Vacuum"),
-    (r"\bair\s*blast\s*\d*\b", "Air blast"),
-    (r"\bblast\s*chill\s*\d*\b", "Blast chill"),
-    (r"\bblast\s*freezer\s*\d*\b", "Blast freezer"),
-    (r"\bcold\s*\d+\b", "Cold room"),
-    (r"\bpackaging\s*store\b", "Packaging store"),
-    (r"\bice\s*maker\b", "Ice maker"),
-    (r"\brobot\s*coupe\b", "Robot Coupe"),
-    (r"\bdice\b", "Dice machine"),
-    (r"\bhood\b", "Hood"),
-    (r"\bcombi\b", "Combi oven"),
-    (r"\bsealer?\b", "Sealer"),
-]
 YEAR_START_MONTH = 1
 YEAR_START_DAY = 1
-
-
-def _file_signature(path):
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return None
-    return (stat.st_mtime_ns, stat.st_size)
-
-
-def _resolve_mapping_path(data_dir):
-    candidates = [Path(data_dir) / GROUPED_MACHINE_MAPPING_FILE]
-    candidates.extend(Path(path) for path in GROUPED_MACHINE_MAPPING_CANDIDATES)
-
-    ordered = []
-    seen = set()
-    for candidate in candidates:
-        normalized = candidate.resolve()
-        if normalized in seen:
-            continue
-        seen.add(normalized)
-        signature = _file_signature(candidate)
-        if not signature:
-            continue
-        ordered.append((candidate, signature))
-    return ordered
 
 
 def _clean_text(value, fallback=""):
@@ -145,21 +46,6 @@ def _clean_text(value, fallback=""):
 def _normalize_key(value):
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
-
-def _is_production_risk_area(value):
-    return _normalize_key(value) in PRODUCTION_RISK_AREA_KEYS
-
-
-def _is_refrigeration_context(*values):
-    haystack = " ".join(_clean_text(value) for value in values if _clean_text(value)).lower()
-    haystack = haystack.replace("producton", "production").replace("condencer", "condenser")
-    compact = _normalize_key(haystack)
-    # Refrigeration grouping is intentionally separate from Criticality; it runs before normal machine grouping.
-    for keyword in REFRIGERATION_KEYWORDS:
-        keyword_text = keyword.lower().replace("condencer", "condenser")
-        if keyword_text in haystack or _normalize_key(keyword_text) in compact:
-            return True
-    return False
 
 
 def _normalized_text(value):
@@ -188,41 +74,6 @@ def _extract_asset_ids(value):
         if match not in matches:
             matches.append(match)
     return matches
-
-
-def _extract_asset_entries(value, machine_group):
-    entries = []
-    seen = set()
-    for raw_line in str(value or "").splitlines():
-        line = _clean_text(raw_line)
-        if not line:
-            continue
-        asset_ids = _extract_asset_ids(line)
-        if not asset_ids:
-            continue
-        label_part = line.split(":", 1)[0].strip() if ":" in line else ""
-        for asset_id in asset_ids:
-            if asset_id in seen:
-                continue
-            seen.add(asset_id)
-            display_name = f"{machine_group} {label_part}".strip() if label_part else machine_group
-            entries.append({
-                "asset_id": asset_id,
-                "asset_label": label_part or asset_id,
-                "asset_display_name": display_name,
-            })
-    return entries
-
-
-def _build_group_aliases(machine_group):
-    aliases = {
-        _normalized_text(machine_group),
-        _normalize_key(machine_group),
-    }
-    for alias in GROUP_NAME_ALIASES.get(machine_group, []):
-        aliases.add(_normalized_text(alias))
-        aliases.add(_normalize_key(alias))
-    return sorted({alias for alias in aliases if alias}, key=len, reverse=True)
 
 
 def _parse_timestamp(value):
@@ -288,37 +139,11 @@ def _infer_criticality(asset_id, machine_name, location, job_trade, description)
     return CRITICALITY_NON_CRITICAL
 
 
-def _infer_group_from_description(description, mapping):
-    description_text = _normalized_text(description)
-    description_key = _normalize_key(description)
-    if not description_text and not description_key:
-        return None
-
-    for matcher in mapping.get("group_matchers", []):
-        for alias in matcher.get("aliases", []):
-            if not alias:
-                continue
-            if (" " in alias and alias in description_text) or (" " not in alias and alias in description_key):
-                return matcher
-    return None
-
-
-def _extract_machine_hint_from_description(description):
-    description_text = _normalized_text(description)
-    if not description_text:
-        return ""
-    for pattern, label in DESCRIPTION_MACHINE_HINTS:
-        if re.search(pattern, description_text, flags=re.IGNORECASE):
-            return label
-    return ""
-
 
 def _build_fallback_mapping(asset_id, machine_name, location, job_trade, description):
     display_name = _clean_text(machine_name) or _clean_text(asset_id) or "Unmapped Asset"
     normalized_location = _clean_text(location, "Unassigned")
     criticality = _infer_criticality(asset_id, machine_name, location, job_trade, description)
-    if _is_production_risk_area(display_name):
-        criticality = CRITICALITY_CRITICAL
     return {
         "asset_id": _normalize_asset_id(asset_id) or _clean_text(asset_id),
         "machine_group": display_name,
@@ -338,129 +163,12 @@ def _build_fallback_mapping(asset_id, machine_name, location, job_trade, descrip
 
 
 def load_grouped_machine_mapping(data_dir):
-    resolved_candidates = _resolve_mapping_path(data_dir)
-    top_path, top_signature = resolved_candidates[0] if resolved_candidates else (None, None)
-    if top_signature and _GROUPED_MAPPING_CACHE["signature"] == top_signature and _GROUPED_MAPPING_CACHE["payload"] is not None:
-        return _GROUPED_MAPPING_CACHE["payload"]
-
-    payload = {
-        "available": False,
-        "path": str(top_path) if top_path else str(Path(data_dir) / GROUPED_MACHINE_MAPPING_FILE),
-        "last_synced": None,
-        "asset_map": {},
-        "groups": [],
-        "message": "Grouped machine criticality mapping not found.",
-    }
-    if not resolved_candidates:
-        _GROUPED_MAPPING_CACHE["signature"] = None
-        _GROUPED_MAPPING_CACHE["payload"] = payload
-        return payload
-
-    df = None
-    resolved_path = None
-    signature = None
-    read_errors = []
-    for candidate_path, candidate_signature in resolved_candidates:
-        try:
-            df = pd.read_excel(candidate_path)
-            resolved_path = candidate_path
-            signature = candidate_signature
-            break
-        except Exception as exc:
-            read_errors.append(f"{candidate_path}: {exc}")
-
-    if df is None or resolved_path is None or signature is None:
-        payload["message"] = "Grouped machine criticality mapping could not be read."
-        if read_errors:
-            payload["read_errors"] = read_errors
-        _GROUPED_MAPPING_CACHE["signature"] = None
-        _GROUPED_MAPPING_CACHE["payload"] = payload
-        return payload
-
-    df.columns = [_clean_text(column) for column in df.columns]
-
-    asset_map = {}
-    groups = []
-    group_matchers = []
-    for _, row in df.iterrows():
-        machine_group = _clean_text(row.get("Machine name"))
-        asset_entries = _extract_asset_entries(row.get("AssetID"), machine_group)
-        if len(asset_entries) == 1:
-            asset_entries[0]["asset_display_name"] = machine_group
-        asset_ids = [entry["asset_id"] for entry in asset_entries]
-        if not machine_group or not asset_entries:
-            continue
-
-        location = _clean_text(row.get("Location"), "Unassigned")
-        raw_criticality = _clean_text(row.get("Criticality"))
-        criticality = _normalize_criticality(raw_criticality)
-        if _is_production_risk_area(machine_group):
-            criticality = CRITICALITY_CRITICAL
-        has_assetlist_classification = bool(raw_criticality)
-        group_row = {
-            "machine_group": machine_group,
-            "machine_name_display": machine_group,
-            "location": location,
-            "building": location,
-            "criticality": criticality,
-            "raw_criticality": raw_criticality,
-            "criticality_rank": CRITICALITY_RANK.get(criticality, CRITICALITY_RANK["Unmapped"]),
-            "classification_source": "AssetList.xlsx",
-            "has_assetlist_classification": has_assetlist_classification,
-            "asset_ids": asset_ids,
-            "asset_entries": asset_entries,
-        }
-        groups.append(group_row)
-        group_matchers.append(
-            {
-                "machine_group": machine_group,
-                "machine_name_display": machine_group,
-                "location": location,
-                "building": location,
-                "criticality": criticality,
-                "raw_criticality": raw_criticality,
-                "criticality_rank": group_row["criticality_rank"],
-                "classification_source": "AssetList.xlsx",
-                "has_assetlist_classification": has_assetlist_classification,
-                "aliases": _build_group_aliases(machine_group),
-            }
-        )
-        for entry in asset_entries:
-            asset_id = entry["asset_id"]
-            asset_map[asset_id] = {
-                "asset_id": asset_id,
-                "machine_group": machine_group,
-                "machine_name_display": machine_group,
-                "asset_label": entry["asset_label"],
-                "asset_display_name": entry["asset_display_name"],
-                "location": location,
-                "building": location,
-                "criticality": criticality,
-                "raw_criticality": raw_criticality,
-                "criticality_rank": group_row["criticality_rank"],
-                "mapping_source": "AssetList.xlsx",
-                "classification_source": "AssetList.xlsx",
-                "has_assetlist_classification": has_assetlist_classification,
-                "group_asset_ids": asset_ids,
-            }
-
-    payload = {
-        "available": True,
-        "path": str(resolved_path),
-        "last_synced": datetime.fromtimestamp(os.path.getmtime(resolved_path)).isoformat(),
-        "asset_map": asset_map,
-        "groups": groups,
-        "group_matchers": sorted(group_matchers, key=lambda item: max((len(alias) for alias in item["aliases"]), default=0), reverse=True),
-        "message": "Grouped machine criticality mapping loaded.",
-    }
-    _GROUPED_MAPPING_CACHE["signature"] = signature
-    _GROUPED_MAPPING_CACHE["payload"] = payload
-    return payload
+    """Thin wrapper — delegates to asset_mapping.load_asset_mapping."""
+    return load_asset_mapping(data_dir)
 
 
 def enrich_work_order_records(records, data_dir):
-    mapping = load_grouped_machine_mapping(data_dir)
-    asset_map = mapping.get("asset_map", {})
+    mapping = load_asset_mapping(data_dir)
     enriched = []
     for row in records or []:
         asset_id = _normalize_asset_id(row.get("asset_id") or row.get("machine_code"))
@@ -468,39 +176,37 @@ def enrich_work_order_records(records, data_dir):
         location = _clean_text(row.get("raw_location") or row.get("area"), "Unassigned")
         job_trade = _clean_text(row.get("job_trade") or row.get("system"))
         description = _clean_text(row.get("remarks") or row.get("description"))
-        mapped = asset_map.get(asset_id) if asset_id else None
-        mapped_from_asset_list = bool(mapped)
-        if not mapped:
-            mapped = _build_fallback_mapping(asset_id, machine_name, location, job_trade, description)
-        is_refrigeration = _is_refrigeration_context(
-            machine_name,
-            row.get("machine_equipment_name"),
-            row.get("description_original") or description,
-            job_trade,
-            row.get("maintenance_job_type"),
-            row.get("raw_functional_location") or location,
-            asset_id,
-        )
-        machine_group = REFRIGERATION_GROUP if is_refrigeration else mapped["machine_group"]
+
+        # Build a search record that includes all text fields for keyword matching
+        search_record = {
+            **row,
+            "asset_id": asset_id,
+            "machine_name": machine_name,
+            "description": description,
+        }
+        classified = classify_work_order(search_record, mapping)
+
+        mapped_from_asset_list = classified.get("mapping_source") == "AssetList_Edit.xlsx"
+        machine_group = classified["machine_group"]
 
         merged = {
             **row,
             "asset_id": asset_id or _clean_text(row.get("asset_id") or row.get("machine_code")),
             "machine_group": machine_group,
-            "machine_name_display": mapped["machine_name_display"],
-            "asset_label": mapped.get("asset_label") or asset_id or _clean_text(row.get("asset_id") or row.get("machine_code")),
-            "asset_display_name": mapped.get("asset_display_name") or machine_name or mapped["machine_name_display"],
-            "location": mapped["location"],
-            "building": mapped["building"],
-            "criticality": mapped["criticality"],
-            "raw_criticality": mapped["raw_criticality"] if "raw_criticality" in mapped else mapped["criticality"],
-            "normalized_criticality": _normalize_display_criticality(mapped["criticality"]),
-            "criticality_rank": mapped["criticality_rank"],
-            "mapping_source": mapped["mapping_source"],
-            "classification_source": "AssetList.xlsx" if mapped_from_asset_list else mapped.get("classification_source", "fallback"),
-            "has_assetlist_classification": bool(mapped_from_asset_list and _clean_text(mapped.get("raw_criticality"))),
-            "group_asset_ids": mapped["group_asset_ids"],
-            "refrigeration_group_match": bool(is_refrigeration),
+            "machine_name_display": classified["machine_name_display"],
+            "asset_label": classified.get("asset_label") or asset_id or _clean_text(row.get("asset_id") or row.get("machine_code")),
+            "asset_display_name": classified.get("asset_display_name") or machine_name or classified["machine_name_display"],
+            "location": classified["location"],
+            "building": classified["building"],
+            "criticality": classified["criticality"],
+            "raw_criticality": classified.get("raw_criticality", ""),
+            "normalized_criticality": _normalize_display_criticality(classified["criticality"]),
+            "criticality_rank": CRITICALITY_RANK.get(classified["criticality"], CRITICALITY_RANK["Unmapped"]),
+            "mapping_source": classified["mapping_source"],
+            "classification_source": classified["classification_source"],
+            "has_assetlist_classification": bool(classified.get("has_assetlist_classification") and _clean_text(classified.get("raw_criticality"))),
+            "group_asset_ids": classified.get("group_asset_ids", []),
+            "refrigeration_group_match": machine_group == REFRIGERATION_GROUP,
             "ttr_hours": round(float(row.get("duration_hours") or 0), 3) if row.get("duration_hours") is not None else None,
             "request_state": _clean_text(row.get("status")),
             "description": description,
@@ -738,15 +444,7 @@ def _build_trend(rows, period_start, period_end):
 
 
 def get_grouped_machine_mapping_meta(data_dir):
-    mapping = load_grouped_machine_mapping(data_dir)
-    return {
-        "available": mapping.get("available", False),
-        "path": mapping.get("path"),
-        "last_synced": mapping.get("last_synced"),
-        "group_count": len(mapping.get("groups", [])),
-        "asset_count": len(mapping.get("asset_map", {})),
-        "message": mapping.get("message"),
-    }
+    return get_asset_mapping_meta(data_dir)
 
 
 def _compute_mtbf_payload(rows, scope_label="Selected Period"):
@@ -1181,7 +879,7 @@ def build_management_downtime_payload(records, status_events, period_start, peri
         classification_source = row.get("classification_source") or row.get("mapping_source") or ""
         has_assetlist_classification = row.get("has_assetlist_classification")
         if has_assetlist_classification is None:
-            has_assetlist_classification = classification_source == "AssetList.xlsx" and bool(_clean_text(raw_criticality))
+            has_assetlist_classification = classification_source in {"AssetList.xlsx", "AssetList_Edit.xlsx"} and bool(_clean_text(raw_criticality))
         prepared = {
             **row,
             "raw_criticality": raw_criticality,

@@ -6,14 +6,10 @@ __pycache__/
 logs/
 *.db
 
-# Large binary data files — keep in data/ locally but don't commit
+# Data files — kept locally, uploaded via the app on the deployed version
 data/argos_translate/
 data/*.xlsx
 data/*.csv
+data/*.json
 data/work_order_imports/
-data/translation_cache.json
-data/equipment_maintenance_cache.json
-
-# Keep these smaller reference files in version control
-!data/AssetList.xlsx
-!data/equipment_maintenance_source_copy.xlsx
+data/_upload_tmp/

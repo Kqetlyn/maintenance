@@ -49,7 +49,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // Handles top-level buttons
     document.querySelectorAll('.nav-btn[data-nav]').forEach(btn => {
         const key = btn.dataset.nav;
-        if (path.includes(key.toLowerCase()) || (key === 'maintenance' && path.includes('/downtime/'))) {
+        const isMaintenanceRoot = key === 'maintenance' && (
+            path === '/'
+            || path.startsWith('/maintenance/')
+            || path === '/downtime'
+            || path.startsWith('/downtime/')
+        );
+        if (path.includes(key.toLowerCase()) || isMaintenanceRoot) {
             btn.classList.add('active');
         }
     });

@@ -10,7 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 
     <link rel="stylesheet" href="/shared/navbar.css">
-    <link rel="stylesheet" href="style.css?v=20260514-spare-part-drilldown-7">
+    <link rel="stylesheet" href="/Maintenance/style.css?v=20260514-spare-part-drilldown-7">
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -919,6 +919,19 @@
             </section>
         </section>
 
+        <section id="downtime-view" class="maintenance-view hidden">
+            <div class="maintenance-downtime-host">
+                <iframe
+                    id="maintenance-downtime-frame"
+                    class="maintenance-downtime-frame"
+                    title="Downtime"
+                    data-src="/Downtime/index.html?embed=1"
+                    loading="lazy"
+                    referrerpolicy="same-origin"
+                ></iframe>
+            </div>
+        </section>
+
         <section id="utility-view" class="maintenance-view hidden">
             <section class="summary-grid" id="summary-grid">
                 <article class="summary-card summary-card-kpi summary-card-red" id="summary-card-1" data-summary-filter="due_this_week"><span class="summary-label" id="summary-label-1">Due This Week</span><strong id="summary-due-week">--</strong></article>
@@ -1096,7 +1109,7 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="script.js?v=20260514-spare-part-drilldown-7" defer></script>
+    <script src="/Maintenance/script.js?v=20260514-spare-part-drilldown-7" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->
     <div id="pau-modal" class="pau-modal-overlay" hidden>

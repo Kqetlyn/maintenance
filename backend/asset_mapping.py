@@ -1,0 +1,440 @@
+"""
+Asset classification loader — single source of truth is AssetList_Edit.xlsx.
+
+Public API
+----------
+load_asset_mapping(data_dir)   → mapping dict (cached by file mtime+size)
+classify_work_order(record, mapping) → classification dict
+build_refrigeration_tree(mapping)    → list of subgroup dicts
+
+The mapping dict has keys:
+  available, path, last_synced, asset_map, keyword_rules,
+  groups, group_matchers, message
+"""
+
+import os
+import re
+from datetime import datetime
+from pathlib import Path
+
+import openpyxl
+
+ASSET_LIST_FILENAME = "AssetList_Edit.xlsx"
+ASSET_MAPPING_SHEET = "Asset Mapping"
+KEYWORD_RULES_SHEET = "Keyword Rules"
+
+MACHINE_GROUPS = [
+    "Refrigeration",
+    "Production Equipment",
+    "Utilities / Support",
+    "Facility / Building",
+    "Unknown / Review",
+]
+
+CRITICALITIES = ["Critical", "Non-Critical", "Facility", "Unmapped"]
+
+REFRIGERATION_ROLES = [
+    "Condenser", "Evaporator", "Freezer", "Chiller",
+    "Cold Room", "Ice Maker", "Other",
+]
+
+REFRIGERATION_SUBGROUPS = [
+    "condenser-evaporator", "air-blast", "cold-room", "ice-maker", "other",
+]
+
+_MACHINE_GROUP_SET = set(MACHINE_GROUPS)
+
+_CANDIDATES = [
+    Path(__file__).resolve().parents[1] / "data" / ASSET_LIST_FILENAME,
+    Path(__file__).resolve().parent / ASSET_LIST_FILENAME,
+    Path.home() / "Downloads" / ASSET_LIST_FILENAME,
+]
+
+_CACHE = {"sig": None, "payload": None}
+
+
+def _file_sig(path):
+    try:
+        s = os.stat(path)
+        return (s.st_mtime_ns, s.st_size)
+    except OSError:
+        return None
+
+
+def _clean(value, fallback=""):
+    text = re.sub(r"\s+", " ", str(value or "").replace("﻿", " ").strip())
+    return text or fallback
+
+
+def _is_banner(value):
+    return str(value or "").lstrip().startswith("▶")
+
+
+def _truthy(value):
+    if value is None:
+        return True
+    return str(value).strip().upper() not in {"FALSE", "0", "NO", "N"}
+
+
+def _normalize_criticality(value):
+    k = re.sub(r"[^a-z]", "", str(value or "").lower())
+    if k in {"critical", "semicritical", "productioncritical"}:
+        return "Critical"
+    if k in {"noncritical", "noncriticalfacility", "facility"}:
+        return "Non-Critical"
+    if k == "facility":
+        return "Facility"
+    return "Unmapped"
+
+
+def _normalize_machine_name(value):
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def _build_group_aliases(name):
+    aliases = {_normalize_machine_name(name), re.sub(r"[^a-z0-9]", "", _normalize_machine_name(name))}
+    return sorted({a for a in aliases if a}, key=len, reverse=True)
+
+
+def _resolve_path(data_dir):
+    candidates = [Path(data_dir) / ASSET_LIST_FILENAME] + list(_CANDIDATES)
+    seen = set()
+    for p in candidates:
+        try:
+            r = p.resolve()
+        except OSError:
+            r = p
+        if r in seen:
+            continue
+        seen.add(r)
+        sig = _file_sig(p)
+        if sig:
+            return p, sig
+    return None, None
+
+
+def load_asset_mapping(data_dir):
+    path, sig = _resolve_path(data_dir)
+
+    if sig and _CACHE["sig"] == sig and _CACHE["payload"] is not None:
+        return _CACHE["payload"]
+
+    empty = {
+        "available": False,
+        "path": str(path or (Path(data_dir) / ASSET_LIST_FILENAME)),
+        "last_synced": None,
+        "asset_map": {},
+        "keyword_rules": [],
+        "groups": [],
+        "group_matchers": [],
+        "message": f"{ASSET_LIST_FILENAME} not found.",
+    }
+
+    if not path:
+        _CACHE.update(sig=None, payload=empty)
+        return empty
+
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        empty["message"] = f"Cannot open {ASSET_LIST_FILENAME}: {exc}"
+        raise RuntimeError(empty["message"]) from exc
+
+    if ASSET_MAPPING_SHEET not in wb.sheetnames:
+        msg = f"{ASSET_LIST_FILENAME} is missing the '{ASSET_MAPPING_SHEET}' sheet."
+        raise RuntimeError(msg)
+
+    # ── Parse Asset Mapping ───────────────────────────────────────────────────
+    ws = wb[ASSET_MAPPING_SHEET]
+    asset_map = {}
+    groups = []
+    group_matchers = []
+
+    for row in ws.iter_rows(min_row=3, values_only=True):
+        raw_id = row[0]
+        if raw_id is None:
+            continue
+        if _is_banner(raw_id):
+            continue
+        asset_id = _clean(raw_id).upper()
+        if not asset_id:
+            continue
+
+        active = _truthy(row[8] if len(row) > 8 else None)
+        if not active:
+            continue
+
+        display_name = _clean(row[1] if len(row) > 1 else None, asset_id)
+        machine_group = _clean(row[2] if len(row) > 2 else None, "Unknown / Review")
+        location = _clean(row[3] if len(row) > 3 else None, "Unassigned")
+        raw_criticality = _clean(row[4] if len(row) > 4 else None)
+        criticality = _normalize_criticality(raw_criticality) if raw_criticality else "Unmapped"
+        refrigeration_role = _clean(row[5] if len(row) > 5 else None)
+        parent_asset_id = _clean(row[6] if len(row) > 6 else None).upper() or None
+        refrigeration_subgroup = _clean(row[7] if len(row) > 7 else None)
+
+        criticality_rank = {"Critical": 1, "Non-Critical": 2, "Facility": 2, "Unmapped": 999}.get(criticality, 999)
+
+        entry = {
+            "asset_id": asset_id,
+            "display_name": display_name,
+            "machine_group": machine_group,
+            "location": location,
+            "criticality": criticality,
+            "raw_criticality": raw_criticality,
+            "criticality_rank": criticality_rank,
+            "refrigeration_role": refrigeration_role or None,
+            "parent_asset_id": parent_asset_id,
+            "refrigeration_subgroup": refrigeration_subgroup or None,
+            "mapping_source": ASSET_LIST_FILENAME,
+            "classification_source": ASSET_LIST_FILENAME,
+            "has_assetlist_classification": bool(raw_criticality),
+            # Legacy compat fields used by downtime_management
+            "machine_name_display": display_name,
+            "asset_label": asset_id,
+            "asset_display_name": display_name,
+            "building": location,
+            "group_asset_ids": [],
+        }
+        asset_map[asset_id] = entry
+
+        machine_name_lc = _normalize_machine_name(machine_group)
+        group_key = machine_group
+        existing = next((g for g in groups if g["machine_group"] == group_key), None)
+        if not existing:
+            g = {
+                "machine_group": machine_group,
+                "machine_name_display": machine_group,
+                "location": location,
+                "building": location,
+                "criticality": criticality,
+                "raw_criticality": raw_criticality,
+                "criticality_rank": criticality_rank,
+                "classification_source": ASSET_LIST_FILENAME,
+                "has_assetlist_classification": bool(raw_criticality),
+                "asset_ids": [],
+                "asset_entries": [],
+            }
+            groups.append(g)
+            group_matchers.append({
+                "machine_group": machine_group,
+                "machine_name_display": machine_group,
+                "location": location,
+                "building": location,
+                "criticality": criticality,
+                "raw_criticality": raw_criticality,
+                "criticality_rank": criticality_rank,
+                "classification_source": ASSET_LIST_FILENAME,
+                "has_assetlist_classification": bool(raw_criticality),
+                "aliases": _build_group_aliases(machine_group),
+            })
+            existing = g
+        existing["asset_ids"].append(asset_id)
+        existing["asset_entries"].append({"asset_id": asset_id, "asset_label": asset_id, "asset_display_name": display_name})
+
+    # Back-fill group_asset_ids into each asset_map entry
+    for group in groups:
+        for asset_id in group["asset_ids"]:
+            if asset_id in asset_map:
+                asset_map[asset_id]["group_asset_ids"] = group["asset_ids"]
+
+    # ── Parse Keyword Rules ───────────────────────────────────────────────────
+    keyword_rules = []
+    if KEYWORD_RULES_SHEET in wb.sheetnames:
+        ws2 = wb[KEYWORD_RULES_SHEET]
+        for row in ws2.iter_rows(min_row=3, values_only=True):
+            kw = row[0] if row else None
+            if kw is None:
+                continue
+            if _is_banner(kw):
+                continue
+            keyword = _clean(kw).lower()
+            maps_to = _clean(row[1] if len(row) > 1 else None)
+            active = _truthy(row[2] if len(row) > 2 else None)
+            if not keyword or not maps_to or not active:
+                continue
+            keyword_rules.append({"keyword": keyword, "maps_to": maps_to})
+
+    # Skip header row if it leaked through
+    keyword_rules = [r for r in keyword_rules if r["keyword"] != "keyword"]
+
+    wb.close()
+
+    payload = {
+        "available": True,
+        "path": str(path),
+        "last_synced": datetime.fromtimestamp(os.path.getmtime(path)).isoformat(),
+        "asset_map": asset_map,
+        "keyword_rules": keyword_rules,
+        "groups": groups,
+        "group_matchers": sorted(
+            group_matchers,
+            key=lambda m: max((len(a) for a in m["aliases"]), default=0),
+            reverse=True,
+        ),
+        "message": f"{ASSET_LIST_FILENAME} loaded ({len(asset_map)} assets, {len(keyword_rules)} keyword rules).",
+    }
+    _CACHE.update(sig=sig, payload=payload)
+    return payload
+
+
+def classify_work_order(record, mapping):
+    """
+    Classify a work order record against the asset mapping.
+
+    Returns a dict with: asset_id, display_name, machine_group, criticality,
+    raw_criticality, criticality_rank, refrigeration_role, parent_asset_id,
+    refrigeration_subgroup, mapping_source, classification_source,
+    has_assetlist_classification, group_asset_ids,
+    machine_name_display, asset_label, asset_display_name, location, building.
+    """
+    asset_map = mapping.get("asset_map", {})
+    keyword_rules = mapping.get("keyword_rules", [])
+
+    raw_id = str(record.get("asset_id") or record.get("machine_code") or "").strip().upper()
+
+    # Step A — direct match
+    hit = asset_map.get(raw_id)
+    if hit:
+        return dict(hit)
+
+    # Step B — keyword fallback
+    searchable = " ".join(
+        str(record.get(field) or "")
+        for field in (
+            "asset_id", "machine_code", "machine_name", "raw_machine_name",
+            "machine_equipment_name", "description", "description_original",
+            "remarks", "job_trade", "system", "maintenance_job_type",
+            "raw_functional_location", "area", "location",
+        )
+    ).lower()
+
+    for rule in keyword_rules:
+        if rule["keyword"] in searchable:
+            maps_to = rule["maps_to"]
+            if maps_to in _MACHINE_GROUP_SET:
+                return _fallback_entry(raw_id, record, maps_to, "keyword")
+            # Treat MapsTo as a DisplayName → find any matching asset row
+            display_hit = next(
+                (e for e in asset_map.values() if e["display_name"] == maps_to),
+                None,
+            )
+            if display_hit:
+                result = dict(display_hit)
+                result["display_name"] = maps_to
+                result["machine_name_display"] = maps_to
+                result["mapping_source"] = "keyword"
+                return result
+            # MapsTo doesn't match a display name — treat as a machine-group label
+            return _fallback_entry(raw_id, record, maps_to, "keyword")
+
+    # Step C — unmapped
+    return _fallback_entry(raw_id, record, "Unknown / Review", "fallback")
+
+
+def _fallback_entry(asset_id, record, machine_group, source):
+    display = (
+        str(record.get("raw_machine_name") or record.get("machine_name") or "").strip()
+        or str(record.get("machine_equipment_name") or "").strip()
+        or asset_id
+        or "Unmapped Asset"
+    )
+    location = str(record.get("raw_functional_location") or record.get("area") or record.get("location") or "Unassigned").strip()
+    criticality = "Unmapped" if machine_group in {"Unknown / Review", "Unmapped"} else "Non-Critical"
+    criticality_rank = 999 if criticality == "Unmapped" else 2
+    return {
+        "asset_id": asset_id,
+        "display_name": display,
+        "machine_group": machine_group,
+        "location": location,
+        "building": location,
+        "criticality": criticality,
+        "raw_criticality": "",
+        "criticality_rank": criticality_rank,
+        "refrigeration_role": None,
+        "parent_asset_id": None,
+        "refrigeration_subgroup": None,
+        "mapping_source": source,
+        "classification_source": source,
+        "has_assetlist_classification": False,
+        "machine_name_display": display,
+        "asset_label": asset_id,
+        "asset_display_name": display,
+        "group_asset_ids": [asset_id] if asset_id else [],
+    }
+
+
+def build_refrigeration_tree(mapping):
+    """
+    Return a list of subgroup dicts, each containing parent assets (Condensers)
+    with their children (Evaporators) nested inside.
+
+    [
+      { subgroup: "condenser-evaporator", parents: [
+          { asset_id, display_name, role, children: [ ... ] }
+        ]
+      },
+      ...
+    ]
+    """
+    asset_map = mapping.get("asset_map", {})
+    subgroups = {}
+
+    for asset_id, entry in asset_map.items():
+        if entry.get("machine_group") != "Refrigeration":
+            continue
+        sg = entry.get("refrigeration_subgroup") or "other"
+        subgroups.setdefault(sg, {"parents": {}, "children": []})
+
+        if not entry.get("parent_asset_id"):
+            # It's a parent (Condenser or standalone unit)
+            subgroups[sg]["parents"].setdefault(asset_id, {
+                "asset_id": asset_id,
+                "display_name": entry["display_name"],
+                "refrigeration_role": entry.get("refrigeration_role"),
+                "criticality": entry["criticality"],
+                "location": entry["location"],
+                "children": [],
+            })
+        else:
+            subgroups[sg]["children"].append(entry)
+
+    # Nest children under their parents
+    for sg_data in subgroups.values():
+        for child in sg_data["children"]:
+            parent_id = child["parent_asset_id"]
+            # Determine subgroup from parent if parent exists
+            for sg_key, data in subgroups.items():
+                if parent_id in data["parents"]:
+                    data["parents"][parent_id]["children"].append({
+                        "asset_id": child["asset_id"],
+                        "display_name": child["display_name"],
+                        "refrigeration_role": child.get("refrigeration_role"),
+                        "criticality": child["criticality"],
+                        "parent_asset_id": parent_id,
+                    })
+                    break
+
+    result = []
+    for sg_key in REFRIGERATION_SUBGROUPS + ["other"]:
+        if sg_key not in subgroups:
+            continue
+        parents_sorted = sorted(subgroups[sg_key]["parents"].values(), key=lambda p: p["asset_id"])
+        for parent in parents_sorted:
+            parent["children"].sort(key=lambda c: c["asset_id"])
+        result.append({"subgroup": sg_key, "parents": parents_sorted})
+
+    return result
+
+
+def get_asset_mapping_meta(data_dir):
+    m = load_asset_mapping(data_dir)
+    return {
+        "available": m["available"],
+        "path": m["path"],
+        "last_synced": m["last_synced"],
+        "asset_count": len(m["asset_map"]),
+        "keyword_rule_count": len(m["keyword_rules"]),
+        "group_count": len(m["groups"]),
+        "message": m["message"],
+    }
