@@ -525,8 +525,8 @@
                     <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Current Stocked Spare Part Items</span><strong id="spare-current-stocked-items">--</strong></article>
                     <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Total Spare Part PO Value</span><strong id="spare-external-spare-po-value">--</strong></article>
                     <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Stocked Spare Part PO Value</span><strong id="spare-stocked-spare-po-value">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label">Non-Stock / Direct PO Value</span><strong id="spare-non-stock-spare-po-value">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-red"><span class="summary-label">Services / Non-Spare PO Value</span><strong id="spare-non-spare-service-po-value">--</strong></article>
+                    <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label">Non-Stock Value</span><strong id="spare-non-stock-spare-po-value">--</strong></article>
+                    <article class="summary-card summary-card-kpi summary-card-red"><span class="summary-label">Services Value</span><strong id="spare-non-spare-service-po-value">--</strong><span class="spare-kpi-note">Services include repair and cleaning.</span></article>
                     <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label">Manual Review PO Items</span><strong id="spare-manual-review-po-items">--</strong></article>
                 </section>
             </section>
@@ -1083,7 +1083,7 @@
                         <h4 class="ay-table-title">Year Summary</h4>
                         <div class="spare-table-wrap">
                             <table class="spare-table">
-                                <thead><tr><th>Year</th><th>Total Consumption</th><th>Lines</th><th>Unique Assets</th><th>Unique Work Orders</th><th>Unique Parts</th><th>YoY Growth</th></tr></thead>
+                                <thead><tr><th>Year</th><th>Total Consumption</th><th>Lines</th><th>Unique Assets</th><th>Unique Work Orders</th><th>Unique Parts</th><th>YoY Consumption %</th></tr></thead>
                                 <tbody id="ay-summary-body"></tbody>
                             </table>
                         </div>
@@ -1498,7 +1498,7 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/Maintenance/script.js?v=20260603-spare-overview-3" defer></script>
+    <script src="/Maintenance/script.js?v=20260603-spare-yoy-4" defer></script>
     <script src="/Maintenance/pm-schedule.js?v=20260603-pm-floc-8" defer></script>
 
     <!-- ── MIRA feature flag ──────────────────────────────────────────────────

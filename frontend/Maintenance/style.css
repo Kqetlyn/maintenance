@@ -4464,3 +4464,6 @@ th {
     height: 100%; min-height: 200px; padding: 20px; text-align: center;
     font-size: 13px; color: var(--text-muted); font-weight: 600;
 }
+
+/* Spare Parts KPI footnote (e.g. Services include repair and cleaning) */
+.spare-kpi-note { display: block; margin-top: 4px; font-size: 10.5px; color: var(--text-muted); font-weight: 500; line-height: 1.3; }

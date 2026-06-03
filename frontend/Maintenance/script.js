@@ -4119,10 +4119,13 @@ document.addEventListener("DOMContentLoaded", () => {
             }).join("");
         }
 
-        // YoY growth pills
+        // YoY consumption % pills (consumption up is not necessarily good)
         const yoyRow = document.getElementById("ay-yoy-row");
         if (yoyRow) {
             yoyRow.innerHTML = yoyGrowth.map((g) => {
+                if (g.growth_pct === null || g.growth_pct === undefined) {
+                    return `<span class="ay-yoy-pill ay-yoy-flat">${g.from}→${g.to}: ${g.label || "New"}</span>`;
+                }
                 const cls = g.growth_pct > 5 ? "ay-yoy-up" : g.growth_pct < -5 ? "ay-yoy-down" : "ay-yoy-flat";
                 const arrow = g.growth_pct > 0 ? "▲" : g.growth_pct < 0 ? "▼" : "–";
                 return `<span class="ay-yoy-pill ${cls}">${g.from}→${g.to}: ${arrow} ${Math.abs(g.growth_pct)}%</span>`;
@@ -4249,12 +4252,13 @@ document.addEventListener("DOMContentLoaded", () => {
         // Summary table
         const summaryBody = document.getElementById("ay-summary-body");
         if (summaryBody) {
-            const growthMap = Object.fromEntries(yoyGrowth.map((g) => [g.to, g.growth_pct]));
+            const growthMap = Object.fromEntries(yoyGrowth.map((g) => [g.to, g]));
             summaryBody.innerHTML = summary.map((yr) => {
-                const g = growthMap[yr.year];
-                const gStr = g != null
+                const gObj = growthMap[yr.year];
+                const g = gObj ? gObj.growth_pct : undefined;
+                const gStr = (g !== null && g !== undefined)
                     ? `<span class="${g > 5 ? "ay-growth-up" : g < -5 ? "ay-growth-down" : "ay-growth-flat"}">${g > 0 ? "▲" : g < 0 ? "▼" : "–"} ${Math.abs(g)}%</span>`
-                    : `<span class="ay-growth-flat">—</span>`;
+                    : `<span class="ay-growth-flat">${gObj ? (gObj.label || "New") : "—"}</span>`;
                 return `<tr>
                     <td><strong>${yr.year}</strong></td>
                     <td>${ayFmt(yr.total_consumption)}</td>

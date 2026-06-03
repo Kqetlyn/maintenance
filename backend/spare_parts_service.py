@@ -3046,14 +3046,23 @@ def build_all_years_transactions_payload() -> dict:
             for v in sorted(by_desc.values(), key=lambda x: x["total"], reverse=True)
         ]
 
-    # YoY growth between consecutive years
+    # Year-over-year consumption change between consecutive years.
+    # (Consumption rising is not necessarily good, so this is "consumption %", not "growth".)
     yoy_growth = []
     for i in range(1, len(yearly_summary)):
         prev = yearly_summary[i - 1]
         curr = yearly_summary[i]
-        prev_total = prev["total_consumption"] or 1
-        growth = round((curr["total_consumption"] - prev_total) / prev_total * 100, 1)
-        yoy_growth.append({"from": prev["year"], "to": curr["year"], "growth_pct": growth})
+        prev_total = prev["total_consumption"]
+        diff = round(curr["total_consumption"] - (prev_total or 0), 2)
+        if not prev_total:
+            # Previous FY had no consumption — % is undefined; show as "New".
+            yoy_growth.append({"from": prev["year"], "to": curr["year"], "growth_pct": None,
+                               "consumption_pct": None, "consumption_diff": diff, "label": "New"})
+        else:
+            pct = round(diff / prev_total * 100, 1)
+            yoy_growth.append({"from": prev["year"], "to": curr["year"], "growth_pct": pct,
+                               "consumption_pct": pct, "consumption_diff": diff,
+                               "label": f"{'+' if pct > 0 else ''}{pct}%"})
 
     result = {
         "status": "ok",
