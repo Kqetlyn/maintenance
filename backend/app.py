@@ -21,6 +21,17 @@ from maintenance_service import (
     build_equipment_summary_payload,
     build_equipment_timeline_payload,
 )
+from pm_schedule_service import build_pm_schedule_payload
+from pm_schedule_overrides import save_override as save_pm_override
+from pm_planner_store import (
+    get_asset_catalog,
+    create_tasks as create_planner_tasks,
+    update_task as update_planner_task,
+    delete_task as delete_planner_task,
+)
+from pm_schedule_sources import (
+    get_pm_schedule_last_synced,
+)
 from spare_parts_service import (
     build_spare_parts_payload,
     build_project_transactions_payload,
@@ -47,9 +58,20 @@ FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
 # (e.g. Railway persistent volume mounted at /data)
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
+ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
+
+# ── MIRA assistant (local/private prototype) ───────────────────────────────────
+# Isolated module: reuses dashboard KPI outputs only, never raw data. Registering
+# the blueprint is the single touch-point into the existing app. If MIRA fails to
+# import for any reason, the dashboard must still start — so guard the import.
+try:
+    from mira.api import mira_bp
+    app.register_blueprint(mira_bp)
+except Exception as _mira_exc:  # pragma: no cover - defensive isolation
+    print(f"[MIRA] assistant disabled (blueprint not loaded): {_mira_exc}")
 
 
 @app.after_request
@@ -64,7 +86,9 @@ def apply_cache_headers(response):
 
 @app.route("/")
 def root():
-    """Root URL serves the Maintenance page directly."""
+    """Root URL serves the Maintenance page, defaulting to the Downtime view."""
+    if not str(request.args.get("view", "")).strip():
+        return redirect("/?view=downtime")
     return send_from_directory(os.path.join(FRONTEND_DIR, "Maintenance"), "index.html")
 
 
@@ -100,13 +124,29 @@ def asset_list_api():
         machines = []
         for group in mapping["groups"]:
             assets = [
-                {"asset_id": e["asset_id"], "label": e["asset_display_name"]}
+                {
+                    "asset_id": e["asset_id"],
+                    "label": e["asset_display_name"],
+                    "mappedStage": e.get("mappedStage"),
+                    "mappedAssetName": e.get("mappedAssetName") or e.get("asset_display_name"),
+                    "mappedMainAssetGroup": e.get("mappedMainAssetGroup") or group.get("mappedMainAssetGroup"),
+                    "mappedSubAssetGroup": e.get("mappedSubAssetGroup"),
+                    "mappedLocation": e.get("mappedLocation") or group.get("mappedLocation"),
+                    "mappedSystemArea": e.get("mappedSystemArea"),
+                    "mappingStatus": e.get("mappingStatus"),
+                }
                 for e in group.get("asset_entries", [])
             ]
             machines.append({
                 "machine_name": group["machine_group"],
                 "location": group["location"],
                 "criticality": group["criticality"],
+                "mappedStage": group.get("mappedStage"),
+                "mappedMainAssetGroup": group.get("mappedMainAssetGroup") or group["machine_group"],
+                "mappedSubAssetGroup": group.get("mappedSubAssetGroup"),
+                "mappedLocation": group.get("mappedLocation") or group["location"],
+                "mappedSystemArea": group.get("mappedSystemArea"),
+                "mappingStatus": group.get("mappingStatus"),
                 "asset_count": len(assets),
                 "assets": assets,
             })
@@ -125,7 +165,7 @@ def downtime_data():
     period = request.args.get("period")
     month = request.args.get("month")
     work_orders_only = str(request.args.get("work_orders_only", "")).strip().lower() in {"1", "true", "yes", "on"}
-    return jsonify(build_downtime_payload(period, month, request.args.get("start"), request.args.get("end"), work_orders_only=work_orders_only))
+    return jsonify(build_downtime_payload(period, month, request.args.get("start"), request.args.get("end"), work_orders_only=work_orders_only, stage=request.args.get("stage")))
 
 
 @app.route("/api/downtime/import-work-orders", methods=["GET", "POST"])
@@ -142,7 +182,7 @@ def downtime_import_work_orders():
 
 @app.route("/api/downtime/mtbf-history")
 def downtime_mtbf_history():
-    return jsonify(build_mtbf_work_order_history_payload())
+    return jsonify(build_mtbf_work_order_history_payload(stage=request.args.get("stage")))
 
 
 def get_path_mtime_iso(path):
@@ -156,12 +196,12 @@ def get_page_last_synced(page_key):
     key = (page_key or "").strip().lower()
 
     if key == "maintenance":
-        return get_maintenance_import_status().get("last_synced")
+        return get_pm_schedule_last_synced() or get_maintenance_import_status().get("last_synced")
 
     if key == "downtime":
         sources = get_work_order_import_status().get("sources") or []
         latest_source = max((source.get("last_modified") for source in sources if source.get("last_modified")), default=None)
-        return latest_source or get_path_mtime_iso(os.path.join(DATA_DIR, "AssetList_Edit.xlsx"))
+        return latest_source or get_path_mtime_iso(os.path.join(DATA_DIR, ASSET_MASTER_RELATIVE_PATH))
 
     return None
 
@@ -172,6 +212,75 @@ def page_sync(page_key):
 
 
 # ── Maintenance API routes ────────────────────────────────────────────────────
+
+@app.route("/api/maintenance/pm-schedule")
+def maintenance_pm_schedule():
+    """Unified Preventive Maintenance schedule tracking (Stage 1 + Stage 2)."""
+    return jsonify(
+        build_pm_schedule_payload(
+            stage=request.args.get("stage", "all"),
+            year=request.args.get("year", type=int),
+            month=request.args.get("month"),
+        )
+    )
+
+
+@app.route("/api/maintenance/pm-schedule/update", methods=["POST"])
+def maintenance_pm_schedule_update():
+    """Persist a single PM status update into the local override file.
+
+    Edits are never written back to the read-only source workbooks; they are saved
+    to data/pm_schedule_updates.json keyed by pmTaskId and merged on display.
+    """
+    body = request.get_json(silent=True) or {}
+    task_id = body.get("pmTaskId") or body.get("taskId")
+    if not task_id:
+        return jsonify({"ok": False, "message": "pmTaskId is required."}), 400
+    try:
+        # Manual planner tasks are edited in their own store; imported tasks use the
+        # read-only override layer.
+        if str(task_id).startswith("manual_"):
+            record = update_planner_task(task_id, body)
+        else:
+            record = save_pm_override(task_id, body)
+        return jsonify({"ok": True, "record": record})
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - defensive
+        return jsonify({"ok": False, "message": f"Could not save PM update: {exc}"}), 500
+
+
+@app.route("/api/maintenance/pm-assets")
+def maintenance_pm_assets():
+    """Searchable asset catalogue from Asset_Master for the planner form."""
+    return jsonify({"assets": get_asset_catalog()})
+
+
+@app.route("/api/maintenance/pm-schedule/plan", methods=["POST"])
+def maintenance_pm_schedule_plan():
+    """Create a manual PM task (with optional recurrence) in the local planner store."""
+    body = request.get_json(silent=True) or {}
+    confirm = bool(body.get("confirm"))
+    try:
+        result = create_planner_tasks(body, confirm=confirm)
+        status = 200 if result.get("ok") else 409  # 409 -> needs duplicate confirmation
+        return jsonify(result), status
+    except ValueError as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 400
+    except Exception as exc:  # pragma: no cover - defensive
+        return jsonify({"ok": False, "message": f"Could not create PM task: {exc}"}), 500
+
+
+@app.route("/api/maintenance/pm-schedule/delete", methods=["POST"])
+def maintenance_pm_schedule_delete():
+    """Delete a manually planned PM task (imported tasks can only be Cancelled)."""
+    body = request.get_json(silent=True) or {}
+    task_id = body.get("pmTaskId") or body.get("taskId")
+    if not task_id or not str(task_id).startswith("manual_"):
+        return jsonify({"ok": False, "message": "Only manually planned PM tasks can be deleted."}), 400
+    deleted = delete_planner_task(task_id)
+    return jsonify({"ok": deleted, "deleted": deleted})
+
 
 @app.route("/api/maintenance/overview")
 def maintenance_overview():
@@ -320,7 +429,7 @@ def maintenance_import_project_transactions():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5001))
+    port = int(os.environ.get("PORT", 5005))
     debug = os.environ.get("FLASK_DEBUG", "0") not in {"0", "false", "no"}
     print(f"Maintenance standalone server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=debug)

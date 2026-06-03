@@ -1,5 +1,5 @@
 """
-Asset classification loader — single source of truth is AssetList_Edit.xlsx.
+Asset classification loader — single source of truth is data/master/Asset_Master.xlsx.
 
 Public API
 ----------
@@ -19,8 +19,9 @@ from pathlib import Path
 
 import openpyxl
 
-ASSET_LIST_FILENAME = "AssetList_Edit.xlsx"
-ASSET_MAPPING_SHEET = "Asset Mapping"
+ASSET_MASTER_FILENAME = "Asset_Master.xlsx"
+ASSET_MASTER_RELATIVE_PATH = Path("master") / ASSET_MASTER_FILENAME
+ASSET_MAPPING_SHEET = "Asset_Master"
 KEYWORD_RULES_SHEET = "Keyword Rules"
 
 MACHINE_GROUPS = [
@@ -45,9 +46,10 @@ REFRIGERATION_SUBGROUPS = [
 _MACHINE_GROUP_SET = set(MACHINE_GROUPS)
 
 _CANDIDATES = [
-    Path(__file__).resolve().parents[1] / "data" / ASSET_LIST_FILENAME,
-    Path(__file__).resolve().parent / ASSET_LIST_FILENAME,
-    Path.home() / "Downloads" / ASSET_LIST_FILENAME,
+    Path(__file__).resolve().parents[1] / "data" / ASSET_MASTER_RELATIVE_PATH,
+    Path(__file__).resolve().parents[1] / "data" / ASSET_MASTER_FILENAME,
+    Path(__file__).resolve().parent / ASSET_MASTER_FILENAME,
+    Path.home() / "Downloads" / ASSET_MASTER_FILENAME,
 ]
 
 _CACHE = {"sig": None, "payload": None}
@@ -91,13 +93,33 @@ def _normalize_machine_name(value):
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
+def _normalize_header(value):
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _normalize_stage(value):
+    text = _clean(value)
+    normalized = re.sub(r"\s+", "", text.lower())
+    if normalized in {"stage1", "st1", "s1"}:
+        return "Stage 1"
+    if normalized in {"stage2", "st2", "s2"}:
+        return "Stage 2"
+    return "Needs Stage Review"
+
+
+def _stage_mapping_status(stage, asset_id):
+    if not asset_id:
+        return "Missing Asset ID"
+    return "Mapped" if stage in {"Stage 1", "Stage 2"} else "Needs Stage Review"
+
+
 def _build_group_aliases(name):
     aliases = {_normalize_machine_name(name), re.sub(r"[^a-z0-9]", "", _normalize_machine_name(name))}
     return sorted({a for a in aliases if a}, key=len, reverse=True)
 
 
 def _resolve_path(data_dir):
-    candidates = [Path(data_dir) / ASSET_LIST_FILENAME] + list(_CANDIDATES)
+    candidates = [Path(data_dir) / ASSET_MASTER_RELATIVE_PATH, Path(data_dir) / ASSET_MASTER_FILENAME] + list(_CANDIDATES)
     seen = set()
     for p in candidates:
         try:
@@ -121,13 +143,13 @@ def load_asset_mapping(data_dir):
 
     empty = {
         "available": False,
-        "path": str(path or (Path(data_dir) / ASSET_LIST_FILENAME)),
+        "path": str(path or (Path(data_dir) / ASSET_MASTER_RELATIVE_PATH)),
         "last_synced": None,
         "asset_map": {},
         "keyword_rules": [],
         "groups": [],
         "group_matchers": [],
-        "message": f"{ASSET_LIST_FILENAME} not found.",
+        "message": f"{ASSET_MASTER_RELATIVE_PATH.as_posix()} not found.",
     }
 
     if not path:
@@ -137,11 +159,11 @@ def load_asset_mapping(data_dir):
     try:
         wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
     except Exception as exc:
-        empty["message"] = f"Cannot open {ASSET_LIST_FILENAME}: {exc}"
+        empty["message"] = f"Cannot open {ASSET_MASTER_FILENAME}: {exc}"
         raise RuntimeError(empty["message"]) from exc
 
     if ASSET_MAPPING_SHEET not in wb.sheetnames:
-        msg = f"{ASSET_LIST_FILENAME} is missing the '{ASSET_MAPPING_SHEET}' sheet."
+        msg = f"{ASSET_MASTER_FILENAME} is missing the '{ASSET_MAPPING_SHEET}' sheet."
         raise RuntimeError(msg)
 
     # ── Parse Asset Mapping ───────────────────────────────────────────────────
@@ -150,8 +172,20 @@ def load_asset_mapping(data_dir):
     groups = []
     group_matchers = []
 
-    for row in ws.iter_rows(min_row=3, values_only=True):
-        raw_id = row[0]
+    header_row = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), [])
+    header_index = {_normalize_header(value): idx for idx, value in enumerate(header_row)}
+
+    def cell(row, *names, fallback_index=None):
+        for name in names:
+            idx = header_index.get(_normalize_header(name))
+            if idx is not None and idx < len(row):
+                return row[idx]
+        if fallback_index is not None and fallback_index < len(row):
+            return row[fallback_index]
+        return None
+
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        raw_id = cell(row, "Asset ID", "AssetID", fallback_index=0)
         if raw_id is None:
             continue
         if _is_banner(raw_id):
@@ -160,35 +194,53 @@ def load_asset_mapping(data_dir):
         if not asset_id:
             continue
 
-        active = _truthy(row[8] if len(row) > 8 else None)
-        if not active:
-            continue
+        display_name = _clean(cell(row, "Asset Name", "DisplayName", fallback_index=1), asset_id)
+        stage = _normalize_stage(cell(row, "Stage", fallback_index=2))
+        mapping_status = _stage_mapping_status(stage, asset_id)
+        machine_group = _clean(cell(row, "Main Asset Group", "MachineGroup", fallback_index=3), "Unknown / Review")
+        sub_asset_group = _clean(cell(row, "Sub Asset Group", fallback_index=4), "")
+        location = _clean(cell(row, "Location", fallback_index=5), "Unassigned")
+        system_area = _clean(cell(row, "System/Area", "System Area", fallback_index=6), "")
+        remarks = _clean(cell(row, "Remarks", fallback_index=7), "")
 
-        display_name = _clean(row[1] if len(row) > 1 else None, asset_id)
-        machine_group = _clean(row[2] if len(row) > 2 else None, "Unknown / Review")
-        location = _clean(row[3] if len(row) > 3 else None, "Unassigned")
-        raw_criticality = _clean(row[4] if len(row) > 4 else None)
-        criticality = _normalize_criticality(raw_criticality) if raw_criticality else "Unmapped"
-        refrigeration_role = _clean(row[5] if len(row) > 5 else None)
-        parent_asset_id = _clean(row[6] if len(row) > 6 else None).upper() or None
-        refrigeration_subgroup = _clean(row[7] if len(row) > 7 else None)
-
-        criticality_rank = {"Critical": 1, "Non-Critical": 2, "Facility": 2, "Unmapped": 999}.get(criticality, 999)
+        raw_criticality = ""
+        criticality = "Unmapped" if mapping_status != "Mapped" else "Non-Critical"
+        criticality_rank = 999 if mapping_status != "Mapped" else 2
+        refrigeration_role = "Other" if machine_group == "Refrigeration" else ""
+        parent_asset_id = None
+        refrigeration_subgroup = sub_asset_group or None
 
         entry = {
             "asset_id": asset_id,
             "display_name": display_name,
             "machine_group": machine_group,
             "location": location,
+            "stage": stage,
+            "mappedStage": stage,
+            "mappedAssetName": display_name,
+            "mappedMainAssetGroup": machine_group,
+            "mappedSubAssetGroup": sub_asset_group,
+            "mappedLocation": location,
+            "mappedSystemArea": system_area,
+            "mappingStatus": mapping_status,
+            "mapped_stage": stage,
+            "mapped_asset_name": display_name,
+            "mapped_main_asset_group": machine_group,
+            "mapped_sub_asset_group": sub_asset_group,
+            "mapped_location": location,
+            "mapped_system_area": system_area,
+            "mapping_status": mapping_status,
+            "remarks": remarks,
             "criticality": criticality,
             "raw_criticality": raw_criticality,
             "criticality_rank": criticality_rank,
             "refrigeration_role": refrigeration_role or None,
             "parent_asset_id": parent_asset_id,
             "refrigeration_subgroup": refrigeration_subgroup or None,
-            "mapping_source": ASSET_LIST_FILENAME,
-            "classification_source": ASSET_LIST_FILENAME,
-            "has_assetlist_classification": bool(raw_criticality),
+            "mapping_source": ASSET_MASTER_FILENAME,
+            "classification_source": ASSET_MASTER_FILENAME,
+            "has_assetlist_classification": mapping_status == "Mapped",
+            "has_asset_master_mapping": mapping_status == "Mapped",
             # Legacy compat fields used by downtime_management
             "machine_name_display": display_name,
             "asset_label": asset_id,
@@ -210,8 +262,14 @@ def load_asset_mapping(data_dir):
                 "criticality": criticality,
                 "raw_criticality": raw_criticality,
                 "criticality_rank": criticality_rank,
-                "classification_source": ASSET_LIST_FILENAME,
-                "has_assetlist_classification": bool(raw_criticality),
+                "classification_source": ASSET_MASTER_FILENAME,
+                "has_assetlist_classification": mapping_status == "Mapped",
+                "mappedStage": stage,
+                "mappedMainAssetGroup": machine_group,
+                "mappedSubAssetGroup": sub_asset_group,
+                "mappedLocation": location,
+                "mappedSystemArea": system_area,
+                "mappingStatus": mapping_status,
                 "asset_ids": [],
                 "asset_entries": [],
             }
@@ -224,13 +282,30 @@ def load_asset_mapping(data_dir):
                 "criticality": criticality,
                 "raw_criticality": raw_criticality,
                 "criticality_rank": criticality_rank,
-                "classification_source": ASSET_LIST_FILENAME,
-                "has_assetlist_classification": bool(raw_criticality),
+                "classification_source": ASSET_MASTER_FILENAME,
+                "has_assetlist_classification": mapping_status == "Mapped",
+                "mappedStage": stage,
+                "mappedMainAssetGroup": machine_group,
+                "mappedSubAssetGroup": sub_asset_group,
+                "mappedLocation": location,
+                "mappedSystemArea": system_area,
+                "mappingStatus": mapping_status,
                 "aliases": _build_group_aliases(machine_group),
             })
             existing = g
         existing["asset_ids"].append(asset_id)
-        existing["asset_entries"].append({"asset_id": asset_id, "asset_label": asset_id, "asset_display_name": display_name})
+        existing["asset_entries"].append({
+            "asset_id": asset_id,
+            "asset_label": asset_id,
+            "asset_display_name": display_name,
+            "mappedStage": stage,
+            "mappedAssetName": display_name,
+            "mappedMainAssetGroup": machine_group,
+            "mappedSubAssetGroup": sub_asset_group,
+            "mappedLocation": location,
+            "mappedSystemArea": system_area,
+            "mappingStatus": mapping_status,
+        })
 
     # Back-fill group_asset_ids into each asset_map entry
     for group in groups:
@@ -272,7 +347,7 @@ def load_asset_mapping(data_dir):
             key=lambda m: max((len(a) for a in m["aliases"]), default=0),
             reverse=True,
         ),
-        "message": f"{ASSET_LIST_FILENAME} loaded ({len(asset_map)} assets, {len(keyword_rules)} keyword rules).",
+        "message": f"{ASSET_MASTER_FILENAME} loaded ({len(asset_map)} assets, {len(keyword_rules)} keyword rules).",
     }
     _CACHE.update(sig=sig, payload=payload)
     return payload
@@ -285,7 +360,9 @@ def classify_work_order(record, mapping):
     Returns a dict with: asset_id, display_name, machine_group, criticality,
     raw_criticality, criticality_rank, refrigeration_role, parent_asset_id,
     refrigeration_subgroup, mapping_source, classification_source,
-    has_assetlist_classification, group_asset_ids,
+    has_assetlist_classification, mappedStage, mappedAssetName,
+    mappedMainAssetGroup, mappedSubAssetGroup, mappedLocation,
+    mappedSystemArea, mappingStatus, group_asset_ids,
     machine_name_display, asset_label, asset_display_name, location, building.
     """
     asset_map = mapping.get("asset_map", {})
@@ -324,6 +401,11 @@ def classify_work_order(record, mapping):
                 result["display_name"] = maps_to
                 result["machine_name_display"] = maps_to
                 result["mapping_source"] = "keyword"
+                result["classification_source"] = "keyword"
+                result["mappingStatus"] = "Keyword Matched"
+                result["mapping_status"] = "Keyword Matched"
+                result["has_assetlist_classification"] = False
+                result["has_asset_master_mapping"] = False
                 return result
             # MapsTo doesn't match a display name — treat as a machine-group label
             return _fallback_entry(raw_id, record, maps_to, "keyword")
@@ -340,6 +422,16 @@ def _fallback_entry(asset_id, record, machine_group, source):
         or "Unmapped Asset"
     )
     location = str(record.get("raw_functional_location") or record.get("area") or record.get("location") or "Unassigned").strip()
+    is_missing_asset_id = not str(asset_id or "").strip()
+    if source == "keyword":
+        mapping_status = "Keyword Matched"
+        mapped_stage = "Needs Stage Review"
+    elif is_missing_asset_id:
+        mapping_status = "Missing Asset ID"
+        mapped_stage = "Missing Asset ID"
+    else:
+        mapping_status = "Unmapped"
+        mapped_stage = "Unmapped"
     criticality = "Unmapped" if machine_group in {"Unknown / Review", "Unmapped"} else "Non-Critical"
     criticality_rank = 999 if criticality == "Unmapped" else 2
     return {
@@ -348,6 +440,21 @@ def _fallback_entry(asset_id, record, machine_group, source):
         "machine_group": machine_group,
         "location": location,
         "building": location,
+        "stage": mapped_stage,
+        "mappedStage": mapped_stage,
+        "mappedAssetName": display,
+        "mappedMainAssetGroup": machine_group,
+        "mappedSubAssetGroup": "",
+        "mappedLocation": location,
+        "mappedSystemArea": "",
+        "mappingStatus": mapping_status,
+        "mapped_stage": mapped_stage,
+        "mapped_asset_name": display,
+        "mapped_main_asset_group": machine_group,
+        "mapped_sub_asset_group": "",
+        "mapped_location": location,
+        "mapped_system_area": "",
+        "mapping_status": mapping_status,
         "criticality": criticality,
         "raw_criticality": "",
         "criticality_rank": criticality_rank,
@@ -357,6 +464,7 @@ def _fallback_entry(asset_id, record, machine_group, source):
         "mapping_source": source,
         "classification_source": source,
         "has_assetlist_classification": False,
+        "has_asset_master_mapping": False,
         "machine_name_display": display,
         "asset_label": asset_id,
         "asset_display_name": display,

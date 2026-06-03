@@ -10,7 +10,7 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260522-mttr-days-3">
+    <link rel="stylesheet" href="style.css?v=20260528-history-date-range-1">
     <link rel="stylesheet" href="/shared/navbar.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -46,6 +46,15 @@
                 </select>
                 <input id="custom-start" type="hidden" value="">
                 <input id="custom-end" type="hidden" value="">
+                <div class="filter-inline stage-filter-inline">
+                    <label class="inline-label" for="downtime-stage-filter">Stage</label>
+                    <select id="downtime-stage-filter" class="inline-select">
+                        <option value="all" selected>Both</option>
+                        <option value="Stage 1">Stage 1</option>
+                        <option value="Stage 2">Stage 2</option>
+                    </select>
+                </div>
+                <button class="toggle-btn" type="button" id="refresh-asset-mapping-btn">Refresh Asset Mapping</button>
                 <form class="filter-inline import-inline" id="work-order-import-form">
                     <label class="inline-label" for="work-order-import-file">Import WO</label>
                     <input id="work-order-import-file" class="inline-file" name="file" type="file" accept=".csv,.xlsx,.xls">
@@ -890,6 +899,8 @@
                     <div class="mr-carryover-header">
                         <div>
                             <div class="card-title">Maintenance Type Review List</div>
+                            <div class="preventive-corrective-review-summary" id="pm-cm-review-summary">Loading review summary.</div>
+                            <div class="cell-sub" id="pm-cm-list-subtitle">Loading maintenance type review.</div>
                         </div>
                         <div class="filter-inline">
                             <label class="inline-label" for="pm-cm-list-filter">List</label>
@@ -912,10 +923,67 @@
                                     <th>Created / Raised</th>
                                     <th>Description</th>
                                     <th>Translated Description</th>
+                                    <th>Review Decision</th>
                                 </tr>
                             </thead>
                             <tbody id="pm-cm-list-body">
-                                <tr><td colspan="7" class="empty-cell">Loading maintenance type review.</td></tr>
+                                <tr><td colspan="8" class="empty-cell">Loading maintenance type review.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="topic-analysis-toggle" data-analysis-toggle aria-expanded="false">View Analysis</button>
+            <div class="topic-analysis-only topic-analysis-stack preventive-analysis-stack">
+                <div class="mr-movement-subhead">
+                    <div class="card-title">Preventive vs Corrective Year / Financial Year Analysis</div>
+                </div>
+                <div class="filter-toolbar preventive-analysis-toolbar">
+                    <div class="filter-group">
+                        <label for="topic-preventive-analysis-type-filter">Chart Data</label>
+                        <select id="topic-preventive-analysis-type-filter" class="inline-select">
+                            <option value="preventive">Logged Preventive</option>
+                            <option value="corrective">Logged Corrective</option>
+                            <option value="review">Data Review</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="topic-preventive-analysis-period-filter">Period</label>
+                        <select id="topic-preventive-analysis-period-filter" class="inline-select">
+                            <option value="full">Full FY</option>
+                            <option value="ytd">YTD</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="topic-preventive-analysis-year-mode-filter">Year Type</label>
+                        <select id="topic-preventive-analysis-year-mode-filter" class="inline-select">
+                            <option value="calendar">Year</option>
+                            <option value="financial" selected>Financial Year</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label id="topic-preventive-analysis-year-label" for="topic-preventive-financial-year-filter">Financial Year</label>
+                        <select id="topic-preventive-financial-year-filter" class="inline-select">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="card nested-card preventive-analysis-card">
+                    <div class="card-title" id="preventive-analysis-chart-title">Maintenance Type Total</div>
+                    <div class="chart-container compact-chart preventive-analysis-chart-wrap" data-chart-id="preventiveCorrectiveAnalysisChart">
+                        <canvas id="preventiveCorrectiveAnalysisChart"></canvas>
+                    </div>
+                    <div class="preventive-corrective-note" id="preventive-analysis-note">Loading preventive financial year analysis.</div>
+                    <div class="table-wrapper compact-table-wrapper preventive-analysis-table-wrapper">
+                        <table>
+                            <thead>
+                                <tr id="preventive-analysis-table-head">
+                                    <th>Metric</th>
+                                    <th>Loading...</th>
+                                </tr>
+                            </thead>
+                            <tbody id="preventive-analysis-table-body">
+                                <tr><td colspan="13" class="empty-cell">Loading preventive financial year analysis.</td></tr>
                             </tbody>
                         </table>
                     </div>
@@ -927,7 +995,7 @@
             <div class="mr-movement-header">
                 <div>
                     <div class="card-title" id="wo-response-title">Work Order Response by Severity</div>
-                    <p class="card-subtitle" id="wo-sla-target-source">SLA targets load from AssetList_Edit.xlsx &gt; SLA_Targets when available.</p>
+                    <p class="card-subtitle" id="wo-sla-target-source">SLA targets load from Asset_Master.xlsx &gt; SLA_Targets when available.</p>
                 </div>
                 <div class="wo-response-filter-row">
                     <div class="filter-inline">
@@ -1492,6 +1560,12 @@
                                         <option value="">All Months</option>
                                     </select>
                                 </div>
+                                <div class="filter-inline custom-date-filter">
+                                    <label class="inline-label" for="machine-history-date-from">Date Range</label>
+                                    <input id="machine-history-date-from" type="date" class="inline-date" aria-label="History start date" title="History start date">
+                                    <span class="inline-range-separator">to</span>
+                                    <input id="machine-history-date-to" type="date" class="inline-date" aria-label="History end date" title="History end date">
+                                </div>
                                 <div class="filter-inline filter-grow">
                                     <label class="inline-label" for="machine-history-search">Search</label>
                                     <input id="machine-history-search" type="text" class="inline-input" placeholder="MR/WO ID, description…">
@@ -1648,6 +1722,6 @@
 
     </main>
 
-    <script src="script.js?v=20260522-mttr-days-3" defer></script>
+    <script src="script.js?v=20260528-history-date-range-1" defer></script>
 </body>
 </html>

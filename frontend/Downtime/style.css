@@ -109,6 +109,14 @@ html.downtime-embed .dashboard-content {
     font-weight: 600;
 }
 
+.stage-filter-inline .inline-select {
+    min-width: 120px;
+}
+
+#refresh-asset-mapping-btn {
+    white-space: nowrap;
+}
+
 .inline-input {
     border: none;
     background: transparent;
@@ -134,7 +142,14 @@ html.downtime-embed .dashboard-content {
 }
 
 .custom-date-filter {
+    flex-wrap: wrap;
     gap: 8px;
+}
+
+.inline-range-separator {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
 }
 
 .import-inline {
@@ -835,12 +850,87 @@ html.downtime-embed .dashboard-content {
     max-height: 360px;
 }
 
+.pm-cm-action-cell {
+    min-width: 150px;
+}
+
+.pm-cm-action-group {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.pm-cm-review-btn {
+    appearance: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.68rem;
+    font-weight: 800;
+    line-height: 1.1;
+    padding: 7px 9px;
+    white-space: nowrap;
+}
+
+.pm-cm-review-btn.preventive {
+    background: #dcfce7;
+    border-color: #86efac;
+    color: #166534;
+}
+
+.pm-cm-review-btn.corrective {
+    background: #fee2e2;
+    border-color: #fecaca;
+    color: #991b1b;
+}
+
+.pm-cm-review-btn.reset {
+    background: #f8fafc;
+    color: #475569;
+}
+
+.pm-cm-review-btn:hover {
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+    transform: translateY(-1px);
+}
+
 .preventive-corrective-note {
     color: var(--text-muted);
     font-size: 0.82rem;
     font-weight: 700;
     line-height: 1.45;
     margin-top: 10px;
+}
+
+.preventive-analysis-stack {
+    margin-top: 0;
+}
+
+.preventive-analysis-toolbar {
+    grid-template-columns: repeat(4, minmax(140px, 210px));
+    margin-bottom: 12px;
+}
+
+.preventive-analysis-card {
+    min-width: 0;
+}
+
+.preventive-analysis-chart-wrap {
+    min-height: 360px;
+}
+
+.preventive-analysis-table-wrapper {
+    margin-top: 14px;
+    max-height: 320px;
+}
+
+.preventive-analysis-table-wrapper thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--card);
+    white-space: nowrap;
 }
 
 .pm-cm-type-pill {
@@ -868,6 +958,19 @@ html.downtime-embed .dashboard-content {
 .pm-cm-type-pill.review {
     background: #fef3c7;
     color: #92400e;
+}
+
+.pm-cm-type-pill.reviewed {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+
+.preventive-corrective-review-summary {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    font-weight: 800;
+    line-height: 1.35;
+    margin-top: 4px;
 }
 
 .wo-response-open-severity-head {
@@ -2028,6 +2131,11 @@ canvas {
 
 .machine-detail-inner .machine-drill-heading-row .inline-input {
     color: #0f172a;
+}
+
+.machine-detail-inner .machine-drill-heading-row .inline-date {
+    color: #0f172a;
+    outline: none;
 }
 
 .machine-detail-inner .machine-drill-heading-row .inline-input::placeholder {

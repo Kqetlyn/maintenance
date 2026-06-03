@@ -95,7 +95,7 @@ document.addEventListener("DOMContentLoaded", () => {
         { value: "custom", label: "Custom Range" },
     ];
     const state = {
-        activeView: ["overview", "utility", "equipment", "spare_parts", "analysis", "downtime"].includes(initialView) ? initialView : "overview",
+        activeView: ["overview", "spare_parts", "analysis", "downtime"].includes(initialView) ? initialView : "overview",
         overviewMonth: "",
         overviewCategory: "all",
         overviewStatus: "all",
@@ -147,7 +147,6 @@ document.addEventListener("DOMContentLoaded", () => {
             month: "all",
             category: "all",
             asset: "all",
-            linkStatus: "all",
             search: "",
         },
         ptCurrency: "THB",
@@ -211,6 +210,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     async function initialize() {
         bindControls();
+        bindPtInsightTabs();
         bindDowntimeEmbedFrame();
         await loadActiveView();
     }
@@ -243,6 +243,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const isSpareParts = state.activeView === "spare_parts";
         const isAnalysis = state.activeView === "analysis";
         const isDowntime = state.activeView === "downtime";
+        const isMira = state.activeView === "mira";
         document.body.classList.toggle("maintenance-equipment", isEquipment);
         document.body.classList.toggle("maintenance-spare-parts", isSpareParts);
         document.body.classList.toggle("maintenance-analysis", isAnalysis);
@@ -253,48 +254,41 @@ document.addEventListener("DOMContentLoaded", () => {
             weeklyCompletionCard.hidden = !isOverview && !isEquipment;
         }
         document.getElementById("overview-view")?.classList.toggle("hidden", !isOverview);
-        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis || isDowntime);
+        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis || isDowntime || isMira);
         document.getElementById("spare-parts-view")?.classList.toggle("hidden", !isSpareParts);
         document.getElementById("analysis-view")?.classList.toggle("hidden", !isAnalysis);
         document.getElementById("downtime-view")?.classList.toggle("hidden", !isDowntime);
+        document.getElementById("mira-view")?.classList.toggle("hidden", !isMira);
         document.querySelectorAll("[data-view-tab]").forEach((button) => {
             button.classList.toggle("active", (button.dataset.viewTab || "utility") === state.activeView);
         });
         setText(
             "maintenance-page-title",
             isOverview
-                ? "Maintenance Overview"
+                ? "Preventive Maintenance Schedule"
                 : isSpareParts
                 ? "Spare Parts"
-                : isAnalysis
-                ? "Maintenance Analysis"
+                : isMira
+                ? "MIRA Assistant"
                 : isDowntime
                 ? "Downtime"
-                : (isEquipment ? "Production Equipment Maintenance" : "Utility Maintenance")
+                : "PM Schedule"
         );
         setText(
             "maintenance-page-subtitle",
             isOverview
-                ? "Preventive maintenance summary across utility and equipment schedules from the current imported sources"
+                ? "Monthly PM planning, completion tracking, backlog, and compliance overview."
                 : isSpareParts
                 ? "Inventory and external spare-parts management view"
-                : isAnalysis
-                ? "Minitab-style maintenance reliability analysis inside the dashboard"
+                : isMira
+                ? "Local assistant that explains and summarises dashboard KPI outputs — draft analysis for review"
                 : isDowntime
                 ? "Local work-order downtime tracking and review inside the Maintenance dashboard"
-                : isEquipment
-                ? "Production equipment preventive maintenance planning with risk-based schedule visibility"
-                : "Utility preventive maintenance planning and schedule visibility for management review"
+                : "Unified preventive maintenance planning and schedule visibility"
         );
         setText("summary-assets-label", isEquipment ? "Total Equipment Assets" : "Total Utility Assets");
         setText("summary-quarter-label", isEquipment ? "Assets Covered This Quarter" : "Tasks This Quarter");
         setText("monthly-section-title", isEquipment ? "Monthly Equipment Maintenance" : "Monthly Maintenance");
-        setText(
-            "monthly-section-subtitle",
-            isEquipment
-                ? "Interactive month summary and progress breakdown by risk category or production area"
-                : "Interactive month summary and maintenance status breakdown"
-        );
         setText("breakdown-title", isEquipment ? "Risk & Area Breakdown" : "Breakdown");
         setText(
             "breakdown-subtitle",
@@ -313,12 +307,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 : "Month-by-month preventive maintenance load for the selected year"
         );
         setText("maintenance-list-title", isEquipment ? "Equipment Maintenance List" : "Maintenance List");
-        setText(
-            "maintenance-list-subtitle",
-            isEquipment
-                ? "Filter by month, progress, risk category, area, and equipment details"
-                : "Filter by month, status, category, location, and machine details"
-        );
         setText("filter-category-label", isEquipment ? "Risk Category" : "Category");
         setText("filter-location-label", isEquipment ? "Area" : "Location");
         setText("maintenance-category-heading", isEquipment ? "Risk Category" : "Category");
@@ -339,12 +327,18 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         if (state.activeView === "overview") {
-            await loadOverviewView();
+            // Overview is now rendered by the unified PM schedule module (pm-schedule.js).
             return;
         }
 
         if (state.activeView === "spare_parts") {
             await loadSparePartsView();
+            return;
+        }
+
+        if (state.activeView === "mira") {
+            // MIRA is a self-contained assistant panel (shared/mira/mira-panel.js).
+            // Nothing for the dashboard loader to fetch.
             return;
         }
 
@@ -442,7 +436,6 @@ document.addEventListener("DOMContentLoaded", () => {
             ["pt-month-filter", "month"],
             ["pt-category-filter", "category"],
             ["pt-asset-filter", "asset"],
-            ["pt-link-filter", "linkStatus"],
         ].forEach(([id, key]) => {
             document.getElementById(id)?.addEventListener("change", (event) => {
                 state.ptFilters[key] = event.target.value || "all";
@@ -2805,17 +2798,6 @@ document.addEventListener("DOMContentLoaded", () => {
         state.sparePartsData = payload;
         populateSparePartsFilters(payload);
         renderSparePartsDashboard(payload);
-
-        // If all-years finished while spare_parts was loading, re-merge year filter now
-        if (ayData?.years?.length) {
-            const allDates = collectSpareDates(payload);
-            const txYears = (ayData.years || []).map((y) => String(y));
-            const mergedYears = [...new Set([
-                ...allDates.map((d) => d.slice(0, 4)).filter((y) => /^\d{4}$/.test(y)),
-                ...txYears,
-            ])].sort((a, b) => Number(b) - Number(a));
-            populateSpareSelect("spare-year-filter", mergedYears, "All Years", state.sparePartsFilters.year);
-        }
     }
 
     function createEmptySparePartsPayload(message) {
@@ -2929,9 +2911,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function populateSparePartsFilters(payload) {
-        const allDates = collectSpareDates(payload);
-        const years = [...new Set(allDates.map((date) => date.slice(0, 4)).filter((year) => /^\d{4}$/.test(year)))].sort((a, b) => Number(b) - Number(a));
-        const months = [...new Set(allDates.map((date) => date.slice(0, 7)).filter((month) => /^\d{4}-\d{2}$/.test(month)))].sort().reverse();
+        const purchaseDates = collectSparePurchaseDates(payload);
+        const years = [...new Set(purchaseDates.map((date) => date.slice(0, 4)).filter((year) => /^\d{4}$/.test(year)))].sort((a, b) => Number(b) - Number(a));
+        const months = [...new Set(purchaseDates.map((date) => date.slice(0, 7)).filter((month) => /^\d{4}-\d{2}$/.test(month)))].sort().reverse();
         populateSpareSelect("spare-year-filter", years, "All Years", state.sparePartsFilters.year);
         populateSpareSelect("spare-month-filter", months, "All Months", state.sparePartsFilters.month, formatSpareMonthLabel);
 
@@ -3007,19 +2989,20 @@ document.addEventListener("DOMContentLoaded", () => {
     function renderSparePartsDashboard(payload) {
         mountExternalPurchasesInSparePanel();
         syncSparePanelSelection();
+        syncSparePurchaseDateControls(payload);
         const filtered = getFilteredSparePartsData(payload);
-        renderSparePageNotes(payload);
+        renderSpareOverviewContext(filtered);
         renderSparePartsKpis(filtered, payload);
         renderSpareStockHealthSummary(filtered);
         renderSparePartsCharts(filtered);
         renderSparePartsTables(filtered, payload);
     }
 
-    function collectSpareDates(payload) {
-        return [
-            ...(payload?.inventory?.records || []).map((row) => row?.last_updated),
-            ...(payload?.po_classification?.records || []).map((row) => row?.po_date),
-        ].filter((value) => /^\d{4}-\d{2}-\d{2}/.test(String(value || "")));
+    function collectSparePurchaseDates(payload) {
+        return (payload?.po_classification?.records || []).flatMap((row) => [
+            row?.po_date,
+            row?.goods_received_date,
+        ]).filter((value) => /^\d{4}-\d{2}-\d{2}/.test(String(value || "")));
     }
 
     function uniqueSorted(values) {
@@ -3042,22 +3025,42 @@ document.addEventListener("DOMContentLoaded", () => {
         );
     }
 
+    function sparePurchaseDateFilterActive() {
+        const filters = state.sparePartsFilters || {};
+        return Boolean(
+            filters.period !== "all"
+            || filters.year !== "all"
+            || filters.month !== "all"
+            || filters.startDate
+            || filters.endDate
+        );
+    }
+
     function getSpareDateRange() {
         const filters = state.sparePartsFilters;
-        const today = new Date();
         // When the date controls are not rendered on the current Spare Parts page,
         // keep all imported years visible instead of silently applying a hidden range.
         if (!sparePartsHasDateFilterControls()) return null;
-        if (filters.period === "all") return null;
-        if (filters.period === "month") {
-            const month = filters.month !== "all" ? filters.month : `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+        if (filters.month !== "all") {
+            const month = filters.month;
             const start = new Date(`${month}-01T00:00:00`);
             const end = new Date(start.getFullYear(), start.getMonth() + 1, 0, 23, 59, 59, 999);
             return { start, end };
         }
-        if (filters.period === "year") {
-            const year = filters.year !== "all" ? Number(filters.year) : today.getFullYear();
+        if (filters.year !== "all") {
+            const year = Number(filters.year);
             return { start: new Date(year, 0, 1), end: new Date(year, 11, 31, 23, 59, 59, 999) };
+        }
+        const today = new Date();
+        if (filters.period === "all") return null;
+        if (filters.period === "year") {
+            return { start: new Date(today.getFullYear(), 0, 1), end: new Date(today.getFullYear(), 11, 31, 23, 59, 59, 999) };
+        }
+        if (filters.period === "month") {
+            const month = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}`;
+            const start = new Date(`${month}-01T00:00:00`);
+            const end = new Date(start.getFullYear(), start.getMonth() + 1, 0, 23, 59, 59, 999);
+            return { start, end };
         }
         if (filters.period === "custom") {
             const start = filters.startDate ? new Date(`${filters.startDate}T00:00:00`) : null;
@@ -3065,6 +3068,23 @@ document.addEventListener("DOMContentLoaded", () => {
             return start && end && !Number.isNaN(start.getTime()) && !Number.isNaN(end.getTime()) ? { start, end } : null;
         }
         return { start: new Date(today.getFullYear(), 0, 1), end: today };
+    }
+
+    function syncSparePurchaseDateControls(payload) {
+        const years = [...new Set(collectSparePurchaseDates(payload).map((date) => date.slice(0, 4)).filter((year) => /^\d{4}$/.test(year)))].sort((a, b) => Number(b) - Number(a));
+        const months = [...new Set(collectSparePurchaseDates(payload).map((date) => date.slice(0, 7)).filter((month) => /^\d{4}-\d{2}$/.test(month)))].sort().reverse();
+        const yearNode = document.getElementById("spare-year-filter");
+        const monthNode = document.getElementById("spare-month-filter");
+        const periodNode = document.getElementById("spare-period-filter");
+        if (periodNode) periodNode.value = state.sparePartsFilters.period || "all";
+        if (yearNode && !years.includes(state.sparePartsFilters.year)) {
+            state.sparePartsFilters.year = "all";
+            yearNode.value = "all";
+        }
+        if (monthNode && !months.includes(state.sparePartsFilters.month)) {
+            state.sparePartsFilters.month = "all";
+            monthNode.value = "all";
+        }
     }
 
     function rowWithinSpareRange(row, dateKeys, includeUndated = false) {
@@ -3153,7 +3173,6 @@ document.addEventListener("DOMContentLoaded", () => {
     function getFilteredSparePartsData(payload) {
         const filters = state.sparePartsFilters;
         const inventory = (payload?.inventory?.records || [])
-            .filter((row) => rowWithinSpareRange(row, ["last_updated"], true))
             .filter((row) => !filters.itemCode || String(row?.code || "").toLowerCase().includes(filters.itemCode))
             .filter((row) => filters.stockStatus === "all" || row?.stock_status_group === filters.stockStatus)
             .filter((row) => {
@@ -3163,7 +3182,7 @@ document.addEventListener("DOMContentLoaded", () => {
             });
 
         const poRows = (payload?.po_classification?.records || [])
-            .filter((row) => rowWithinSpareRange(row, ["po_date", "goods_received_date"], true))
+            .filter((row) => rowWithinSpareRange(row, ["po_date", "goods_received_date"], false))
             .filter((row) => !filters.itemCode || String(row?.code || "").toLowerCase().includes(filters.itemCode))
             .filter((row) => !filters.search || [
                 row?.code,
@@ -3216,24 +3235,29 @@ document.addEventListener("DOMContentLoaded", () => {
         node.innerHTML = `<span class="spare-kpi-value ${displayMode}">${escapeHtml(text)}</span>`;
     }
 
-    function renderSparePageNotes(payload) {
-        const node = document.getElementById("spare-page-notes");
+    function renderSpareOverviewContext(filtered) {
+        const node = document.getElementById("spare-overview-context");
         if (!node) return;
-        const notes = [
-            ...((payload?.comparison?.notes || []).filter(Boolean)),
-            ...((payload?.meta?.errors || []).filter(Boolean)),
-            ...((payload?.structured_errors || []).filter(Boolean)),
-        ];
-        if (!notes.length) {
-            node.innerHTML = "";
+        const filters = state.sparePartsFilters || {};
+        const rowCount = formatInteger((filtered?.poRows || []).length);
+        if (filters.month !== "all") {
+            node.textContent = `${formatSpareMonthLabel(filters.month)} purchase view. ${rowCount} Gen PO row(s) match the current filters.`;
             return;
         }
-        node.innerHTML = notes.map((note) => `<div class="spare-note-item">${escapeHtml(note)}</div>`).join("");
+        if (filters.year !== "all") {
+            node.textContent = `${filters.year} purchase view. ${rowCount} Gen PO row(s) match the current filters.`;
+            return;
+        }
+        if (filters.period === "ytd") {
+            node.textContent = `${new Date().getFullYear()} year-to-date purchase view. ${rowCount} Gen PO row(s) match the current filters.`;
+            return;
+        }
+        node.textContent = `Showing all imported purchase data. ${rowCount} Gen PO row(s) are included in the overview.`;
     }
 
     function useSpareOverviewSummary() {
         const filters = state.sparePartsFilters || {};
-        const dateControlsActive = sparePartsHasDateFilterControls() && filters.period !== "all";
+        const dateControlsActive = sparePartsHasDateFilterControls() && sparePurchaseDateFilterActive();
         return !dateControlsActive
             && !filters.itemCode
             && !filters.search
@@ -3288,21 +3312,24 @@ document.addEventListener("DOMContentLoaded", () => {
         const exactMatches = pickSummaryNumber("exact_item_code_matches", filtered.poRows.filter((row) => row?.inventory_match_status === "Exact Item Code Match").length);
         const descriptionMatches = pickSummaryNumber("description_matches", filtered.poRows.filter((row) => row?.inventory_match_status === "Description Match").length);
         const translationFailed = pickSummaryNumber("translation_failed_items", filtered.poRows.filter((row) => row?.translation_status === "Translation failed").length);
-        const computedDependencyPct = inventoryValue !== null && externalSpareValue !== null && Number(inventoryValue) + Number(externalSpareValue) > 0
-            ? (Number(externalSpareValue) / (Number(externalSpareValue) + Number(inventoryValue))) * 100
+        const comparisonTotalValue = inventoryValue !== null && nonStockPoValue !== null
+            ? Number(inventoryValue) + Number(nonStockPoValue)
             : null;
-        const dependencyPct = useSummary ? (toFiniteNumber(summary.external_purchase_dependency_pct) ?? computedDependencyPct) : computedDependencyPct;
+        const inventorySharePct = comparisonTotalValue && comparisonTotalValue > 0
+            ? (Number(inventoryValue) / comparisonTotalValue) * 100
+            : null;
+        const nonStockSharePct = comparisonTotalValue && comparisonTotalValue > 0
+            ? (Number(nonStockPoValue) / comparisonTotalValue) * 100
+            : null;
         const matchCoverage = filtered.poRows.length ? ((exactMatches + descriptionMatches) / filtered.poRows.length) * 100 : null;
         const health = calculateSpareStockHealthMetrics(filtered.inventory);
         if (useSummary && inventoryQty !== null) health.quantityTotal = inventoryQty;
 
-        setSpareKpiValue("spare-total-inventory-value", inventoryValue === null ? "Inventory value unavailable" : formatSpareCurrency(inventoryValue));
         setSpareKpiValue("spare-current-stocked-items", formatInteger(currentStockedItems));
         setSpareKpiValue("spare-external-spare-po-value", formatSpareCurrency(externalSpareValue));
         setSpareKpiValue("spare-stocked-spare-po-value", formatSpareCurrency(stockedPoValue));
         setSpareKpiValue("spare-non-stock-spare-po-value", formatSpareCurrency(nonStockPoValue));
         setSpareKpiValue("spare-non-spare-service-po-value", formatSpareCurrency(nonSpareValue));
-        setSpareKpiValue("spare-external-dependency", dependencyPct === null ? "Cannot calculate dependency because inventory value is unavailable." : `${formatNumber(dependencyPct, 1)}%`);
         setSpareKpiValue("spare-manual-review-po-items", formatInteger(manualReviewCount));
 
         setSpareKpiValue("spare-health-total-parts", health.quantityTotal === null ? "No data" : formatNullableNumber(health.quantityTotal));
@@ -3320,7 +3347,12 @@ document.addEventListener("DOMContentLoaded", () => {
         setText("spare-dormant-parts", formatInteger(spareLineCount));
         setText("spare-selector-inventory-metric", `${formatInteger(currentStockedItems)} items`);
         setText("spare-selector-external-metric", formatSpareCurrency(externalSpareValue));
-        setText("spare-selector-comparison-metric", matchCoverage === null ? "No data" : `${formatNumber(matchCoverage, 1)}% matched`);
+        setText(
+            "spare-selector-comparison-metric",
+            inventorySharePct === null || nonStockSharePct === null
+                ? "No data"
+                : `Inv ${formatNumber(inventorySharePct, 1)}% / Non-stock ${formatNumber(nonStockSharePct, 1)}%`
+        );
     }
 
     function formatSpareCount(value, hasRows) {
@@ -3525,24 +3557,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function renderSpareInventoryVsPurchaseChart(filtered) {
         const inventoryValue = sumSpareValue(filtered.inventory, "stock_value");
-        const stockedValue = sumSpareValue(filtered.sparePoRows.filter((row) => row?.classification === "Stocked Spare Part Purchase"), "total_cost");
         const nonStockValue = sumSpareValue(filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase"), "total_cost");
         const nonSpareValue = sumSpareValue(filtered.nonSpareRows, "total_cost");
 
         if (inventoryValue !== null) {
             renderSpareBarChart("spare-consumption-chart", [
                 { label: "Current Inventory Value", value: spConvert(inventoryValue) },
-                { label: "Stocked Spare Part PO Value", value: spConvert(stockedValue || 0) },
                 { label: "Non-Stock / Direct Purchase Value", value: spConvert(nonStockValue || 0) },
-                { label: "Non-Spare Part / Service PO Value", value: spConvert(nonSpareValue || 0) },
+                { label: "Services / Non-Spare PO Value", value: spConvert(nonSpareValue || 0) },
             ], "Inventory value data not available.", "Value", spareCurrency);
             return;
         }
 
         renderSpareBarChart("spare-consumption-chart", [
             { label: "Current Stock Quantity", value: Number(sumSpareQuantity(filtered.inventory, "current_quantity") || 0) },
-            { label: "Gen PO Spare Part Quantity", value: Number(sumSpareQuantity(filtered.sparePoRows, "quantity_ordered") || 0) },
-            { label: "Gen PO Non-Spare Part Quantity", value: Number(sumSpareQuantity(filtered.nonSpareRows, "quantity_ordered") || 0) },
+            { label: "Gen PO Non-Stock Quantity", value: Number(sumSpareQuantity(filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase"), "quantity_ordered") || 0) },
+            { label: "Gen PO Services / Non-Spare Quantity", value: Number(sumSpareQuantity(filtered.nonSpareRows, "quantity_ordered") || 0) },
         ], "No inventory or Gen PO quantity data available.", "Quantity", "Quantity");
     }
 
@@ -3844,7 +3874,7 @@ document.addEventListener("DOMContentLoaded", () => {
             row.confidence || "--",
         ], "Current inventory file not uploaded.");
 
-        renderSpareTable("spare-external-po-table-body", filtered.poRows, 17, (row) => [
+        renderSpareTable("spare-external-po-table-body", filtered.poRows, 16, (row) => [
             row.po_number || "--",
             formatShortDate(row.po_date),
             row.code || "--",
@@ -3861,10 +3891,9 @@ document.addEventListener("DOMContentLoaded", () => {
             row.confidence || "--",
             row.classification_reason || "--",
             spareStatusBadge(row.translation_status || "No translation needed"),
-            spareStatusBadge(row.inventory_match_status || "No Inventory Match"),
         ], "Gen PO file not uploaded.");
 
-        renderSpareTable("spare-turnover-table-body", filtered.topPurchaseRows, 9, (row) => [
+        renderSpareTable("spare-turnover-table-body", filtered.topPurchaseRows, 8, (row) => [
             row.clean_description || "--",
             row.translated_description || "--",
             spareStatusBadge(row.classification || "--"),
@@ -3873,7 +3902,6 @@ document.addEventListener("DOMContentLoaded", () => {
             formatInteger(row.po_line_count || 0),
             formatInteger(row.vendor_count || 0),
             formatShortDate(row.last_purchase_date),
-            spareStatusBadge(row.inventory_match_status || "No Inventory Match"),
         ], "No classified spare part purchases for the selected filters.");
 
         renderSpareTable("spare-manual-review-table-body", filtered.manualReviewRows, 8, (row) => [
@@ -4009,15 +4037,6 @@ document.addEventListener("DOMContentLoaded", () => {
         try { populatePtTableFilters(payload); } catch(e) { console.error("populatePtTableFilters:", e); }
         if (payload?.transactions?.length) {
             try { renderPartAssetTable(_buildPauDataFromTxns(payload.transactions)); } catch(e) { console.error("PAU all-years rebuild:", e); }
-        }
-        if (payload?.years?.length && state.sparePartsData) {
-            const allDates = collectSpareDates(state.sparePartsData);
-            const txYears = (payload.years || []).map((y) => String(y));
-            const mergedYears = [...new Set([
-                ...allDates.map((d) => d.slice(0, 4)).filter((y) => /^\d{4}$/.test(y)),
-                ...txYears,
-            ])].sort((a, b) => Number(b) - Number(a));
-            populateSpareSelect("spare-year-filter", mergedYears, "All Years", state.sparePartsFilters.year);
         }
         // Chart rendering deferred so DOM is laid out before Chart.js measures canvas sizes
         requestAnimationFrame(() => {
@@ -4445,7 +4464,6 @@ document.addEventListener("DOMContentLoaded", () => {
             if (f.month !== "all" && d.slice(0, 7) !== f.month) return false;
             if (f.category !== "all" && r.item_category !== f.category) return false;
             if (f.asset !== "all" && r.asset_id !== f.asset) return false;
-            if (f.linkStatus !== "all" && r.link_status !== f.linkStatus) return false;
             if (f.search) {
                 const s = f.search;
                 const hay = [r.work_order_id, r.asset_id, r.translated_description, r.original_description, r.clean_description]
@@ -4480,7 +4498,6 @@ document.addEventListener("DOMContentLoaded", () => {
         const uniqueWOs = new Set(txns.map((r) => r.work_order_id).filter(Boolean)).size;
         const uniqueAssets = new Set(txns.map((r) => r.asset_id).filter(Boolean)).size;
         const uniqueParts = new Set(txns.map((r) => r.clean_description || r.original_description).filter(Boolean)).size;
-        const unlinked = txns.filter((r) => r.link_status === "Unlinked").length;
         const avgPerWo = uniqueWOs > 0 ? totalVal / uniqueWOs : 0;
         const fmtInt = (n) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
         const kpis = {
@@ -4489,7 +4506,6 @@ document.addEventListener("DOMContentLoaded", () => {
             "pt-kpi-unique-wo": fmtInt(uniqueWOs),
             "pt-kpi-unique-assets": fmtInt(uniqueAssets),
             "pt-kpi-unique-parts": fmtInt(uniqueParts),
-            "pt-kpi-unlinked": fmtInt(unlinked),
             "pt-kpi-avg-per-wo": ptFmtCurrency(avgPerWo),
         };
         // Update KPI card labels for currency
@@ -4595,9 +4611,10 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // ── Table filter state ───────────────────────────────────────────────
-    const ptTxnFilter = { search: "", category: "", asset: "", status: "" };
+    const ptTxnFilter = { search: "", category: "", asset: "" };
     const ptPartsFilter = { search: "", category: "" };
     const ptAssetFilter = { search: "", criticality: "" };
+    let ptInsightActiveTab = "part_usage";
     let ptSelectedPartKey = "";
     let ptSelectedPartLabel = "";
     let _ptTxnsCache = [];
@@ -4610,15 +4627,12 @@ document.addEventListener("DOMContentLoaded", () => {
     function _populateTxnFilters(txns) {
         const cats = [...new Set(txns.map((r) => r.item_category).filter(Boolean))].sort();
         const assets = [...new Set(txns.map((r) => r.asset_id).filter(Boolean))].sort();
-        const statuses = [...new Set(txns.map((r) => r.link_status).filter(Boolean))].sort();
         _populateSelect("pt-txn-cat", cats, "All Categories");
         _populateSelect("pt-txn-asset", assets, "All Assets");
-        _populateSelect("pt-txn-status", statuses, "All Link Statuses");
         _populateSelect("pt-parts-cat", cats, "All Categories");
         _bindTblFilter("pt-txn-search", (v) => { ptTxnFilter.search = v; renderTxnTable(); });
         _bindTblFilter("pt-txn-cat", (v) => { ptTxnFilter.category = v; renderTxnTable(); });
         _bindTblFilter("pt-txn-asset", (v) => { ptTxnFilter.asset = v; renderTxnTable(); });
-        _bindTblFilter("pt-txn-status", (v) => { ptTxnFilter.status = v; renderTxnTable(); });
         _bindTblFilter("pt-parts-search", (v) => { ptPartsFilter.search = v; renderAllPtPartsTable(); });
         _bindTblFilter("pt-parts-cat", (v) => { ptPartsFilter.category = v; renderAllPtPartsTable(); });
     }
@@ -4635,6 +4649,41 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!el || el._tblFilterBound) return;
         el._tblFilterBound = true;
         el.addEventListener(el.tagName === "SELECT" ? "change" : "input", (e) => fn(e.target.value));
+    }
+
+    function bindPtInsightTabs() {
+        document.querySelectorAll("[data-ptinsighttab]").forEach((btn) => {
+            if (btn._ptInsightBound) return;
+            btn._ptInsightBound = true;
+            btn.addEventListener("click", () => setPtInsightTab(btn.dataset.ptinsighttab || "part_usage"));
+            btn.addEventListener("keydown", (event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
+                const tabs = [...document.querySelectorAll("[data-ptinsighttab]")];
+                const currentIndex = tabs.indexOf(btn);
+                if (currentIndex < 0) return;
+                const delta = event.key === "ArrowRight" ? 1 : -1;
+                const nextBtn = tabs[(currentIndex + delta + tabs.length) % tabs.length];
+                nextBtn?.focus();
+                if (nextBtn?.dataset.ptinsighttab) setPtInsightTab(nextBtn.dataset.ptinsighttab);
+            });
+        });
+        setPtInsightTab(ptInsightActiveTab);
+    }
+
+    function setPtInsightTab(tab) {
+        const nextTab = document.getElementById(`pt-insight-panel-${tab}`) ? tab : "part_usage";
+        ptInsightActiveTab = nextTab;
+        document.querySelectorAll("[data-ptinsighttab]").forEach((btn) => {
+            const isActive = (btn.dataset.ptinsighttab || "") === nextTab;
+            btn.classList.toggle("active", isActive);
+            btn.setAttribute("aria-selected", isActive ? "true" : "false");
+            btn.tabIndex = isActive ? 0 : -1;
+        });
+        document.querySelectorAll(".pt-insight-panel").forEach((panel) => {
+            panel.hidden = panel.id !== `pt-insight-panel-${nextTab}`;
+            panel.classList.toggle("is-active", !panel.hidden);
+        });
     }
 
     function bindPtPartSelection() {
@@ -4673,7 +4722,6 @@ document.addEventListener("DOMContentLoaded", () => {
             ptFmtCurrencyOrNA(r.total_consumption),
             ptFmtCurrencyOrNA(r.unit_cost_estimate),
             r.equipment_name || "--",
-            { html: `<span class="status-pill pt-link-${escapeHtml((r.link_status || "").toLowerCase().replace(/[^a-z]+/g, "-"))}">${escapeHtml(r.link_status || "--")}</span>` },
         ];
     }
 
@@ -4685,7 +4733,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (title) title.textContent = "Selected Part Transactions";
             if (subtitle) subtitle.textContent = "Select a spare part above to view its related transaction lines.";
             if (clearBtn) clearBtn.classList.add("hidden");
-            renderSpareTable("pt-selected-part-transactions-body", [], 10, ptTransactionCells, "Select a spare part above to view related transactions.");
+            renderSpareTable("pt-selected-part-transactions-body", [], 9, ptTransactionCells, "Select a spare part above to view related transactions.");
             return;
         }
 
@@ -4706,7 +4754,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 : `No related transaction lines found for ${yearLabel}.`;
         }
         if (clearBtn) clearBtn.classList.remove("hidden");
-        renderSpareTable("pt-selected-part-transactions-body", rows, 10, ptTransactionCells, "No related transaction lines found.");
+        renderSpareTable("pt-selected-part-transactions-body", rows, 9, ptTransactionCells, "No related transaction lines found.");
     }
 
     function renderTxnTable() {
@@ -4719,8 +4767,7 @@ document.addEventListener("DOMContentLoaded", () => {
         );
         if (ptTxnFilter.category) rows = rows.filter((r) => r.item_category === ptTxnFilter.category);
         if (ptTxnFilter.asset) rows = rows.filter((r) => r.asset_id === ptTxnFilter.asset);
-        if (ptTxnFilter.status) rows = rows.filter((r) => r.link_status === ptTxnFilter.status);
-        renderSpareTable("pt-transactions-body", rows.slice(0, 300), 10, ptTransactionCells, "No transactions match the current filters.");
+        renderSpareTable("pt-transactions-body", rows.slice(0, 300), 9, ptTransactionCells, "No transactions match the current filters.");
     }
 
     function renderByAssetTable(rows) {
@@ -4768,14 +4815,13 @@ document.addEventListener("DOMContentLoaded", () => {
         renderByAssetTable(byAsset);
 
         // Table D: Manual review (from full payload)
-        renderSpareTable("pt-manual-review-body", (payload?.manual_review || []).slice(0, 200), 8, (r) => [
+        renderSpareTable("pt-manual-review-body", (payload?.manual_review || []).slice(0, 200), 7, (r) => [
             formatShortDate(r.project_date),
             r.work_order_id || "--",
             r.asset_id || "--",
             r.translated_description || r.original_description || "--",
             spareStatusBadge(r.item_category),
             r.classification_confidence || "--",
-            r.link_status || "--",
             r.parse_status || "--",
         ], "No manual review items.");
 
@@ -4983,7 +5029,13 @@ document.addEventListener("DOMContentLoaded", () => {
     // ═══════════════════════════════════════════════════════════════════════════
 
     let _epoData = null;
-    const _epoFilter = { search: "", type: "", group: "", status: "", vendor: "", dateFrom: "", dateTo: "" };
+    const _epoFilter = {
+        search: "", type: "", group: "", status: "", vendor: "",
+        classification: "", delivery: "", dateFrom: "", dateTo: "",
+    };
+    const _epoSort = { key: "date_po", dir: "desc" };
+    const _epoSupFilter = { search: "", tier: "" };
+    let _epoSubtab = "parts";
 
     async function loadExternalPo() {
         let payload;
@@ -5007,41 +5059,47 @@ document.addEventListener("DOMContentLoaded", () => {
         renderEpoKpis(payload.summary || {});
         _epoPopulateFilters(payload.filters || {});
         _epoBindFilters();
+        _epoBindTabs();
         renderEpoTable(_epoFilterRecords(payload.records || []));
         renderEpoDataQuality(payload.data_quality || [], payload.records || []);
-
-        // Tab switching
-        document.querySelectorAll(".epo-tab-btn").forEach((btn) => {
-            if (btn._epoBound) return;
-            btn._epoBound = true;
-            btn.addEventListener("click", () => {
-                document.querySelectorAll(".epo-tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
-                const tab = btn.dataset.epotab;
-                document.getElementById("epo-panel-table").style.display = tab === "table" ? "" : "none";
-                document.getElementById("epo-panel-quality").style.display = tab === "quality" ? "" : "none";
-            });
-        });
+        renderEpoSuppliers(payload.supplier_performance || []);
+        renderEpoCharts(payload);
     }
 
     function epoFmt(v) {
         if (v == null || v === "") return "--";
         return spFmt(Number(v));
     }
+    function epoNum(v, digits = 0) {
+        if (v == null || v === "") return "--";
+        return Number(v).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+    }
 
     function renderEpoKpis(summary) {
         const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
+        set("epo-kpi-pos", summary.unique_pos != null ? Number(summary.unique_pos).toLocaleString() : "--");
+        set("epo-kpi-lines", summary.total_rows != null ? `${Number(summary.total_rows).toLocaleString()} lines` : "--");
+        set("epo-kpi-ontime-rate", summary.on_time_rate != null ? `${summary.on_time_rate}%` : "--");
+        set("epo-kpi-ontime-count", summary.evaluated_count != null
+            ? `${(summary.on_time_count || 0).toLocaleString()} / ${summary.evaluated_count.toLocaleString()} delivered`
+            : "--");
+        set("epo-kpi-avg-delay", summary.avg_delay_days != null ? `${summary.avg_delay_days} d` : "--");
+        set("epo-kpi-delayed-count", summary.delayed_count != null
+            ? `${summary.delayed_count.toLocaleString()} delayed POs` : "--");
+        set("epo-kpi-awaiting", summary.awaiting_delivery != null
+            ? Number(summary.awaiting_delivery).toLocaleString() : "--");
         set("epo-kpi-spend", epoFmt(summary.total_spend));
-        set("epo-kpi-pos", summary.unique_pos ?? "--");
-        set("epo-kpi-awaiting", summary.awaiting_delivery ?? "--");
-        (summary.spend_by_type || []).forEach((t) => {
-            if (t.type === "Expent Cost") set("epo-kpi-expent", epoFmt(t.total));
-            if (t.type === "CAPEX Budget") set("epo-kpi-capex-b", epoFmt(t.total));
-            if (t.type === "CAPEX Unbudget") set("epo-kpi-capex-u", epoFmt(t.total));
-        });
+        const topType = (summary.spend_by_type || [])[0];
+        set("epo-kpi-spend-sub", topType ? `${topType.type}: ${epoFmt(topType.total)}` : "--");
+
         const dqBadge = document.getElementById("epo-dq-badge");
-        if (dqBadge && summary.total_flagged) {
-            dqBadge.textContent = summary.total_flagged;
-            dqBadge.style.display = "";
+        if (dqBadge) {
+            if (summary.total_flagged) {
+                dqBadge.textContent = summary.total_flagged;
+                dqBadge.style.display = "";
+            } else {
+                dqBadge.style.display = "none";
+            }
         }
     }
 
@@ -5057,6 +5115,7 @@ document.addEventListener("DOMContentLoaded", () => {
         sel("epo-filter-group", filters.groups_of_cost, "All Groups");
         sel("epo-filter-status", filters.statuses, "All Statuses");
         sel("epo-filter-vendor", filters.vendors, "All Vendors");
+        sel("epo-filter-classification", filters.classifications, "All Classifications");
     }
 
     function _epoBindFilters() {
@@ -5074,8 +5133,67 @@ document.addEventListener("DOMContentLoaded", () => {
         bind("epo-filter-group", "group");
         bind("epo-filter-status", "status");
         bind("epo-filter-vendor", "vendor");
+        bind("epo-filter-classification", "classification");
+        bind("epo-filter-delivery", "delivery");
         bind("epo-date-from", "dateFrom", true);
         bind("epo-date-to", "dateTo", true);
+
+        // Sortable columns
+        document.querySelectorAll("#epo-panel-log th[data-epo-sort]").forEach((th) => {
+            if (th._epoSortBound) return;
+            th._epoSortBound = true;
+            th.addEventListener("click", () => {
+                const k = th.dataset.epoSort;
+                if (_epoSort.key === k) {
+                    _epoSort.dir = _epoSort.dir === "asc" ? "desc" : "asc";
+                } else {
+                    _epoSort.key = k;
+                    _epoSort.dir = "asc";
+                }
+                if (_epoData) renderEpoTable(_epoFilterRecords(_epoData.records || []));
+            });
+        });
+
+        // Supplier-tab filters
+        ["epo-sup-search", "epo-sup-tier"].forEach((id) => {
+            const el = document.getElementById(id);
+            if (!el || el._epoSupBound) return;
+            el._epoSupBound = true;
+            const key = id === "epo-sup-search" ? "search" : "tier";
+            el.addEventListener(el.tagName === "SELECT" ? "change" : "input", (e) => {
+                _epoSupFilter[key] = e.target.value;
+                if (_epoData) renderEpoSuppliers(_epoData.supplier_performance || []);
+            });
+        });
+    }
+
+    function _epoBindTabs() {
+        document.querySelectorAll(".epo-tab-btn").forEach((btn) => {
+            if (btn._epoBound) return;
+            btn._epoBound = true;
+            btn.addEventListener("click", () => {
+                document.querySelectorAll(".epo-tab-btn").forEach((b) => b.classList.toggle("active", b === btn));
+                const tab = btn.dataset.epotab;
+                const panels = ["overview", "suppliers", "log", "category", "spend", "quality"];
+                panels.forEach((p) => {
+                    const panel = document.getElementById(`epo-panel-${p}`);
+                    if (panel) panel.style.display = tab === p ? "" : "none";
+                });
+                // Re-render charts on activation so canvases size correctly.
+                if (_epoData) renderEpoCharts(_epoData);
+            });
+        });
+        document.querySelectorAll(".epo-subtab-btn").forEach((btn) => {
+            if (btn._epoSubBound) return;
+            btn._epoSubBound = true;
+            btn.addEventListener("click", () => {
+                _epoSubtab = btn.dataset.eposubtab;
+                document.querySelectorAll(".epo-subtab-btn").forEach((b) => b.classList.toggle("active", b === btn));
+                document.getElementById("epo-subpanel-parts").style.display = _epoSubtab === "parts" ? "" : "none";
+                document.getElementById("epo-subpanel-services").style.display = _epoSubtab === "services" ? "" : "none";
+                if (_epoData) renderEpoCharts(_epoData);
+            });
+        });
     }
 
     function _epoFilterRecords(records) {
@@ -5092,9 +5210,34 @@ document.addEventListener("DOMContentLoaded", () => {
         if (_epoFilter.group) rows = rows.filter((r) => r.group_of_cost === _epoFilter.group);
         if (_epoFilter.status) rows = rows.filter((r) => r.status === _epoFilter.status);
         if (_epoFilter.vendor) rows = rows.filter((r) => r.vendor === _epoFilter.vendor);
-        if (_epoFilter.dateFrom) rows = rows.filter((r) => r.date_pr >= _epoFilter.dateFrom);
-        if (_epoFilter.dateTo) rows = rows.filter((r) => !r.date_pr || r.date_pr <= _epoFilter.dateTo);
-        return rows;
+        if (_epoFilter.classification) rows = rows.filter((r) => r.classification === _epoFilter.classification);
+        if (_epoFilter.delivery) rows = rows.filter((r) => r.delivery_flag === _epoFilter.delivery);
+        if (_epoFilter.dateFrom) rows = rows.filter((r) => r.date_po && r.date_po >= _epoFilter.dateFrom);
+        if (_epoFilter.dateTo) rows = rows.filter((r) => !r.date_po || r.date_po <= _epoFilter.dateTo);
+
+        // Sort
+        const key = _epoSort.key;
+        const dir = _epoSort.dir === "asc" ? 1 : -1;
+        const sorted = [...rows].sort((a, b) => {
+            const av = a[key], bv = b[key];
+            if (av == null && bv == null) return 0;
+            if (av == null) return 1;
+            if (bv == null) return -1;
+            if (typeof av === "number" && typeof bv === "number") return (av - bv) * dir;
+            return String(av).localeCompare(String(bv)) * dir;
+        });
+        return sorted;
+    }
+
+    function _epoFlagBadges(r) {
+        const parts = [];
+        if (r.delivery_flag === "Ontime") parts.push(`<span class="epo-flag epo-flag-green" title="On-time">🟢</span>`);
+        else if (r.delivery_flag === "Delayed") parts.push(`<span class="epo-flag epo-flag-red" title="Delayed">🔴</span>`);
+        else if (r.delivery_flag === "Pending") parts.push(`<span class="epo-flag epo-flag-amber" title="Pending">🟡</span>`);
+        if ((r.row_flags || []).includes("long_lead")) parts.push(`<span class="epo-flag epo-flag-orange" title="Long lead time (>60 days)">🟠</span>`);
+        if ((r.row_flags || []).includes("high_value")) parts.push(`<span class="epo-flag epo-flag-warn" title="High value (>50,000 THB)">⚠️</span>`);
+        if ((r.row_flags || []).includes("thai_desc")) parts.push(`<span class="epo-flag epo-flag-blue" title="Original description in Thai (auto-translated)">🌐</span>`);
+        return parts.join(" ");
     }
 
     function renderEpoTable(rows) {
@@ -5102,32 +5245,330 @@ document.addEventListener("DOMContentLoaded", () => {
         const countEl = document.getElementById("epo-row-count");
         if (!body) return;
         if (!rows.length) {
-            body.innerHTML = `<tr><td colspan="12" class="empty-row">No records match the current filters.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="8" class="empty-row">No records match the current filters.</td></tr>`;
             if (countEl) countEl.textContent = "0 rows";
             return;
         }
-        body.innerHTML = rows.slice(0, 500).map((r) => {
+        body.innerHTML = rows.slice(0, 500).map((r, index) => {
             const descCell = r.has_thai && r.description !== r.description_raw
                 ? `${escapeHtml(r.description)}<span class="epo-desc-thai">${escapeHtml(r.description_raw)}</span>`
                 : escapeHtml(r.description || "--");
-            const statusCls = (r.status || "").toLowerCase().includes("waitting") ? "pt-link-unlinked"
-                : (r.status || "").toLowerCase().includes("recive") ? "pt-link-linked" : "pt-link-partial";
-            return `<tr>
-                <td>${escapeHtml(r.pr_no || "--")}</td>
-                <td>${escapeHtml(r.po_no || "--")}</td>
-                <td>${descCell}</td>
-                <td>${escapeHtml(r.pd_machine || "--")}</td>
-                <td>${escapeHtml(r.vendor || "--")}</td>
-                <td>${r.qty != null ? Number(r.qty).toLocaleString(undefined, { maximumFractionDigits: 2 }) : "--"}</td>
-                <td>${escapeHtml(r.unit || "--")}</td>
-                <td>${r.price_unit != null ? epoFmt(r.price_unit) : "--"}</td>
+            const rowCls = r.delivery_flag === "Delayed" ? "epo-row-delayed"
+                : r.delivery_flag === "Pending" ? "epo-row-pending" : "";
+            const detailId = `epo-detail-${index}`;
+            return `<tr class="epo-main-row ${rowCls}" data-epo-detail-id="${detailId}" aria-expanded="false" tabindex="0">
+                <td class="epo-col-po">
+                    <div class="epo-po-cell">
+                        <span class="epo-row-caret" aria-hidden="true">+</span>
+                        <span class="epo-po-value">${escapeHtml(r.po_no || "--")}</span>
+                    </div>
+                </td>
+                <td>${escapeHtml(r.date_po || "--")}</td>
+                <td>${r.lead_time != null ? epoNum(r.lead_time) : "--"}</td>
+                <td>${escapeHtml(r.date_grn || "--")}</td>
+                <td>${r.actual_lead != null ? epoNum(r.actual_lead) : "--"}</td>
+                <td>${r.delay_days != null ? epoNum(r.delay_days) : "--"}</td>
                 <td>${r.total_price != null ? epoFmt(r.total_price) : "--"}</td>
-                <td><span class="status-pill" style="background:#f0fdf4;color:#166534">${escapeHtml(r.type_of_cost || "--")}</span></td>
-                <td><span class="status-pill ${statusCls}">${escapeHtml(r.status || "--")}</span></td>
-                <td>${escapeHtml(r.grn_no || "--")}</td>
+                <td class="epo-flags-cell">${_epoFlagBadges(r)}</td>
+            </tr>
+            <tr class="epo-detail-row" id="${detailId}" hidden>
+                <td colspan="8">
+                    <div class="epo-detail-card">
+                        <div class="epo-detail-meta">
+                            <div class="epo-detail-chip">
+                                <span>Vendor</span>
+                                <strong>${escapeHtml(r.vendor || "--")}</strong>
+                            </div>
+                            <div class="epo-detail-chip">
+                                <span>PR No.</span>
+                                <strong>${escapeHtml(r.pr_no || "--")}</strong>
+                            </div>
+                            <div class="epo-detail-chip">
+                                <span>Group</span>
+                                <strong>${escapeHtml(r.group_of_cost || "--")}</strong>
+                            </div>
+                        </div>
+                        <div class="epo-detail-copy">
+                            <span>Description</span>
+                            <div class="epo-detail-description">${descCell}</div>
+                        </div>
+                    </div>
+                </td>
             </tr>`;
         }).join("");
+        body.querySelectorAll(".epo-main-row").forEach((row) => {
+            if (row._epoExpandBound) return;
+            row._epoExpandBound = true;
+            const toggle = () => {
+                const detailId = row.dataset.epoDetailId;
+                if (!detailId) return;
+                const detailRow = document.getElementById(detailId);
+                if (!detailRow) return;
+                const nextState = detailRow.hidden;
+                detailRow.hidden = !nextState;
+                row.setAttribute("aria-expanded", nextState ? "true" : "false");
+                row.classList.toggle("is-expanded", nextState);
+            };
+            row.addEventListener("click", toggle);
+            row.addEventListener("keydown", (event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                toggle();
+            });
+        });
         if (countEl) countEl.textContent = `${rows.length.toLocaleString()} row${rows.length === 1 ? "" : "s"}${rows.length > 500 ? " (showing first 500)" : ""}`;
+    }
+
+    function _epoTierFromRate(rate) {
+        if (rate == null) return { tier: "none", color: "#64748b", label: "No data" };
+        if (rate >= 85) return { tier: "green", color: "#10b981", label: "Strong" };
+        if (rate >= 70) return { tier: "amber", color: "#f59e0b", label: "Watch" };
+        return { tier: "red", color: "#ef4444", label: "Action" };
+    }
+
+    function renderEpoSuppliers(suppliers) {
+        const body = document.getElementById("epo-sup-body");
+        if (!body) return;
+        const search = _epoSupFilter.search.toLowerCase();
+        const tier = _epoSupFilter.tier;
+        const rows = suppliers.filter((s) => {
+            if (search && !(s.vendor || "").toLowerCase().includes(search)) return false;
+            if (tier) {
+                const t = _epoTierFromRate(s.on_time_rate).tier;
+                if (t !== tier) return false;
+            }
+            return true;
+        });
+        if (!rows.length) {
+            body.innerHTML = `<tr><td colspan="9" class="empty-row">No vendors match the filters.</td></tr>`;
+            return;
+        }
+        body.innerHTML = rows.map((s) => {
+            const t = _epoTierFromRate(s.on_time_rate);
+            const rateStr = s.on_time_rate != null ? `${s.on_time_rate}%` : "—";
+            return `<tr>
+                <td>${escapeHtml(s.vendor || "--")}</td>
+                <td>${epoNum(s.total_pos)}</td>
+                <td>${epoNum(s.on_time)}</td>
+                <td>${epoNum(s.delayed)}</td>
+                <td>${epoNum(s.pending)}</td>
+                <td>${epoNum(s.avg_delay, 1)}</td>
+                <td style="color:${t.color};font-weight:600">${rateStr}</td>
+                <td>${epoFmt(s.spend)}</td>
+                <td><span class="epo-tier-badge epo-tier-${t.tier}">${t.label}</span></td>
+            </tr>`;
+        }).join("");
+    }
+
+    // ─── Chart rendering ──────────────────────────────────────────────────────
+    const _epoChartTheme = {
+        text: "#334155",
+        grid: "rgba(148,163,184,0.25)",
+        teal: "#14b8a6",
+        green: "#10b981",
+        red: "#ef4444",
+        amber: "#f59e0b",
+        blue: "#3b82f6",
+        purple: "#a855f7",
+        slate: "#64748b",
+    };
+
+    function _epoDestroy(id) {
+        if (typeof charts !== "undefined" && charts[id]) {
+            charts[id].destroy();
+            delete charts[id];
+        }
+    }
+
+    function _epoVisible(panelId) {
+        const el = document.getElementById(panelId);
+        return el && el.style.display !== "none";
+    }
+
+    function renderEpoCharts(payload) {
+        if (typeof Chart === "undefined") return;
+        const summary = payload.summary || {};
+        const tickColor = _epoChartTheme.text;
+        const gridColor = _epoChartTheme.grid;
+        const legendCfg = { labels: { color: tickColor, font: { size: 11 } } };
+
+        // Overview: delivery doughnut
+        if (_epoVisible("epo-panel-overview")) {
+            _epoDestroy("epo-chart-delivery");
+            createChart("epo-chart-delivery", {
+                type: "doughnut",
+                data: {
+                    labels: ["On-time", "Delayed", "Pending"],
+                    datasets: [{
+                        data: [summary.on_time_count || 0, summary.delayed_count || 0, summary.pending_count || 0],
+                        backgroundColor: [_epoChartTheme.green, _epoChartTheme.red, _epoChartTheme.amber],
+                        borderColor: "rgba(15,23,42,0.6)",
+                    }],
+                },
+                options: { plugins: { legend: { position: "bottom", ...legendCfg } } },
+            });
+
+            // Cost type
+            _epoDestroy("epo-chart-costtype");
+            const types = (summary.spend_by_type || []);
+            createChart("epo-chart-costtype", {
+                type: "doughnut",
+                data: {
+                    labels: types.map((t) => t.type),
+                    datasets: [{
+                        data: types.map((t) => t.total),
+                        backgroundColor: [_epoChartTheme.teal, _epoChartTheme.purple, _epoChartTheme.amber, _epoChartTheme.slate],
+                    }],
+                },
+                options: { plugins: { legend: { position: "bottom", ...legendCfg } } },
+            });
+
+            // Classification split (by line count)
+            _epoDestroy("epo-chart-classification");
+            const cats = payload.category_summary || [];
+            createChart("epo-chart-classification", {
+                type: "doughnut",
+                data: {
+                    labels: cats.map((c) => c.classification),
+                    datasets: [{
+                        data: cats.map((c) => c.count),
+                        backgroundColor: [_epoChartTheme.blue, _epoChartTheme.teal, _epoChartTheme.amber, _epoChartTheme.slate],
+                    }],
+                },
+                options: { plugins: { legend: { position: "bottom", ...legendCfg } } },
+            });
+        }
+
+        // Category: Parts (Stock vs Non-Stock)
+        if (_epoVisible("epo-panel-category")) {
+            const cats = payload.category_summary || [];
+            const partCats = cats.filter((c) => c.classification === "Stock" || c.classification === "Non-Stock");
+            const partsBody = document.getElementById("epo-parts-cat-body");
+            if (partsBody) {
+                partsBody.innerHTML = partCats.length
+                    ? partCats.map((c) => `<tr>
+                        <td>${escapeHtml(c.classification)}</td>
+                        <td>${epoNum(c.count)}</td>
+                        <td>${epoFmt(c.spend)}</td>
+                        <td>${c.on_time_rate != null ? `${c.on_time_rate}%` : "—"}</td>
+                    </tr>`).join("")
+                    : `<tr><td colspan="4" class="empty-row">No part rows.</td></tr>`;
+            }
+            if (_epoSubtab === "parts") {
+                _epoDestroy("epo-chart-parts-spend");
+                createChart("epo-chart-parts-spend", {
+                    type: "bar",
+                    data: {
+                        labels: partCats.map((c) => c.classification),
+                        datasets: [{
+                            label: "Spend (THB)",
+                            data: partCats.map((c) => c.spend),
+                            backgroundColor: [_epoChartTheme.blue, _epoChartTheme.teal],
+                        }],
+                    },
+                    options: {
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                            y: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                        },
+                    },
+                });
+                _epoDestroy("epo-chart-parts-count");
+                createChart("epo-chart-parts-count", {
+                    type: "doughnut",
+                    data: {
+                        labels: partCats.map((c) => c.classification),
+                        datasets: [{
+                            data: partCats.map((c) => c.count),
+                            backgroundColor: [_epoChartTheme.blue, _epoChartTheme.teal],
+                        }],
+                    },
+                    options: { plugins: { legend: { position: "bottom", ...legendCfg } } },
+                });
+            }
+            // Services
+            const svcGroups = payload.service_groups || [];
+            const svcBody = document.getElementById("epo-services-body");
+            if (svcBody) {
+                svcBody.innerHTML = svcGroups.length
+                    ? svcGroups.map((g) => `<tr>
+                        <td>${escapeHtml(g.group)}</td>
+                        <td>${epoNum(g.count)}</td>
+                        <td>${epoFmt(g.spend)}</td>
+                        <td>${g.on_time_rate != null ? `${g.on_time_rate}%` : "—"}</td>
+                    </tr>`).join("")
+                    : `<tr><td colspan="4" class="empty-row">No service rows in the imported PO file.</td></tr>`;
+            }
+            if (_epoSubtab === "services") {
+                _epoDestroy("epo-chart-services");
+                const topSvc = svcGroups.slice(0, 12);
+                createChart("epo-chart-services", {
+                    type: "bar",
+                    data: {
+                        labels: topSvc.map((g) => g.group),
+                        datasets: [{
+                            label: "Spend (THB)",
+                            data: topSvc.map((g) => g.spend),
+                            backgroundColor: _epoChartTheme.purple,
+                        }],
+                    },
+                    options: {
+                        indexAxis: "y",
+                        plugins: { legend: { display: false } },
+                        scales: {
+                            x: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                            y: { ticks: { color: tickColor, font: { size: 11 } }, grid: { color: gridColor } },
+                        },
+                    },
+                });
+            }
+        }
+
+        // Spend Analysis
+        if (_epoVisible("epo-panel-spend")) {
+            const monthly = payload.monthly_trend || [];
+            _epoDestroy("epo-chart-monthly");
+            createChart("epo-chart-monthly", {
+                type: "bar",
+                data: {
+                    labels: monthly.map((m) => m.month),
+                    datasets: [{
+                        label: "Spend (THB)",
+                        data: monthly.map((m) => m.spend),
+                        backgroundColor: _epoChartTheme.teal,
+                    }],
+                },
+                options: {
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                        y: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                    },
+                },
+            });
+            const topV = payload.top_vendors || [];
+            _epoDestroy("epo-chart-top-vendors");
+            createChart("epo-chart-top-vendors", {
+                type: "bar",
+                data: {
+                    labels: topV.map((v) => v.vendor),
+                    datasets: [{
+                        label: "Spend (THB)",
+                        data: topV.map((v) => v.spend),
+                        backgroundColor: _epoChartTheme.green,
+                    }],
+                },
+                options: {
+                    indexAxis: "y",
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { ticks: { color: tickColor }, grid: { color: gridColor } },
+                        y: { ticks: { color: tickColor, font: { size: 11 } }, grid: { color: gridColor } },
+                    },
+                },
+            });
+        }
     }
 
     function renderEpoDataQuality(rules, records) {
@@ -6193,13 +6634,10 @@ document.addEventListener("DOMContentLoaded", () => {
     function renderSptTransactions(filtered) {
         const tbody = document.getElementById("spt-txn-body");
         if (!tbody) return;
-        if (!filtered.length) { tbody.innerHTML = `<tr><td colspan="9" class="empty-row">No transactions for selected filters.</td></tr>`; return; }
+        if (!filtered.length) { tbody.innerHTML = `<tr><td colspan="8" class="empty-row">No transactions for selected filters.</td></tr>`; return; }
         const sorted = [...filtered].sort((a, b) => (b.project_date || "").localeCompare(a.project_date || ""));
         tbody.innerHTML = sorted.map((r) => {
             const name = sptStripPrefix(r.translated_description || r.clean_description || r.original_description || "");
-            const linkBadge = r.link_status === "Linked"
-                ? `<span class="pt-link-badge pt-link-ok">Linked</span>`
-                : `<span class="pt-link-badge pt-link-none">Unlinked</span>`;
             return `<tr>
                 <td>${escapeHtml(r.project_date || "—")}</td>
                 <td>${escapeHtml(r.transaction_id || "—")}</td>
@@ -6209,7 +6647,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 <td>${escapeHtml(r.asset_id || "—")}</td>
                 <td>${escapeHtml(r.work_order_id || "—")}</td>
                 <td>${escapeHtml(r.item_category || "—")}</td>
-                <td>${linkBadge}</td>
             </tr>`;
         }).join("");
     }

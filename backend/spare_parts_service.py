@@ -15,6 +15,7 @@ from maintenance_service import MONTH_LABELS, build_equipment_dataset, clean_tex
 
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+ASSET_MASTER_PATH = DEFAULT_DATA_DIR / "master" / "Asset_Master.xlsx"
 D365_SPARE_PARTS_PATH = Path(
     os.environ.get(
         "SPARE_PARTS_D365_PATH",
@@ -173,7 +174,7 @@ FUTURE_SOURCE_SPECS = {
         "env": "SPARE_PARTS_EQUIPMENT_MASTER_PATH",
         "label": "Equipment Master",
         "missing": "Equipment master not uploaded",
-        "fallback": lambda: DEFAULT_DATA_DIR / "AssetList_Edit.xlsx",
+        "fallback": lambda: ASSET_MASTER_PATH,
     },
 }
 FLEXIBLE_COLUMN_ALIASES = {
@@ -187,7 +188,7 @@ FLEXIBLE_COLUMN_ALIASES = {
     "department": ["Department", "Cost Centre", "Cost Center"],
     "description": ["Item Description", "Description", "Item Name", "Product Name", "Product name", "Search name", "Spare Part Name"],
     "equipment_name": ["Equipment", "Machine", "Asset", "Asset ID", "AssetID", "Linked Equipment", "Equipment Name", "Machine Name", "Asset Name", "PD Machine"],
-    "equipment_type": ["Equipment Type", "Machine Type", "Equipment Group", "Machine Group"],
+    "equipment_type": ["Equipment Type", "Machine Type", "Equipment Group", "Machine Group", "Main Asset Group", "Sub Asset Group"],
     "gl_account": ["GL Account", "Procurement Category"],
     "goods_received_date": ["Goods Received Date", "Received Date", "GR Date"],
     "grn_status": ["GRN Status", "PR PO GRN Status"],
@@ -207,7 +208,7 @@ FLEXIBLE_COLUMN_ALIASES = {
     "pd_machine": ["PD Machine", "Machine", "Asset", "Equipment"],
     "po_date": ["PO Date", "Purchase Date", "Order Date", "Date Gen PO", "DMY Create(EN) CPP", "DMY Create PR"],
     "po_number": ["PO Number", "PO No.", "PO No", "Purchase Order"],
-    "production_line": ["Production Line", "Line", "Area"],
+    "production_line": ["Production Line", "Line", "Area", "System/Area", "System Area", "Stage"],
     "quantity": ["Qty", "Quantity", "Quantity Ordered", "Quantity Used", "Qty'", "Quantity Drawn", "Quantity Received"],
     "quantity_drawn": ["Quantity Drawn", "Quantity Used", "Qty Used", "Qty Drawn", "Issued Quantity"],
     "quantity_ordered": ["Quantity Ordered", "Qty Ordered", "Qty'", "Qty", "Quantity"],
@@ -1000,7 +1001,7 @@ def _review_reasons_for_po(row):
     if not clean_text(row.get("code")):
         reasons.append("Item code missing")
     if not clean_text(row.get("clean_description")) or len(str(row.get("clean_description") or "").split()) < 2:
-        reasons.append("Description unclear")
+        reasons.append("Description too short to classify")
     if row.get("translation_status") == "Translation failed":
         reasons.append("Translation failed")
     if row.get("confidence") in {"Low", "Manual Review"}:
@@ -2196,7 +2197,7 @@ _ASSET_ID_RE = re.compile(r"[A-Z]{2,}[A-Z0-9]*-\d+")
 
 
 def _load_asset_list_lookup() -> dict[str, dict]:
-    """Return {asset_id: {name, criticality, location}} from AssetList_Edit.xlsx via asset_mapping."""
+    """Return {asset_id: {name, criticality, location}} from Asset_Master.xlsx via asset_mapping."""
     try:
         from asset_mapping import load_asset_mapping
         mapping = load_asset_mapping(str(DEFAULT_DATA_DIR))
@@ -2398,7 +2399,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
 
     _PT_CACHE_V = 3  # bump to invalidate stale cache after code changes
     try:
-        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList_Edit.xlsx")
+        _al_sig = _file_signature(ASSET_MASTER_PATH)
         _wo_sig = _pt_work_order_sources_signature()
         current_mtime = (_PT_CACHE_V, _file_signature(path), _al_sig, _wo_sig)
         if _PT_CACHE["result"] is not None and _PT_CACHE["mtime"] == current_mtime:
@@ -2524,7 +2525,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
     except Exception as exc:
         errors.append(f"Work order linking failed: {exc}")
 
-    # Enrich equipment fields from AssetList_Edit.xlsx for any still-unlinked records
+    # Enrich equipment fields from Asset_Master.xlsx for any still-unlinked records
     try:
         al = _load_asset_list_lookup()
         for rec in records:
@@ -2804,7 +2805,7 @@ def build_all_years_transactions_payload() -> dict:
 
     _AY_CACHE_V = 2  # bump to invalidate stale cache after code changes
     try:
-        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList_Edit.xlsx")
+        _al_sig = _file_signature(ASSET_MASTER_PATH)
         _wo_sig = _pt_work_order_sources_signature()
         current_mtime = (
             _AY_CACHE_V,
@@ -2954,7 +2955,7 @@ def build_all_years_transactions_payload() -> dict:
     except Exception as exc:
         errors.append(f"WO linking failed: {exc}")
 
-    # Enrich equipment fields from AssetList_Edit.xlsx for any still-unlinked records
+    # Enrich equipment fields from Asset_Master.xlsx for any still-unlinked records
     try:
         al = _load_asset_list_lookup()
         for rec in records:
@@ -3148,6 +3149,73 @@ _TYPE_CLEAN = {"Expent  cost": "Expent Cost", "CAPEX  (Budget)": "CAPEX Budget",
                "CAPEX  (Unbudget)": "CAPEX Unbudget"}
 
 
+# Manual Thai → English glossary for common spare-part descriptions appearing in
+# the Gen PO data. Used as a final fallback after the automatic translator so
+# users always see English in the dashboard.
+_EPO_THAI_GLOSSARY = {
+    "กระสอบ": "Sack/Bag",
+    "ข้อต่อตรง": "Straight connector",
+    "แคล้มก้ามปูยึดท่อ": "Pipe clamp",
+    "อุปกรณ์ทองแดง": "Copper fittings",
+    "หลอดไฟฟลูออเรสเซนต์": "Fluorescent lamp",
+    "เกลือล้างเรซิน": "Resin cleaning salt",
+    "ถ้วยเซรามิก": "Ceramic cup/nozzle",
+    "ลวดป้อนอาร์กอน": "Argon welding wire",
+    "รีแพร์แคล้ม": "Repair clamp",
+    "เคเบิ้ลไทร์": "Cable tie",
+    "สายยางผ้าใบ": "Reinforced rubber hose",
+}
+
+
+_SERVICE_KEYWORDS = (
+    "labour", "labor", "service", "transport", "cleaning", "civil",
+    "annual", "admin", "safety", "ppe",
+)
+
+
+def _epo_apply_thai_glossary(text: str) -> str:
+    """Substitute known Thai phrases with English equivalents."""
+    if not text:
+        return text
+    out = text
+    for thai, eng in _EPO_THAI_GLOSSARY.items():
+        if thai in out:
+            out = out.replace(thai, eng)
+    return out
+
+
+def _epo_classify_item(item_number: str, description: str, group_of_cost: str) -> str:
+    """Classify a Gen PO line as Stock, Non-Stock, or Service.
+
+    Rules:
+      • Item number starts with SFST34            → Stock (inventory)
+      • Item number starts with SFST81 / SFST82   → Non-Stock (externally bought)
+      • Description / group contains service kws  → Service
+      • Otherwise                                 → Other
+    """
+    code = (item_number or "").strip().upper()
+    if code.startswith("SFST34"):
+        return "Stock"
+    if code.startswith("SFST81") or code.startswith("SFST82"):
+        return "Non-Stock"
+    haystack = f"{description or ''} {group_of_cost or ''}".lower()
+    if any(kw in haystack for kw in _SERVICE_KEYWORDS):
+        return "Service"
+    return "Other"
+
+
+def _epo_parse_int_days(raw) -> int | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().replace(",", "")
+    if not s or s.lower() == "nan":
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
 def build_external_po_payload() -> dict:
     data_dir_path = Path(__file__).resolve().parent.parent / "data"
     future_paths, _ = _resolve_future_sources(data_dir_path)
@@ -3185,6 +3253,9 @@ def build_external_po_payload() -> dict:
                     desc_out = t
             except Exception:
                 pass
+        # Final pass over the manual glossary to catch any phrases the
+        # automatic translator missed.
+        desc_out = _epo_apply_thai_glossary(desc_out)
 
         group_raw = _epo_col(row, "Group of cost")
         has_thai_group = bool(_THAI_RE.search(group_raw))
@@ -3196,6 +3267,7 @@ def build_external_po_payload() -> dict:
                     group_out = t
             except Exception:
                 pass
+        group_out = _epo_apply_thai_glossary(group_out)
 
         type_raw = _epo_col(row, "Type of cost")
         type_clean = _TYPE_CLEAN.get(type_raw, type_raw.strip()) if type_raw else ""
@@ -3205,11 +3277,49 @@ def build_external_po_payload() -> dict:
         vendor_clean = re.sub(r"^V\d+\s*-\s*", "", vendor_raw).strip() if vendor_raw else ""
 
         grn_no = _epo_col(row, "GRN No.")
+        item_number = _epo_col(row, "Item number")
+
+        lead_time_days = _epo_parse_int_days(_epo_col(row, "Lead time delivery (day)"))
+        actual_lead_days = _epo_parse_int_days(_epo_col(row, "GRN-PO date (Day)"))
+        status_text = _epo_col(row, "PR PO GRN Status").strip()
+        kpi_text = _epo_col(row, "KPI Status").strip()
+
+        is_pending = "waitting" in status_text.lower() or "waiting" in status_text.lower()
+        delay_days: int | None = None
+        delivery_flag = "Pending"
+        if not is_pending and actual_lead_days is not None and lead_time_days is not None:
+            diff = actual_lead_days - lead_time_days
+            if diff <= 0:
+                delivery_flag = "Ontime"
+                delay_days = 0
+            else:
+                delivery_flag = "Delayed"
+                delay_days = diff
+        elif not is_pending and kpi_text:
+            delivery_flag = "Ontime" if "ontime" in kpi_text.lower() else "Delayed"
+            delay_days = 0 if delivery_flag == "Ontime" else None
+
+        classification = _epo_classify_item(item_number, desc_out, group_out)
+        total_price_val = _epo_parse_float(_epo_col(row, "Total price"))
+
+        # Per-row badge flags surfaced in the dashboard (matches user spec)
+        row_flags: list[str] = []
+        if delivery_flag == "Delayed":
+            row_flags.append("delayed")
+        if delivery_flag == "Pending":
+            row_flags.append("pending")
+        if lead_time_days is not None and lead_time_days > 60:
+            row_flags.append("long_lead")
+        if total_price_val is not None and total_price_val > 50000:
+            row_flags.append("high_value")
+        if has_thai_desc:
+            row_flags.append("thai_desc")
 
         records.append({
             "pr_no": pr_no,
             "po_no": po_no,
             "grn_no": grn_no,
+            "item_number": item_number,
             "description_raw": desc_raw,
             "description": desc_out,
             "has_thai": has_thai_desc,
@@ -3220,17 +3330,22 @@ def build_external_po_payload() -> dict:
             "qty": _epo_parse_float(_epo_col(row, "Qty'")),
             "unit": _epo_norm_unit(_epo_col(row, "Unit")),
             "price_unit": _epo_parse_float(_epo_col(row, "Price/Unit")),
-            "total_price": _epo_parse_float(_epo_col(row, "Total price")),
+            "total_price": total_price_val,
             "vendor": vendor_clean,
             "vendor_raw": vendor_raw,
-            "status": _epo_col(row, "PR PO GRN Status").strip(),
+            "status": status_text,
             "date_pr": _epo_parse_date(_epo_col(row, "DMY Create PR")),
             "date_po": _epo_parse_date(_epo_col(row, "Date Gen PO")),
             "date_grn": _epo_parse_date(_epo_col(row, "Date recive bill")),
-            "lead_time": _epo_col(row, "Lead time delivery (day)"),
-            "actual_lead": _epo_col(row, "GRN-PO date"),
-            "kpi": _epo_col(row, "KPI Status").strip(),
+            "lead_time": lead_time_days,
+            "actual_lead": actual_lead_days,
+            "kpi": kpi_text,
             "note": _epo_col(row, "Note"),
+            "classification": classification,
+            "delivery_flag": delivery_flag,
+            "delay_days": delay_days,
+            "is_pending": is_pending,
+            "row_flags": row_flags,
         })
 
     # ── Summary ────────────────────────────────────────────────────────────────
@@ -3286,6 +3401,125 @@ def build_external_po_payload() -> dict:
         if quality_by_rule[rule_id]
     ]
 
+    # ── Supplier Delivery KPI dashboard analytics ──────────────────────────────
+    delivered = [r for r in records if r["delivery_flag"] in ("Ontime", "Delayed")]
+    on_time_rows = [r for r in delivered if r["delivery_flag"] == "Ontime"]
+    delayed_rows = [r for r in delivered if r["delivery_flag"] == "Delayed"]
+    pending_rows = [r for r in records if r["delivery_flag"] == "Pending"]
+    on_time_rate = round(len(on_time_rows) / len(delivered) * 100, 1) if delivered else 0.0
+    avg_delay = (
+        round(sum(r["delay_days"] for r in delayed_rows if r["delay_days"] is not None) / len(delayed_rows), 1)
+        if delayed_rows else 0.0
+    )
+
+    # ── Supplier performance aggregation ───────────────────────────────────────
+    from collections import defaultdict
+    sup_agg: dict[str, dict] = defaultdict(lambda: {
+        "total_pos": 0, "on_time": 0, "delayed": 0, "pending": 0,
+        "delay_days_sum": 0, "delay_count": 0, "spend": 0.0,
+    })
+    for r in records:
+        vendor_key = r["vendor"] or "Unknown"
+        s = sup_agg[vendor_key]
+        s["total_pos"] += 1
+        s["spend"] += r["total_price"] or 0
+        flag = r["delivery_flag"]
+        if flag == "Ontime":
+            s["on_time"] += 1
+        elif flag == "Delayed":
+            s["delayed"] += 1
+            if r["delay_days"] is not None:
+                s["delay_days_sum"] += r["delay_days"]
+                s["delay_count"] += 1
+        elif flag == "Pending":
+            s["pending"] += 1
+
+    supplier_performance = []
+    for vendor, s in sup_agg.items():
+        evaluated = s["on_time"] + s["delayed"]
+        rate = round(s["on_time"] / evaluated * 100, 1) if evaluated else None
+        avg_d = round(s["delay_days_sum"] / s["delay_count"], 1) if s["delay_count"] else 0.0
+        supplier_performance.append({
+            "vendor": vendor,
+            "total_pos": s["total_pos"],
+            "on_time": s["on_time"],
+            "delayed": s["delayed"],
+            "pending": s["pending"],
+            "avg_delay": avg_d,
+            "on_time_rate": rate,
+            "spend": round(s["spend"], 2),
+        })
+    supplier_performance.sort(key=lambda x: -x["spend"])
+
+    # ── Category analysis (Stock vs Non-Stock parts) ───────────────────────────
+    cat_agg: dict[str, dict] = defaultdict(lambda: {
+        "count": 0, "spend": 0.0, "on_time": 0, "delayed": 0,
+    })
+    for r in records:
+        c = cat_agg[r["classification"]]
+        c["count"] += 1
+        c["spend"] += r["total_price"] or 0
+        if r["delivery_flag"] == "Ontime":
+            c["on_time"] += 1
+        elif r["delivery_flag"] == "Delayed":
+            c["delayed"] += 1
+    category_summary = []
+    for cls in ("Stock", "Non-Stock", "Service", "Other"):
+        if cls not in cat_agg:
+            continue
+        c = cat_agg[cls]
+        evaluated = c["on_time"] + c["delayed"]
+        rate = round(c["on_time"] / evaluated * 100, 1) if evaluated else None
+        category_summary.append({
+            "classification": cls,
+            "count": c["count"],
+            "spend": round(c["spend"], 2),
+            "on_time_rate": rate,
+        })
+
+    # ── Services breakdown by Group of cost ────────────────────────────────────
+    services_by_group: dict[str, dict] = defaultdict(lambda: {
+        "count": 0, "spend": 0.0, "on_time": 0, "delayed": 0,
+    })
+    for r in records:
+        if r["classification"] != "Service":
+            continue
+        g = r["group_of_cost"] or "Unclassified"
+        bucket = services_by_group[g]
+        bucket["count"] += 1
+        bucket["spend"] += r["total_price"] or 0
+        if r["delivery_flag"] == "Ontime":
+            bucket["on_time"] += 1
+        elif r["delivery_flag"] == "Delayed":
+            bucket["delayed"] += 1
+    service_groups = []
+    for g, b in services_by_group.items():
+        evaluated = b["on_time"] + b["delayed"]
+        rate = round(b["on_time"] / evaluated * 100, 1) if evaluated else None
+        service_groups.append({
+            "group": g, "count": b["count"], "spend": round(b["spend"], 2),
+            "on_time_rate": rate,
+        })
+    service_groups.sort(key=lambda x: -x["spend"])
+
+    # ── Monthly spend trend (by PO date) ───────────────────────────────────────
+    monthly: dict[str, float] = defaultdict(float)
+    for r in records:
+        d = r["date_po"]
+        if not d or len(d) < 7:
+            continue
+        monthly[d[:7]] += r["total_price"] or 0
+    monthly_trend = [
+        {"month": k, "spend": round(v, 2)}
+        for k, v in sorted(monthly.items())
+    ]
+
+    # ── Top 10 vendors by spend ────────────────────────────────────────────────
+    top_vendors = sorted(
+        ({"vendor": v, "spend": round(s["spend"], 2)} for v, s in sup_agg.items()),
+        key=lambda x: -x["spend"],
+    )[:10]
+
     # ── Filters ────────────────────────────────────────────────────────────────
     result = {
         "status": "ok",
@@ -3301,7 +3535,18 @@ def build_external_po_payload() -> dict:
             "awaiting_delivery": awaiting,
             "over_delivery_rate": over_rate,
             "total_flagged": total_flagged,
+            "on_time_count": len(on_time_rows),
+            "delayed_count": len(delayed_rows),
+            "pending_count": len(pending_rows),
+            "evaluated_count": len(delivered),
+            "on_time_rate": on_time_rate,
+            "avg_delay_days": avg_delay,
         },
+        "supplier_performance": supplier_performance,
+        "category_summary": category_summary,
+        "service_groups": service_groups,
+        "monthly_trend": monthly_trend,
+        "top_vendors": top_vendors,
         "data_quality": data_quality,
         "filters": {
             "types_of_cost": sorted({r["type_of_cost"] for r in records if r["type_of_cost"]}),
@@ -3309,6 +3554,8 @@ def build_external_po_payload() -> dict:
             "statuses": sorted({r["status"] for r in records if r["status"]}),
             "vendors": sorted({r["vendor"] for r in records if r["vendor"]}),
             "machines": sorted({r["pd_machine"] for r in records if r["pd_machine"]}),
+            "classifications": sorted({r["classification"] for r in records if r["classification"]}),
+            "delivery_flags": ["Ontime", "Delayed", "Pending"],
         },
     }
     _EPO_CACHE["result"] = result

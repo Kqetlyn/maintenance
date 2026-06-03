@@ -3,6 +3,7 @@ let downtimeCachePayload = null;
 const chartRefs = {};
 const workOrderSlaWarningKeys = new Set();
 const DOWNTIME_EMBED_MODE = !!window.DOWNTIME_EMBED_MODE;
+const DOWNTIME_STAGE_ALL = "all";
 const MACHINE_EXPLORER_ASSET_RENDER_LIMIT = 250;
 const MACHINE_HISTORY_RENDER_LIMIT = 500;
 let downtimeEmbedHeightObserverStarted = false;
@@ -152,6 +153,7 @@ let openWorkOrdersData = [];
 let openWorkOrdersLoaded = false;
 let selectedMachineName = null;
 let selectedAssetId = null;
+const PM_CM_REVIEW_STORAGE_KEY = "downtime.preventiveCorrectiveReviewDecisions.v1";
 let machineExplorerSearch = "";
 let machineExplorerSort = "most_wo_mr";
 let mtbfHistoryPayload = null;
@@ -172,6 +174,11 @@ let mrMachineFilter = "all";
 let woSlaYearFilter = "";
 let woSlaMonthFilter = "all";
 let preventiveCorrectiveListFilter = "review";
+let preventiveCorrectiveFinancialYearFilter = "";
+let preventiveCorrectiveAnalysisTypeFilter = "preventive";
+let preventiveCorrectiveAnalysisPeriodFilter = "full";
+let preventiveCorrectiveAnalysisYearModeFilter = "financial";
+let preventiveCorrectiveReviewDecisions = loadPreventiveCorrectiveReviewDecisions();
 let deferredMrMovementHandle = null;
 let deferredAllYearWorkOrderHandle = null;
 let deferredAllYearDynamicsHandle = null;
@@ -181,6 +188,7 @@ let duplicateWoAnalysisToken = 0;
 let duplicateWorkOrderGroupsCache = { pm: [], sameDay: [], recurring: [] };
 let downtimeRefreshInFlight = false;
 let lastDowntimeRefreshAt = 0;
+let downtimeStageFilter = DOWNTIME_STAGE_ALL;
 let selectedDashboardTopic = "mr-tracking";
 let machineExplorerSelectedAssetId = "";
 let machineExplorerSelectedGroup = "All Groups";
@@ -188,6 +196,8 @@ let machineHistoryViewMode = "selected";        // "selected" = single asset, "a
 let machineHistorySort = "latest_wo_mr";        // Step 3 WO/MR history table sort
 let machineHistoryYearFilter = "";
 let machineHistoryMonthFilter = "";
+let machineHistoryDateFrom = "";
+let machineHistoryDateTo = "";
 let machineHistorySearch = "";
 let machineExplorerRefrigSubgroup = "";          // active subgroup key inside Refrigeration
 let machineExplorerAssetCriticalityFilter = "";
@@ -721,9 +731,9 @@ function applySlaTargetConfig(payload = {}) {
 function getSlaTargetSourceText() {
     const config = downtimePayload?.config?.sla_targets;
     if (config?.available) {
-        return `${config.message || "SLA targets loaded from AssetList_Edit.xlsx."} Edit AssetList_Edit.xlsx > SLA_Targets to change response/completion targets.`;
+        return `${config.message || "SLA targets loaded from Asset_Master.xlsx."} Edit Asset_Master.xlsx > SLA_Targets to change response/completion targets.`;
     }
-    return `${config?.message || "Using built-in default SLA targets."} Edit AssetList_Edit.xlsx > SLA_Targets to make them editable.`;
+    return `${config?.message || "Using built-in default SLA targets."} Edit Asset_Master.xlsx > SLA_Targets to make them editable.`;
 }
 
 // Placeholder only: estimated downtime requires a real operating-hours config before any value is calculated.
@@ -884,6 +894,46 @@ function getPeriodLabel(meta = {}) {
     if (meta.period_label) return meta.period_label;
     const selected = document.getElementById("period-select")?.selectedOptions?.[0]?.textContent?.trim();
     return selected || "YTD";
+}
+
+function getSelectedDowntimeStage() {
+    return document.getElementById("downtime-stage-filter")?.value || downtimeStageFilter || DOWNTIME_STAGE_ALL;
+}
+
+function buildDowntimeApiUrl(params = {}) {
+    const query = new URLSearchParams({ ...params, _: String(Date.now()) });
+    const stage = getSelectedDowntimeStage();
+    if (stage && stage !== DOWNTIME_STAGE_ALL) query.set("stage", stage);
+    return `/api/downtime?${query.toString()}`;
+}
+
+function buildDowntimeMtbfHistoryUrl() {
+    const query = new URLSearchParams({ _: String(Date.now()) });
+    const stage = getSelectedDowntimeStage();
+    if (stage && stage !== DOWNTIME_STAGE_ALL) query.set("stage", stage);
+    return `/api/downtime/mtbf-history?${query.toString()}`;
+}
+
+function resetStageScopedCaches() {
+    allWorkOrderRowsCache = null;
+    allWorkOrderRowsPromise = null;
+    mtbfHistoryPayload = null;
+    mtbfHistoryPromise = null;
+}
+
+function getCurrentDowntimePeriodSelection() {
+    const period = document.getElementById("period-select")?.value || "ytd";
+    return {
+        period,
+        start: period === "custom" ? (document.getElementById("custom-start")?.value || "") : "",
+        end: period === "custom" ? (document.getElementById("custom-end")?.value || "") : "",
+    };
+}
+
+async function reloadCurrentDowntimeData() {
+    const { period, start, end } = getCurrentDowntimePeriodSelection();
+    if (period === "custom" && (!start || !end)) return;
+    await loadDowntimeData(period, "", start, end);
 }
 
 function getWorkOrderRecordCount(summary = {}, downtimeSummary = {}, rows = []) {
@@ -1095,6 +1145,9 @@ function getMrAvailableYears(rows) {
 function getFallbackAllWorkOrderRows() {
     const rowMap = new Map();
     getWorkOrderRows(getManagement()).forEach((row, index) => rowMap.set(getExportWorkOrderKey(row, index), row));
+    if (getSelectedDowntimeStage() !== DOWNTIME_STAGE_ALL) {
+        return [...rowMap.values()];
+    }
     const allCachedPeriods = downtimeCachePayload?.payloads || {};
     Object.keys(allCachedPeriods).forEach((key) => {
         (allCachedPeriods[key]?.management?.work_orders || []).forEach((row, index) => {
@@ -1108,7 +1161,7 @@ function getFallbackAllWorkOrderRows() {
 async function loadAllWorkOrderRowsForMovement() {
     if (allWorkOrderRowsCache) return allWorkOrderRowsCache;
     if (allWorkOrderRowsPromise) return allWorkOrderRowsPromise;
-    allWorkOrderRowsPromise = fetch(`/api/downtime?period=all_years&work_orders_only=1&_=${Date.now()}`, { cache: "no-store" })
+    allWorkOrderRowsPromise = fetch(buildDowntimeApiUrl({ period: "all_years", work_orders_only: "1" }), { cache: "no-store" })
         .then(async (response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const payload = await response.json();
@@ -2527,7 +2580,7 @@ function getCmcScopeItems(rows = []) {
 function getCmcScopeSubtitle() {
     const map = {
         all: "All assets, using the same Machine Explorer grouping logic. Select two periods or all years to compare performance.",
-        Critical: "Critical assets only, using the AssetList criticality mapping.",
+        Critical: "Critical assets only, using the Asset Master mapping.",
         "Non-Critical / Facility": "Non-critical and facility assets.",
         "Production Equipment": "Production equipment assets only, including bratt pans, ovens, conveyors, fryers, and similar production line assets.",
         Refrigeration: "Refrigeration assets only, including condensers, evaporators, freezers, chillers, cold rooms, air blast units, ice makers, and refrigerant-related assets.",
@@ -3563,6 +3616,81 @@ function matchPmCmPatterns(text, patterns) {
     return patterns.filter((item) => item.pattern.test(value)).map((item) => item.label);
 }
 
+function normalizePreventiveCorrectiveMaintenanceType(value) {
+    const normalized = String(value || "").trim().toUpperCase();
+    if (normalized === "PREVENTIVE") return "Preventive";
+    if (normalized === "CORRECTIVE") return "Corrective";
+    return "";
+}
+
+function getPreventiveCorrectiveReviewKey(row = {}, index = 0) {
+    return cleanExportIdentifier(row?.work_order_id || row?.wo_id)
+        || cleanExportIdentifier(row?.maintenance_order_id || row?.request_id)
+        || cleanExportIdentifier(row?.mr_id || row?.mr_no || row?.mr_number || row?.request_no)
+        || getWorkOrderSlaRowId(row, index);
+}
+
+function loadPreventiveCorrectiveReviewDecisions() {
+    if (typeof window === "undefined" || !window.localStorage) return {};
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(PM_CM_REVIEW_STORAGE_KEY) || "{}");
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+        return Object.fromEntries(Object.entries(parsed).map(([id, decision]) => {
+            const reviewDecision = normalizePreventiveCorrectiveMaintenanceType(decision?.reviewDecision || decision?.reviewedMaintenanceType);
+            if (!id || !reviewDecision) return null;
+            return [id, {
+                originalType: normalizePreventiveCorrectiveMaintenanceType(decision?.originalType || decision?.originalMaintenanceType),
+                reviewDecision,
+                reviewStatus: "Reviewed",
+                reviewedAt: String(decision?.reviewedAt || ""),
+                reviewNote: String(decision?.reviewNote || ""),
+            }];
+        }).filter(Boolean));
+    } catch (error) {
+        console.warn("Preventive vs Corrective review decisions could not be loaded:", error);
+        return {};
+    }
+}
+
+function savePreventiveCorrectiveReviewDecisions() {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+        window.localStorage.setItem(PM_CM_REVIEW_STORAGE_KEY, JSON.stringify(preventiveCorrectiveReviewDecisions));
+    } catch (error) {
+        console.warn("Preventive vs Corrective review decisions could not be saved:", error);
+    }
+}
+
+function getPreventiveCorrectiveReviewDecision(id) {
+    const decision = preventiveCorrectiveReviewDecisions[id];
+    const reviewDecision = normalizePreventiveCorrectiveMaintenanceType(decision?.reviewDecision || decision?.reviewedMaintenanceType);
+    return reviewDecision ? { ...decision, reviewDecision, reviewStatus: "Reviewed" } : null;
+}
+
+function setPreventiveCorrectiveReviewDecision(id, reviewDecision, originalType = "") {
+    const normalizedType = normalizePreventiveCorrectiveMaintenanceType(reviewDecision);
+    if (!id || !normalizedType) return;
+    preventiveCorrectiveReviewDecisions[id] = {
+        originalType: normalizePreventiveCorrectiveMaintenanceType(originalType),
+        reviewDecision: normalizedType,
+        reviewStatus: "Reviewed",
+        reviewedAt: new Date().toISOString(),
+        reviewNote: "",
+    };
+    savePreventiveCorrectiveReviewDecisions();
+}
+
+function clearPreventiveCorrectiveReviewDecision(id) {
+    if (!id || !preventiveCorrectiveReviewDecisions[id]) return;
+    delete preventiveCorrectiveReviewDecisions[id];
+    savePreventiveCorrectiveReviewDecisions();
+}
+
+function getPreventiveCorrectiveTypeLabel(type) {
+    const normalized = normalizePreventiveCorrectiveMaintenanceType(type);
+    return normalized || "--";
+}
+
 function getPreventiveCorrectiveTypeText(row = {}) {
     return [
         row?.maintenance_job_type,
@@ -3594,7 +3722,14 @@ function classifyPreventiveCorrectiveRow(row, index) {
     const typeCorrectiveMatches = matchPmCmPatterns(typeText, PM_CM_CORRECTIVE_PATTERNS);
     const narrativePreventiveMatches = matchPmCmPatterns(narrativeText, PM_CM_PREVENTIVE_PATTERNS);
     const loggedType = typePreventiveMatches.length ? "preventive" : "corrective";
-    const reviewMatches = loggedType === "corrective" ? [...new Set([...typePreventiveMatches, ...narrativePreventiveMatches])] : [];
+    const originalType = loggedType === "preventive" ? "Preventive" : "Corrective";
+    const reviewMatches = originalType === "Corrective" ? [...new Set([...typePreventiveMatches, ...narrativePreventiveMatches])] : [];
+    const id = getPreventiveCorrectiveReviewKey(row, index);
+    const savedDecision = getPreventiveCorrectiveReviewDecision(id);
+    const reviewDecision = savedDecision?.reviewDecision || "";
+    const reviewStatus = reviewDecision ? "Reviewed" : "Needs Review";
+    const finalType = reviewDecision || originalType;
+    const finalLoggedType = finalType === "Preventive" ? "preventive" : "corrective";
     const created = getWorkOrderSlaCreatedDate(row);
     const raised = getMrRaisedDate(row);
     const description = getMrDescription(row) || narrativeText;
@@ -3602,12 +3737,20 @@ function classifyPreventiveCorrectiveRow(row, index) {
     return {
         row,
         index,
-        id: getWorkOrderSlaRowId(row, index),
+        id,
         assetId: String(row?.asset_id || row?.machine_code || row?.equipment_id || "--").trim() || "--",
         equipmentName: getMachineEquipmentName(row),
         loggedType,
+        originalType,
+        reviewDecision,
+        finalType,
+        finalLoggedType,
+        reviewStatus,
+        reviewedAt: savedDecision?.reviewedAt || "",
+        reviewNote: savedDecision?.reviewNote || "",
         typeText: typeText || (loggedType === "preventive" ? "Preventive" : "No preventive marker found"),
-        reviewNeeded: reviewMatches.length > 0,
+        reviewNeeded: originalType === "Corrective" && reviewMatches.length > 0 && reviewStatus !== "Reviewed",
+        hasPreventiveSignal: originalType === "Corrective" && reviewMatches.length > 0,
         reviewReason: reviewMatches.length ? `Preventive signal: ${reviewMatches.slice(0, 3).join(", ")}` : "No preventive signal detected",
         correctiveReason: typeCorrectiveMatches.length ? typeCorrectiveMatches.slice(0, 3).join(", ") : "Logged/assumed corrective",
         createdDate: created.date || raised.date || null,
@@ -3618,20 +3761,336 @@ function classifyPreventiveCorrectiveRow(row, index) {
 
 function buildPreventiveCorrectiveModel(rows = []) {
     const entries = rows.map((row, index) => classifyPreventiveCorrectiveRow(row, index));
-    const preventive = entries.filter((entry) => entry.loggedType === "preventive");
-    const corrective = entries.filter((entry) => entry.loggedType === "corrective");
-    const review = corrective.filter((entry) => entry.reviewNeeded);
+    const preventive = entries.filter((entry) => entry.finalType === "Preventive");
+    const corrective = entries.filter((entry) => entry.finalType === "Corrective");
+    const review = entries.filter((entry) => entry.reviewNeeded);
+    const reviewedPreventive = entries.filter((entry) => entry.reviewDecision === "Preventive");
+    const reviewedCorrective = entries.filter((entry) => entry.reviewDecision === "Corrective");
     return {
         entries,
         preventive,
         corrective,
         review,
+        reviewedPreventive,
+        reviewedCorrective,
         chartRows: [
             { key: "preventive", label: "Logged Preventive", count: preventive.length, color: "#10b981" },
             { key: "corrective", label: "Logged Corrective", count: corrective.length, color: "#ef4444" },
             { key: "review", label: "Data Review", count: review.length, color: "#f59e0b" },
         ],
     };
+}
+
+const PREVENTIVE_CORRECTIVE_CALENDAR_MONTH_ORDER = MR_MONTH_LABELS.map((_, index) => index);
+
+function getPreventiveCorrectiveAnalysisYearMode() {
+    if (!["calendar", "financial"].includes(preventiveCorrectiveAnalysisYearModeFilter)) {
+        preventiveCorrectiveAnalysisYearModeFilter = "financial";
+    }
+    return preventiveCorrectiveAnalysisYearModeFilter;
+}
+
+function getPreventiveCorrectiveAnalysisYearValue(entry, yearMode) {
+    const date = entry?.createdDate;
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return null;
+    return yearMode === "calendar" ? date.getFullYear() : getMrFinancialYearStart(date);
+}
+
+function getPreventiveCorrectiveAnalysisYearLabel(year, yearMode) {
+    const numericYear = Number(year);
+    if (!Number.isFinite(numericYear)) return yearMode === "calendar" ? "Year" : "Financial year";
+    return yearMode === "calendar" ? String(numericYear) : getMrFinancialYearLabel(numericYear);
+}
+
+function getPreventiveCorrectiveAnalysisAvailableYears(entries = [], yearMode = getPreventiveCorrectiveAnalysisYearMode()) {
+    const years = new Set();
+    entries.forEach((entry) => {
+        const yearValue = getPreventiveCorrectiveAnalysisYearValue(entry, yearMode);
+        if (Number.isFinite(yearValue)) years.add(yearValue);
+    });
+    return [...years].sort((a, b) => b - a);
+}
+
+function getPreventiveCorrectiveAnalysisMonthLabels(selectedYear, monthOrder = MR_FINANCIAL_MONTH_ORDER, yearMode = getPreventiveCorrectiveAnalysisYearMode()) {
+    const yearValue = Number(selectedYear);
+    if (!Number.isFinite(yearValue)) return monthOrder.map((monthIndex) => MR_MONTH_LABELS[monthIndex] || "");
+    return monthOrder.map((monthIndex) => {
+        const year = yearMode === "calendar"
+            ? yearValue
+            : (monthIndex + 1 >= MR_FINANCIAL_YEAR_START_MONTH ? yearValue : yearValue + 1);
+        return `${MR_MONTH_LABELS[monthIndex]}-${String(year).slice(-2)}`;
+    });
+}
+
+const PREVENTIVE_CORRECTIVE_ANALYSIS_TYPES = {
+    preventive: {
+        key: "preventive",
+        label: "Logged Preventive",
+        metricLabel: "Total preventive MR",
+        rowLabel: "logged preventive",
+        axisLabel: "Logged Preventive",
+        color: "#10b981",
+    },
+    corrective: {
+        key: "corrective",
+        label: "Logged Corrective",
+        metricLabel: "Total corrective MR",
+        rowLabel: "logged corrective",
+        axisLabel: "Logged Corrective",
+        color: "#ef4444",
+    },
+    review: {
+        key: "review",
+        label: "Data Review",
+        metricLabel: "Data review MR",
+        rowLabel: "data review",
+        axisLabel: "Data Review",
+        color: "#f59e0b",
+    },
+};
+
+function getPreventiveCorrectiveAnalysisTypeConfig() {
+    if (!PREVENTIVE_CORRECTIVE_ANALYSIS_TYPES[preventiveCorrectiveAnalysisTypeFilter]) {
+        preventiveCorrectiveAnalysisTypeFilter = "preventive";
+    }
+    return PREVENTIVE_CORRECTIVE_ANALYSIS_TYPES[preventiveCorrectiveAnalysisTypeFilter];
+}
+
+function getPreventiveCorrectiveAnalysisPeriodKey() {
+    if (!["full", "ytd"].includes(preventiveCorrectiveAnalysisPeriodFilter)) {
+        preventiveCorrectiveAnalysisPeriodFilter = "full";
+    }
+    return preventiveCorrectiveAnalysisPeriodFilter;
+}
+
+function getPreventiveCorrectiveAnalysisEntries(model, typeKey) {
+    if (typeKey === "corrective") return model.corrective;
+    if (typeKey === "review") return model.review;
+    return model.preventive;
+}
+
+function syncPreventiveCorrectiveAnalysisTypeOption(config) {
+    const select = document.getElementById("topic-preventive-analysis-type-filter");
+    if (!select) return;
+    select.value = config.key;
+}
+
+function syncPreventiveCorrectiveAnalysisPeriodOption(periodKey) {
+    const select = document.getElementById("topic-preventive-analysis-period-filter");
+    if (!select) return;
+    select.value = periodKey;
+}
+
+function syncPreventiveCorrectiveAnalysisYearModeOption(yearMode) {
+    const select = document.getElementById("topic-preventive-analysis-year-mode-filter");
+    if (select) select.value = yearMode;
+    const label = document.getElementById("topic-preventive-analysis-year-label");
+    if (label) label.textContent = yearMode === "calendar" ? "Year" : "Financial Year";
+    const periodSelect = document.getElementById("topic-preventive-analysis-period-filter");
+    const fullPeriodOption = periodSelect?.querySelector('option[value="full"]');
+    if (fullPeriodOption) fullPeriodOption.textContent = yearMode === "calendar" ? "Full Year" : "Full FY";
+}
+
+function getPreventiveCorrectiveAnalysisMetricLabel(config, periodKey) {
+    if (periodKey !== "ytd") return config.metricLabel;
+    if (config.key === "corrective") return "YTD corrective MR";
+    if (config.key === "review") return "YTD data review MR";
+    return "YTD preventive MR";
+}
+
+function getPreventiveCorrectiveAnalysisYearRange(selectedYear, yearMode) {
+    if (selectedYear === null || selectedYear === undefined) return null;
+    const yearValue = Number(selectedYear);
+    if (!Number.isFinite(yearValue)) return null;
+    if (yearMode === "calendar") {
+        return {
+            start: new Date(yearValue, 0, 1, 0, 0, 0, 0),
+            end: new Date(yearValue + 1, 0, 1, 0, 0, 0, 0),
+        };
+    }
+    return getMrFinancialYearRange(yearValue);
+}
+
+function getPreventiveCorrectiveAnalysisYtdReferenceDate(selectedYear, yearMode) {
+    const range = getPreventiveCorrectiveAnalysisYearRange(selectedYear, yearMode);
+    if (!range) return null;
+    const referenceDate = getWorkOrderSlaReferenceDate();
+    if (!(referenceDate instanceof Date) || Number.isNaN(referenceDate.getTime())) {
+        return new Date(range.end.getTime() - 1);
+    }
+    if (referenceDate < range.start) return null;
+    if (referenceDate >= range.end) return new Date(range.end.getTime() - 1);
+    const cutoff = new Date(referenceDate);
+    cutoff.setHours(23, 59, 59, 999);
+    return cutoff;
+}
+
+function getPreventiveCorrectiveAnalysisBaseMonthOrder(yearMode) {
+    return yearMode === "calendar" ? PREVENTIVE_CORRECTIVE_CALENDAR_MONTH_ORDER : MR_FINANCIAL_MONTH_ORDER;
+}
+
+function getPreventiveCorrectiveAnalysisMonthOrder(selectedYear, periodKey, yearMode) {
+    const baseMonthOrder = getPreventiveCorrectiveAnalysisBaseMonthOrder(yearMode);
+    if (periodKey !== "ytd" || selectedYear === null || selectedYear === undefined) return baseMonthOrder;
+    const cutoffDate = getPreventiveCorrectiveAnalysisYtdReferenceDate(selectedYear, yearMode);
+    if (!cutoffDate) return [];
+    const position = baseMonthOrder.indexOf(cutoffDate.getMonth());
+    return position >= 0 ? baseMonthOrder.slice(0, position + 1) : [];
+}
+
+function populatePreventiveCorrectiveFinancialYearOptions(availableYears = [], yearMode = getPreventiveCorrectiveAnalysisYearMode()) {
+    const select = document.getElementById("topic-preventive-financial-year-filter");
+    if (!select) return;
+    if (!availableYears.length) {
+        preventiveCorrectiveFinancialYearFilter = "";
+        select.innerHTML = `<option value="">${escapeHtml(yearMode === "calendar" ? "No year data" : "No financial year data")}</option>`;
+        select.disabled = true;
+        return;
+    }
+    if (!availableYears.includes(Number(preventiveCorrectiveFinancialYearFilter))) {
+        preventiveCorrectiveFinancialYearFilter = String(availableYears[0]);
+    }
+    select.innerHTML = availableYears
+        .map((year) => `<option value="${escapeHtml(String(year))}">${escapeHtml(getPreventiveCorrectiveAnalysisYearLabel(year, yearMode))}</option>`)
+        .join("");
+    select.disabled = false;
+    select.value = preventiveCorrectiveFinancialYearFilter;
+}
+
+function buildPreventiveCorrectiveAnalysisModel(rows = []) {
+    const baseModel = buildPreventiveCorrectiveModel(rows);
+    const config = getPreventiveCorrectiveAnalysisTypeConfig();
+    const periodKey = getPreventiveCorrectiveAnalysisPeriodKey();
+    const yearMode = getPreventiveCorrectiveAnalysisYearMode();
+    const datedEntries = baseModel.entries
+        .filter((entry) => entry.createdDate instanceof Date && !Number.isNaN(entry.createdDate.getTime()));
+    const selectedEntries = getPreventiveCorrectiveAnalysisEntries(baseModel, config.key)
+        .filter((entry) => entry.createdDate instanceof Date && !Number.isNaN(entry.createdDate.getTime()));
+    const availableYears = getPreventiveCorrectiveAnalysisAvailableYears(datedEntries, yearMode);
+    if (!availableYears.includes(Number(preventiveCorrectiveFinancialYearFilter))) {
+        preventiveCorrectiveFinancialYearFilter = availableYears.length ? String(availableYears[0]) : "";
+    }
+    const selectedYear = availableYears.includes(Number(preventiveCorrectiveFinancialYearFilter))
+        ? Number(preventiveCorrectiveFinancialYearFilter)
+        : null;
+    const monthOrder = getPreventiveCorrectiveAnalysisMonthOrder(selectedYear, periodKey, yearMode);
+    const monthLabels = getPreventiveCorrectiveAnalysisMonthLabels(selectedYear, monthOrder, yearMode);
+    const monthlyCounts = new Array(monthOrder.length).fill(0);
+    const ytdCutoffDate = periodKey === "ytd" ? getPreventiveCorrectiveAnalysisYtdReferenceDate(selectedYear, yearMode) : null;
+    let totalRows = 0;
+
+    selectedEntries.forEach((entry) => {
+        if (selectedYear !== null && getPreventiveCorrectiveAnalysisYearValue(entry, yearMode) !== selectedYear) return;
+        if (periodKey === "ytd" && (!ytdCutoffDate || entry.createdDate > ytdCutoffDate)) return;
+        const monthPosition = monthOrder.indexOf(entry.createdDate.getMonth());
+        if (monthPosition < 0) return;
+        totalRows += 1;
+        monthlyCounts[monthPosition] += 1;
+    });
+
+    return {
+        availableYears,
+        selectedYear,
+        selectedYearLabel: selectedYear !== null ? getPreventiveCorrectiveAnalysisYearLabel(selectedYear, yearMode) : getPreventiveCorrectiveAnalysisYearLabel(null, yearMode),
+        monthLabels,
+        monthlyCounts,
+        totalRows,
+        config,
+        periodKey,
+        yearMode,
+        ytdCutoffDate,
+    };
+}
+
+function renderPreventiveCorrectiveAnalysis(rows = []) {
+    const model = buildPreventiveCorrectiveAnalysisModel(rows);
+    populatePreventiveCorrectiveFinancialYearOptions(model.availableYears, model.yearMode);
+    syncPreventiveCorrectiveAnalysisTypeOption(model.config);
+    syncPreventiveCorrectiveAnalysisPeriodOption(model.periodKey);
+    syncPreventiveCorrectiveAnalysisYearModeOption(model.yearMode);
+
+    const title = document.getElementById("preventive-analysis-chart-title");
+    const note = document.getElementById("preventive-analysis-note");
+    const head = document.getElementById("preventive-analysis-table-head");
+    const body = document.getElementById("preventive-analysis-table-body");
+    const canvas = ensureCanvas("preventiveCorrectiveAnalysisChart");
+    const scopeLabel = model.periodKey === "ytd" ? "YTD" : "Total";
+    const metricLabel = getPreventiveCorrectiveAnalysisMetricLabel(model.config, model.periodKey);
+
+    if (title) title.textContent = model.selectedYear ? `${model.config.label} ${scopeLabel} - ${model.selectedYearLabel}` : `${model.config.label} ${scopeLabel}`;
+    if (head) {
+        const monthHeaders = model.monthLabels.length
+            ? model.monthLabels.map((label) => `<th>${escapeHtml(label)}</th>`).join("")
+            : "<th>No data</th>";
+        head.innerHTML = `<th>Metric</th>${monthHeaders}`;
+    }
+
+    if (!model.availableYears.length) {
+        if (note) note.textContent = "No dated Preventive vs Corrective rows are available for financial year analysis.";
+        if (body) body.innerHTML = `<tr><td colspan="2" class="empty-cell">No dated Preventive vs Corrective rows are available for financial year analysis.</td></tr>`;
+        destroyChart("preventiveCorrectiveAnalysisChart");
+        if (canvas) renderEmptyChart("preventiveCorrectiveAnalysisChart", "No Preventive vs Corrective financial year data available.");
+        scheduleEmbeddedHeightPost();
+        return;
+    }
+
+    if (body) {
+        body.innerHTML = model.monthLabels.length ? `
+            <tr>
+                <td>${escapeHtml(metricLabel)}</td>
+                ${model.monthlyCounts.map((value) => `<td>${escapeHtml(fmtNumber(value))}</td>`).join("")}
+            </tr>
+        ` : `<tr><td colspan="2" class="empty-cell">YTD has not started for ${escapeHtml(model.selectedYearLabel)}.</td></tr>`;
+    }
+
+    const periodText = model.periodKey === "ytd" && model.ytdCutoffDate
+        ? ` through ${fmtDateOnly(model.ytdCutoffDate)}`
+        : "";
+    const noteParts = [
+        `${fmtNumber(model.totalRows)} ${model.config.rowLabel} row${model.totalRows === 1 ? "" : "s"} counted by created or raised date in ${model.selectedYearLabel}${periodText}.`,
+    ];
+    if (note) note.textContent = noteParts.join(" ");
+
+    destroyChart("preventiveCorrectiveAnalysisChart");
+    if (!canvas) return;
+    if (!model.totalRows) {
+        const emptyMessage = model.periodKey === "ytd" && !model.ytdCutoffDate
+            ? `YTD has not started for ${model.selectedYearLabel}.`
+            : `No ${model.config.rowLabel} rows found in ${model.selectedYearLabel}${periodText}.`;
+        renderEmptyChart("preventiveCorrectiveAnalysisChart", emptyMessage);
+        scheduleEmbeddedHeightPost();
+        return;
+    }
+
+    chartRefs.preventiveCorrectiveAnalysisChart = new Chart(canvas.getContext("2d"), {
+        type: "bar",
+        data: {
+            labels: model.monthLabels,
+            datasets: [{
+                label: metricLabel,
+                data: model.monthlyCounts,
+                backgroundColor: model.config.color,
+                borderRadius: 8,
+                maxBarThickness: 34,
+            }],
+        },
+        options: {
+            ...mrTrackingAxisOptions(model.config.axisLabel),
+            scales: {
+                x: {
+                    grid: { display: false },
+                    ticks: { color: "#475569", maxRotation: 0, minRotation: 0 },
+                },
+                y: {
+                    beginAtZero: true,
+                    title: { display: true, text: model.config.axisLabel },
+                    ticks: { precision: 0, color: "#475569" },
+                    grid: { color: "rgba(148, 163, 184, 0.18)" },
+                },
+            },
+        },
+    });
+    scheduleEmbeddedHeightPost();
 }
 
 function renderPreventiveCorrectiveChart(model) {
@@ -3662,7 +4121,7 @@ function renderPreventiveCorrectiveChart(model) {
                 tooltip: {
                     callbacks: {
                         label: (ctx) => `${fmtNumber(ctx.raw)} row(s)`,
-                        afterLabel: (ctx) => ctx.dataIndex === 2 ? "Review rows are also included in Logged Corrective." : "",
+                        afterLabel: (ctx) => ctx.dataIndex === 2 ? "Data Review is unresolved only; confirmed Preventive rows move out of Corrective." : "",
                     },
                 },
             },
@@ -3681,6 +4140,49 @@ function getPreventiveCorrectiveListRows(model, filter) {
     return model.review;
 }
 
+function renderPreventiveCorrectiveReviewActions(entry) {
+    const id = escapeHtml(entry.id);
+    const originalType = escapeHtml(entry.originalType || "");
+    if (entry.reviewNeeded) {
+        return `
+            <div class="pm-cm-action-group">
+                <button type="button" class="pm-cm-review-btn preventive" data-pm-cm-review-action="confirm-preventive" data-pm-cm-review-id="${id}" data-pm-cm-original-type="${originalType}">Confirm Preventive</button>
+                <button type="button" class="pm-cm-review-btn corrective" data-pm-cm-review-action="confirm-corrective" data-pm-cm-review-id="${id}" data-pm-cm-original-type="${originalType}">Confirm Corrective</button>
+            </div>
+        `;
+    }
+    if (entry.reviewStatus === "Reviewed") {
+        return `
+            <div class="pm-cm-action-group">
+                <button type="button" class="pm-cm-review-btn reset" data-pm-cm-review-action="reset" data-pm-cm-review-id="${id}">Undo Review</button>
+            </div>
+        `;
+    }
+    return `<span class="cell-sub">No action</span>`;
+}
+
+function getPreventiveCorrectiveReviewStatusDisplay(entry) {
+    if (entry.reviewStatus === "Reviewed") {
+        return {
+            className: "reviewed",
+            label: `Reviewed ${getPreventiveCorrectiveTypeLabel(entry.reviewDecision)}`,
+            detail: `Final: ${getPreventiveCorrectiveTypeLabel(entry.finalType)}${entry.reviewedAt ? ` | ${fmtDateTime(entry.reviewedAt)}` : ""}`,
+        };
+    }
+    if (entry.reviewNeeded) {
+        return {
+            className: "review",
+            label: entry.reviewStatus,
+            detail: entry.reviewReason,
+        };
+    }
+    return {
+        className: entry.finalLoggedType,
+        label: entry.finalType === "Preventive" ? "OK Preventive" : "OK Corrective",
+        detail: `Final: ${getPreventiveCorrectiveTypeLabel(entry.finalType)}`,
+    };
+}
+
 function renderPreventiveCorrectiveList(model) {
     const body = document.getElementById("pm-cm-list-body");
     const select = document.getElementById("pm-cm-list-filter");
@@ -3697,16 +4199,19 @@ function renderPreventiveCorrectiveList(model) {
     if (subtitle) {
         subtitle.textContent = `${fmtNumber(rows.length)} ${listLabel} row${rows.length === 1 ? "" : "s"} in the current scope.`;
     }
+    setText(
+        "pm-cm-review-summary",
+        `${fmtNumber(model.review.length)} row${model.review.length === 1 ? "" : "s"} require review | Reviewed Preventive: ${fmtNumber(model.reviewedPreventive.length)} | Reviewed Corrective: ${fmtNumber(model.reviewedCorrective.length)}`
+    );
     if (!rows.length) {
         const message = currentFilter === "review"
-            ? "No corrective logs with preventive signals in the current scope."
+            ? "No unresolved corrective logs with preventive signals in the current scope."
             : "No rows match this maintenance type selection.";
-        body.innerHTML = `<tr><td colspan="7" class="empty-cell">${escapeHtml(message)}</td></tr>`;
+        body.innerHTML = `<tr><td colspan="8" class="empty-cell">${escapeHtml(message)}</td></tr>`;
         return;
     }
     body.innerHTML = rows.slice(0, 250).map((entry) => {
-        const reviewClass = entry.reviewNeeded ? "review" : entry.loggedType;
-        const reviewLabel = entry.reviewNeeded ? "Review" : (entry.loggedType === "preventive" ? "OK Preventive" : "OK Corrective");
+        const reviewDisplay = getPreventiveCorrectiveReviewStatusDisplay(entry);
         return `
             <tr>
                 <td>
@@ -3719,18 +4224,38 @@ function renderPreventiveCorrectiveList(model) {
                 </td>
                 <td>
                     <span class="pm-cm-type-pill ${escapeHtml(entry.loggedType)}">${escapeHtml(entry.loggedType === "preventive" ? "Preventive" : "Corrective")}</span>
+                    <div class="cell-sub">Original: ${escapeHtml(getPreventiveCorrectiveTypeLabel(entry.originalType))}</div>
                     <div class="cell-sub">${escapeHtml(entry.typeText || "--")}</div>
                 </td>
                 <td>
-                    <span class="pm-cm-type-pill ${escapeHtml(reviewClass)}">${escapeHtml(reviewLabel)}</span>
-                    <div class="cell-sub">${escapeHtml(entry.reviewNeeded ? entry.reviewReason : entry.correctiveReason)}</div>
+                    <span class="pm-cm-type-pill ${escapeHtml(reviewDisplay.className)}">${escapeHtml(reviewDisplay.label)}</span>
+                    <div class="cell-sub">${escapeHtml(reviewDisplay.detail)}</div>
                 </td>
                 <td>${escapeHtml(entry.createdDate ? fmtDateOnly(entry.createdDate) : "--")}</td>
                 <td class="description-cell">${escapeHtml(entry.description || "--")}</td>
                 <td class="description-cell">${escapeHtml(entry.translatedDescription || "--")}</td>
+                <td class="pm-cm-action-cell">${renderPreventiveCorrectiveReviewActions(entry)}</td>
             </tr>
         `;
     }).join("");
+}
+
+function handlePreventiveCorrectiveReviewAction(event) {
+    const button = event.target.closest("[data-pm-cm-review-action]");
+    if (!button) return;
+    const id = button.dataset.pmCmReviewId || "";
+    const action = button.dataset.pmCmReviewAction || "";
+    if (!id) return;
+    if (action === "confirm-preventive") {
+        setPreventiveCorrectiveReviewDecision(id, "Preventive", button.dataset.pmCmOriginalType || "Corrective");
+    } else if (action === "confirm-corrective") {
+        setPreventiveCorrectiveReviewDecision(id, "Corrective", button.dataset.pmCmOriginalType || "Corrective");
+    } else if (action === "reset") {
+        clearPreventiveCorrectiveReviewDecision(id);
+    } else {
+        return;
+    }
+    renderPreventiveCorrectiveSection(preventiveCorrectiveSourceRows);
 }
 
 // Source rows last passed to the Preventive vs Corrective section. Cached so
@@ -3750,8 +4275,9 @@ function renderPreventiveCorrectiveSection(rows = []) {
     renderPreventiveCorrectiveList(model);
     setText(
         "pm-cm-review-note",
-        `${fmtNumber(model.review.length)} corrective row${model.review.length === 1 ? "" : "s"} contain preventive wording and need data review. Review rows remain included in the Logged Corrective list.`
+        `${fmtNumber(model.review.length)} unresolved corrective row${model.review.length === 1 ? "" : "s"} contain preventive wording and need data review. Data Review excludes confirmed rows. Reviewed Preventive: ${fmtNumber(model.reviewedPreventive.length)} | Reviewed Corrective: ${fmtNumber(model.reviewedCorrective.length)}.`
     );
+    renderPreventiveCorrectiveAnalysis(preventiveCorrectiveSourceRows);
 }
 
 function hasWorkOrderSlaFields(rows = []) {
@@ -4349,6 +4875,14 @@ function setSelectOptions(id, values, label) {
     if (unique.includes(current)) select.value = current;
 }
 
+function formatDateInputValue(date) {
+    if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, "0");
+    const day = String(date.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+}
+
 function getMachineEquipmentName(row) {
     return String(
         row?.asset_display_name
@@ -4461,6 +4995,20 @@ function populateMachineExplorerFilters(rows = []) {
         )).join("");
         assetSelect.value = machineOptions.some((item) => item.assetId === previous) ? previous : "";
     }
+
+    const raisedDates = rows
+        .map((row) => getMrRaisedDate(row).date)
+        .filter((date) => date instanceof Date && !Number.isNaN(date.getTime()))
+        .sort((a, b) => a.getTime() - b.getTime());
+    const minRaised = raisedDates.length ? formatDateInputValue(raisedDates[0]) : "";
+    const maxRaised = raisedDates.length ? formatDateInputValue(raisedDates[raisedDates.length - 1]) : "";
+    ["machine-history-date-from", "machine-history-date-to"].forEach((id) => {
+        const input = document.getElementById(id);
+        if (!input) return;
+        input.min = minRaised;
+        input.max = maxRaised;
+    });
+    syncMachineHistoryPeriodInputs();
 }
 
 function rowIsCritical(row) {
@@ -5018,18 +5566,45 @@ function renderMachineExplorerAssetSummary(assetRows = []) {
 function getMachineHistoryPeriodState() {
     const yearSelect = document.getElementById("machine-history-year");
     const monthSelect = document.getElementById("machine-history-month");
+    const fromInput = document.getElementById("machine-history-date-from");
+    const toInput = document.getElementById("machine-history-date-to");
     return {
         year: yearSelect ? yearSelect.value : machineHistoryYearFilter,
         month: monthSelect ? monthSelect.value : machineHistoryMonthFilter,
+        from: fromInput ? fromInput.value : machineHistoryDateFrom,
+        to: toInput ? toInput.value : machineHistoryDateTo,
     };
+}
+
+function syncMachineHistoryPeriodInputs() {
+    const yearSelect = document.getElementById("machine-history-year");
+    if (yearSelect) yearSelect.value = machineHistoryYearFilter;
+    const monthSelect = document.getElementById("machine-history-month");
+    if (monthSelect) monthSelect.value = machineHistoryMonthFilter;
+    const fromInput = document.getElementById("machine-history-date-from");
+    if (fromInput) fromInput.value = machineHistoryDateFrom;
+    const toInput = document.getElementById("machine-history-date-to");
+    if (toInput) toInput.value = machineHistoryDateTo;
+}
+
+function normalizeMachineHistoryDateRange() {
+    if (machineHistoryDateFrom && machineHistoryDateTo && machineHistoryDateFrom > machineHistoryDateTo) {
+        [machineHistoryDateFrom, machineHistoryDateTo] = [machineHistoryDateTo, machineHistoryDateFrom];
+    }
 }
 
 function rowMatchesMachineHistoryPeriod(row) {
     // Step 3 period filters use the raised/created date, matching the MR Raised logic used elsewhere on Downtime.
-    const { year, month } = getMachineHistoryPeriodState();
-    if (!year && !month) return true;
+    const { year, month, from, to } = getMachineHistoryPeriodState();
+    if (!year && !month && !from && !to) return true;
     const raised = getMrRaisedDate(row).date;
     if (!raised) return false;
+    const raisedDay = formatDateInputValue(raised);
+    if (from || to) {
+        if (from && raisedDay < from) return false;
+        if (to && raisedDay > to) return false;
+        return true;
+    }
     if (year && String(raised.getFullYear()) !== String(year)) return false;
     if (month && String(raised.getMonth() + 1).padStart(2, "0") !== String(month)) return false;
     return true;
@@ -5172,7 +5747,7 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         const shownHistoryRows = filtered.slice(0, MACHINE_HISTORY_RENDER_LIMIT);
         const hiddenCount = Math.max(0, filtered.length - shownHistoryRows.length);
         body.innerHTML = shownHistoryRows.map((row, index) => renderMachineHistoryRow(row, index)).join("") + (hiddenCount
-            ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, status, or search filters to narrow the list.</td></tr>`
+            ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
             : "");
         return;
     }
@@ -5207,7 +5782,7 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
     const shownHistoryRows = filtered.slice(0, MACHINE_HISTORY_RENDER_LIMIT);
     const hiddenCount = Math.max(0, filtered.length - shownHistoryRows.length);
     body.innerHTML = shownHistoryRows.map((row, index) => renderMachineHistoryRow(row, index)).join("") + (hiddenCount
-        ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, status, or search filters to narrow the list.</td></tr>`
+        ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
         : "");
 }
 
@@ -5938,6 +6513,7 @@ async function loadDowntimeCacheFile() {
 }
 
 function getCachedDowntimePayload(period, month, start, end) {
+    if (getSelectedDowntimeStage() !== DOWNTIME_STAGE_ALL) return null;
     const payloads = downtimeCachePayload?.payloads || {};
     if (period === "custom" && start && end) return null;
     const key = period === "this_month" && month ? `this_month:${month}` : period;
@@ -5948,11 +6524,11 @@ async function loadDowntimeData(period, month, start, end) {
     let payload = null;
     let liveError = null;
     try {
-        const params = new URLSearchParams({ period, work_orders_only: "1", _: String(Date.now()) });
-        if (month) params.set("month", month);
-        if (start) params.set("start", start);
-        if (end) params.set("end", end);
-        const url = `/api/downtime?${params.toString()}`;
+        const params = { period, work_orders_only: "1" };
+        if (month) params.month = month;
+        if (start) params.start = start;
+        if (end) params.end = end;
+        const url = buildDowntimeApiUrl(params);
         const response = await fetch(url, { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         payload = await response.json();
@@ -6076,7 +6652,7 @@ function getAllWorkOrdersForMtbf() {
 async function loadMtbfHistory() {
     if (mtbfHistoryPayload) return mtbfHistoryPayload;
     if (mtbfHistoryPromise) return mtbfHistoryPromise;
-    mtbfHistoryPromise = fetch(`/api/downtime/mtbf-history?_=${Date.now()}`, { cache: "no-store" })
+    mtbfHistoryPromise = fetch(buildDowntimeMtbfHistoryUrl(), { cache: "no-store" })
         .then((response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.json();
@@ -6547,9 +7123,9 @@ function renderSummary(summary, downtimeSummary = {}, management = getManagement
 
     if (metrics.unclassifiedCount > 0) {
         setText("kpi-estimated-downtime", "Classification required");
-        setText("kpi-estimated-downtime-sub", `${fmtNumber(metrics.unclassifiedCount)} work order(s) need an AssetList classification before operating-hour overlap can be trusted`);
+        setText("kpi-estimated-downtime-sub", `${fmtNumber(metrics.unclassifiedCount)} work order(s) need an Asset Master mapping before operating-hour overlap can be trusted`);
         setText("kpi-production-impact", "Classification required");
-        setText("kpi-production-impact-sub", "Estimated production impact is held until missing AssetList matches are resolved");
+        setText("kpi-production-impact-sub", "Estimated production impact is held until missing Asset Master matches are resolved");
     } else if (!metrics.operatingHoursConfigured) {
         setText("kpi-estimated-downtime", "Insufficient data");
         setText("kpi-estimated-downtime-sub", "Operating hours config required before overlap can be calculated");
@@ -6909,7 +7485,7 @@ function aggregateMtbfByMonth(trend) {
 
 function buildAssetListLookup() {
     // asset_id → { asset_name, machine_name, criticality, location } from
-    // AssetList_Edit.xlsx (source of truth). asset_name is the per-asset
+    // Asset_Master.xlsx (source of truth). asset_name is the per-asset
     // friendly label entered in Excel; machine_name is the group it belongs to.
     const lookup = new Map();
     (assetListData || []).forEach((machine) => {
@@ -6961,7 +7537,7 @@ function renderMtbfCriticalMachinesChart(assetRows) {
     (assetRows || []).forEach((r) => {
         const mtbfHours = Number(r.average_mtbf_hours || 0);
         if (mtbfHours <= 0) return;
-        // Use AssetList criticality if available, fall back to cached value.
+        // Use Asset Master criticality if available, fall back to cached value.
         const meta = getAssetMetaFromLookup(assetLookup, r.asset_id);
         const criticality = getMtbfRecordCriticality(r, assetLookup);
         if (criticality !== selectedCriticality) return;
@@ -7514,6 +8090,33 @@ function handlePeriodChange() {
     });
 }
 
+function handleDowntimeStageChange(event) {
+    downtimeStageFilter = event?.target?.value || DOWNTIME_STAGE_ALL;
+    resetStageScopedCaches();
+    mrMovementUserSelectedYear = false;
+    mrTrackingSelectedYear = "";
+    mrTrackingSelectedMonth = "";
+    reloadCurrentDowntimeData().catch((error) => {
+        console.error("Downtime stage change failed:", error);
+    });
+}
+
+async function handleAssetMappingRefresh() {
+    resetStageScopedCaches();
+    downtimeCachePayload = null;
+    setImportStatus("Refreshing Asset Master mapping...", "");
+    try {
+        await Promise.all([
+            loadAssetList(),
+            reloadCurrentDowntimeData(),
+        ]);
+        setImportStatus("Asset Master mapping refreshed.", "ok");
+    } catch (error) {
+        console.error("Asset Master mapping refresh failed:", error);
+        setImportStatus(`Asset Master refresh failed: ${error.message}`, "error");
+    }
+}
+
 async function handleWorkOrderImport(event) {
     event.preventDefault();
     const fileInput = document.getElementById("work-order-import-file");
@@ -7538,8 +8141,7 @@ async function handleWorkOrderImport(event) {
             throw new Error(result.message || `HTTP ${response.status}`);
         }
         downtimeCachePayload = null;
-        allWorkOrderRowsCache = null;
-        allWorkOrderRowsPromise = null;
+        resetStageScopedCaches();
         mrMovementUserSelectedYear = false;
         mrTrackingSelectedYear = "";
         mrTrackingSelectedMonth = "";
@@ -7608,6 +8210,8 @@ function wireFilters() {
     document.getElementById("period-select")?.addEventListener("change", handlePeriodChange);
     document.getElementById("custom-start")?.addEventListener("change", handlePeriodChange);
     document.getElementById("custom-end")?.addEventListener("change", handlePeriodChange);
+    document.getElementById("downtime-stage-filter")?.addEventListener("change", handleDowntimeStageChange);
+    document.getElementById("refresh-asset-mapping-btn")?.addEventListener("click", handleAssetMappingRefresh);
 
     // Topic-panel scoped filters — only the dedicated panels respect these.
     document.getElementById("topic-reliability-year-filter")?.addEventListener("change", (event) => {
@@ -7625,6 +8229,22 @@ function wireFilters() {
     document.getElementById("topic-preventive-month-filter")?.addEventListener("change", (event) => {
         topicPreventiveMonthFilter = event.target.value || "";
         renderPreventiveCorrectiveSection(preventiveCorrectiveSourceRows);
+    });
+    document.getElementById("topic-preventive-analysis-type-filter")?.addEventListener("change", (event) => {
+        preventiveCorrectiveAnalysisTypeFilter = event.target.value || "preventive";
+        renderPreventiveCorrectiveAnalysis(preventiveCorrectiveSourceRows);
+    });
+    document.getElementById("topic-preventive-analysis-period-filter")?.addEventListener("change", (event) => {
+        preventiveCorrectiveAnalysisPeriodFilter = event.target.value || "full";
+        renderPreventiveCorrectiveAnalysis(preventiveCorrectiveSourceRows);
+    });
+    document.getElementById("topic-preventive-analysis-year-mode-filter")?.addEventListener("change", (event) => {
+        preventiveCorrectiveAnalysisYearModeFilter = event.target.value || "financial";
+        renderPreventiveCorrectiveAnalysis(preventiveCorrectiveSourceRows);
+    });
+    document.getElementById("topic-preventive-financial-year-filter")?.addEventListener("change", (event) => {
+        preventiveCorrectiveFinancialYearFilter = event.target.value || "";
+        renderPreventiveCorrectiveAnalysis(preventiveCorrectiveSourceRows);
     });
     document.getElementById("work-order-import-form")?.addEventListener("submit", handleWorkOrderImport);
     document.getElementById("mr-movement-year")?.addEventListener("change", (event) => {
@@ -7680,6 +8300,7 @@ function wireFilters() {
         preventiveCorrectiveListFilter = event.target.value || "review";
         renderWorkOrderResponseSection(allWorkOrderRowsCache || getWorkOrderRows(getManagement()));
     });
+    document.getElementById("pm-cm-list-body")?.addEventListener("click", handlePreventiveCorrectiveReviewAction);
     // MR Comparison & Trend Analysis controls
     const cmcRefresh = () => renderCriticalMrComparison(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
     document.getElementById("cmc-scope")?.addEventListener("change", (e) => { cmcScope = e.target.value || "all"; cmcRefresh(); });
@@ -7711,10 +8332,32 @@ function wireFilters() {
     });
     document.getElementById("machine-history-year")?.addEventListener("change", (event) => {
         machineHistoryYearFilter = event.target.value || "";
+        machineHistoryDateFrom = "";
+        machineHistoryDateTo = "";
+        syncMachineHistoryPeriodInputs();
         renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
     });
     document.getElementById("machine-history-month")?.addEventListener("change", (event) => {
         machineHistoryMonthFilter = event.target.value || "";
+        machineHistoryDateFrom = "";
+        machineHistoryDateTo = "";
+        syncMachineHistoryPeriodInputs();
+        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+    });
+    document.getElementById("machine-history-date-from")?.addEventListener("change", (event) => {
+        machineHistoryDateFrom = event.target.value || "";
+        machineHistoryYearFilter = "";
+        machineHistoryMonthFilter = "";
+        normalizeMachineHistoryDateRange();
+        syncMachineHistoryPeriodInputs();
+        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+    });
+    document.getElementById("machine-history-date-to")?.addEventListener("change", (event) => {
+        machineHistoryDateTo = event.target.value || "";
+        machineHistoryYearFilter = "";
+        machineHistoryMonthFilter = "";
+        normalizeMachineHistoryDateRange();
+        syncMachineHistoryPeriodInputs();
         renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
     });
     document.getElementById("machine-history-search")?.addEventListener("input", (event) => {
@@ -8291,7 +8934,7 @@ async function loadAssetList() {
         renderMachineNameList();
         renderActivityStatusCharts();
         if (openWorkOrdersData.length) renderCurrentDowntimeKpi();
-        // Re-render MTBF and KDI views once AssetList has arrived so per-asset
+        // Re-render MTBF and KDI views once Asset Master has arrived so per-asset
         // labels come from the Excel mapping instead of falling back to IDs.
         renderMtbfSection();
         updateKdiSection();
@@ -8412,7 +9055,7 @@ function getExportWorkOrderKey(row, index) {
 
 async function loadExportWorkOrderRows(exportNotes) {
     try {
-        const response = await fetch(`/api/downtime?period=all_years&work_orders_only=1&_=${Date.now()}`, { cache: "no-store" });
+        const response = await fetch(buildDowntimeApiUrl({ period: "all_years", work_orders_only: "1" }), { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json();
         const rows = getWorkOrderRows(payload.management);
@@ -8427,6 +9070,9 @@ async function loadExportWorkOrderRows(exportNotes) {
 
     const rowMap = new Map();
     getWorkOrderRows(getManagement()).forEach((row, index) => rowMap.set(getExportWorkOrderKey(row, index), row));
+    if (getSelectedDowntimeStage() !== DOWNTIME_STAGE_ALL) {
+        return [...rowMap.values()];
+    }
     const allCachedPeriods = downtimeCachePayload?.payloads || {};
     Object.keys(allCachedPeriods).forEach((key) => {
         (allCachedPeriods[key]?.management?.work_orders || []).forEach((row, index) => {
@@ -8444,9 +9090,9 @@ async function ensureAssetListForExport(exportNotes) {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         assetListData = data.machines || [];
-        exportNotes.push("AssetList loaded during export so Asset ID maps to the correct machine name.");
+        exportNotes.push("Asset Master mapping loaded during export so Asset ID maps to the correct machine name.");
     } catch (error) {
-        exportNotes.push(`WARNING: AssetList could not be loaded during export (${error.message}). Machine names use work order fallback values.`);
+        exportNotes.push(`WARNING: Asset Master mapping could not be loaded during export (${error.message}). Machine names use work order fallback values.`);
     }
 }
 
@@ -8841,7 +9487,7 @@ async function _runOrganizedDowntimeExport(btn) {
             ["Open_Acknowledgement", "Age Days", "Created date compared to export date."],
             ["MTTR_Valid_Records", "TTR Hours", "Finished records with valid Actual Start and Actual End only."],
             ["MTBF_Intervals", "MTBF Hours", "Gap from previous Actual End to next Actual Start for the same Asset ID."],
-            ["All Sheets", "Machine / Asset Name", "AssetList is the source of truth when Asset ID is found."],
+            ["All Sheets", "Machine / Asset Name", "Asset Master is the source of truth when Asset ID is found."],
         ], [26, 28, 90]);
 
         const filename = `downtime_organized_export_${ts}.xlsx`;
@@ -8877,7 +9523,7 @@ async function _runExport(btn) {
         const finishedRows = [...finishedWoMap.values()];
         if (!finishedRows.length) exportNotes.push("WARNING: No imported work orders found - only open WOs included.");
 
-        // ── Asset lookup (AssetList is source of truth for name/criticality) ──
+        // Asset lookup (Asset Master is source of truth for name/criticality)
         const assetLookup = buildAssetListLookup();
         function getAssetMeta(assetId, fallback) {
             const meta = assetLookup.get(String(assetId || "").trim().toUpperCase()) || {};
@@ -9395,7 +10041,7 @@ async function _runExport(btn) {
                 const flags = row[21];
                 const impacts = [];
                 if (flags.includes("Missing_WO_ID")) impacts.push("Cannot trace record to a unique work order; duplicate checks and audit trail incomplete");
-                if (flags.includes("Missing_AssetID")) impacts.push("Cannot link to AssetList; MTBF and criticality classification unavailable");
+                if (flags.includes("Missing_AssetID")) impacts.push("Cannot link to Asset Master; MTBF and mapping classification unavailable");
                 if (flags.includes("Missing_ActualStartDate")) impacts.push("MTBF gap calculation skipped; time-series analysis excluded");
                 if (flags.includes("Finished_Missing_ActualEndDate")) impacts.push("TTR/DowntimeHours cannot be calculated; MTBF interval incomplete");
                 if (flags.includes("Missing_DowntimeHours")) impacts.push("Excluded from MTTR averages");
@@ -9415,16 +10061,16 @@ async function _runExport(btn) {
             ["EXPORT_INFO", "GeneratedAt", exportFmtDate(now.toISOString()), "DateTime", "System", "Auto-generated", ""],
             ["EXPORT_INFO", "ImportedWOCount", String(finishedRows.length), "Integer", "/api/downtime?period=all_years&work_orders_only=1", "Deduplicated by WO ID, Request ID, or AssetID/start fallback", "Live source used so SeverityLevel can read imported Priority."],
             ["EXPORT_INFO", "OpenWOCount", String(openWorkOrdersData.length), "Integer", "open-workorders.json", "All open WOs", ""],
-            ["EXPORT_INFO", "AssetListMachineCount", String(assetListData.length), "Integer", "/api/asset-list", "Machines from AssetList", ""],
+            ["EXPORT_INFO", "AssetMasterMachineCount", String(assetListData.length), "Integer", "/api/asset-list", "Machines from Asset Master", ""],
             ["EXPORT_INFO", "ValidMTBFIntervals", String(compData.filter((r) => r[23] === "Valid").length), "Integer", "Derived", "MTBF_Comparative_Analysis rows where DataQualityFlag = Valid", ""],
             ...exportNotes.map((n) => ["EXPORT_INFO", "DataNote", n, "Note", "Multiple", "", ""]),
             ["", "", "", "", "", "", ""],
             ["Maintenance_Raw_Cleaned", "WO_ID", "Work order identifier", "Text", "work_order_id / wo_id", "Direct from CMMS", ""],
             ["Maintenance_Raw_Cleaned", "AssetID", "Asset identifier from CMMS", "Text", "asset_id", "Normalised to uppercase", ""],
-            ["Maintenance_Raw_Cleaned", "MachineName", "Machine name (AssetList is source of truth)", "Text", "/api/asset-list machine_name", "AssetList lookup by AssetID; falls back to CMMS name if not found", ""],
+            ["Maintenance_Raw_Cleaned", "MachineName", "Machine name (Asset Master is source of truth)", "Text", "/api/asset-list machine_name", "Asset Master lookup by AssetID; falls back to CMMS name if not found", ""],
             ["Maintenance_Raw_Cleaned", "MachineGroup", "Machine group or production cell", "Text", "machine_group / MachineName", "From WO data; falls back to MachineName", ""],
-            ["Maintenance_Raw_Cleaned", "ProductionLine", "Work area or production line location", "Text", "location / building", "AssetList lookup first, then WO data", ""],
-            ["Maintenance_Raw_Cleaned", "CriticalityGroup", "Standardised criticality group for analysis", "Text", "Derived from AssetList criticality", "Critical + Semi-Critical → 'Critical'; Facility/Non-Critical unchanged; Support grouped separately", "Used for Criticality_Analysis grouping in Minitab. Full Criticality label is in the Criticality_Analysis sheet."],
+            ["Maintenance_Raw_Cleaned", "ProductionLine", "Work area or production line location", "Text", "location / building", "Asset Master lookup first, then WO data", ""],
+            ["Maintenance_Raw_Cleaned", "CriticalityGroup", "Standardised criticality group for analysis", "Text", "Derived from Asset Master compatibility criticality", "Critical + Semi-Critical → 'Critical'; Facility/Non-Critical unchanged; Support grouped separately", "Used for Criticality_Analysis grouping in Minitab. Full Criticality label is in the Criticality_Analysis sheet."],
             ["Maintenance_Raw_Cleaned", "SeverityLevel", "Priority/severity level from imported work order priority", "Numeric", "priority", "Direct from imported work order Priority column for finished and open WOs. Blank when Priority is missing.", "Numeric for Minitab analysis; lower values indicate higher priority when the source uses 1 as highest."],
             ["Maintenance_Raw_Cleaned", "LifecycleState", "Current lifecycle / status of the WO", "Text", "request_state", "Direct from CMMS", "Values: Finished, In Progress, Confirm, reWork, New"],
             ["Maintenance_Raw_Cleaned", "MaintenanceType", "Type of maintenance activity", "Text", "job_trade", "Direct from CMMS", "e.g. Production Machine, Electrical System, Air Condition. Blank for Open WOs."],
@@ -9506,6 +10152,8 @@ async function init() {
     setSummaryView("criticality");
     setPerformanceView("utilities");
     const period = document.getElementById("period-select")?.value || "ytd";
+    const stageSelect = document.getElementById("downtime-stage-filter");
+    if (stageSelect) downtimeStageFilter = stageSelect.value || DOWNTIME_STAGE_ALL;
     toggleCustomDateFilter(period);
 
     const machineExplorerSortEl = document.getElementById("machine-explorer-sort");
@@ -9523,6 +10171,14 @@ async function init() {
     const machineHistoryMonthEl = document.getElementById("machine-history-month");
     if (machineHistoryMonthEl) {
         machineHistoryMonthEl.value = machineHistoryMonthFilter;
+    }
+    const machineHistoryDateFromEl = document.getElementById("machine-history-date-from");
+    if (machineHistoryDateFromEl) {
+        machineHistoryDateFromEl.value = machineHistoryDateFrom;
+    }
+    const machineHistoryDateToEl = document.getElementById("machine-history-date-to");
+    if (machineHistoryDateToEl) {
+        machineHistoryDateToEl.value = machineHistoryDateTo;
     }
 
     try {
@@ -9907,7 +10563,7 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
         const assetId = String(wo.asset_id || wo.equipment_id || "").trim() || "Missing Asset";
         if (!assetMap.has(assetId)) {
             const meta = getAssetMetaFromLookup(assetLookup, wo.asset_id);
-            // Prefer the per-asset friendly name from AssetList_Edit.xlsx,
+            // Prefer the per-asset friendly name from Asset_Master.xlsx,
             // then the machine-group name, then whatever the work-order export
             // carried, and only finally the asset ID. machine_name (group) is
             // kept in `group` below for the group-by view.
@@ -10148,7 +10804,7 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
         const end = parseDateValue(wo.end_time || wo.actual_end_time || wo.actual_end || wo.maintenance_end_time) || start;
         if (!byAsset.has(assetId)) {
             const meta = getAssetMetaFromLookup(assetLookup, assetId);
-            // Prefer the per-asset friendly name from AssetList_Edit.xlsx
+            // Prefer the per-asset friendly name from Asset_Master.xlsx
             // (same precedence rule as the MTTR computation above).
             byAsset.set(assetId, {
                 assetId,
