@@ -4457,3 +4457,10 @@ th {
 /* Status bucket accents for calendar task cards (manual-only completion model) */
 .pm-cal-task.pm-task-backlog { border-left-color: #f59e0b; }
 .pm-cal-task.pm-task-deferred { border-left-color: #8b5cf6; }
+
+/* Empty-state message for the functional-location workload chart */
+.pm-chart-empty {
+    display: none; align-items: center; justify-content: center;
+    height: 100%; min-height: 200px; padding: 20px; text-align: center;
+    font-size: 13px; color: var(--text-muted); font-weight: 600;
+}

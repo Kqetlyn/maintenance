@@ -904,7 +904,7 @@
         makeChart("pm-chart-month", monthlyConfig(monthlySeries(yearTasks, meta.year)));
         makeChart("pm-chart-compliance", complianceConfig(complianceSeries(yearTasks, meta.year)));
         makeChart("pm-chart-status", doughnutConfig(emptyOr(chartFromCounts(countBy(yearTasks, opStatus), STATUS_BREAKDOWN_ORDER)), STATUS_COLORS));
-        makeChart("pm-chart-workload", workloadConfig(yearTasks));
+        renderFLChart(yearTasks);
 
         const backlogTasks = yearTasks.filter(isBacklogTask);
         makeChart("pm-chart-backlog-system", barConfig(emptyOr(chartFromCounts(countBy(backlogTasks, (t) => t.systemArea), null, 12)), { horizontal: true, color: "#ef4444" }));
@@ -956,18 +956,71 @@
             options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } }, scales: { y: { beginAtZero: true, max: 100, grid: { color: "#eef2f7" } }, x: { grid: { display: false } } } },
         };
     }
-    function workloadConfig(rows) {
-        const cats = ["Utility", "Equipment"];
-        const stage1 = cats.map((c) => rows.filter((t) => taskCategory(t) === c && t.stage === "Stage 1").length);
-        const stage2 = cats.map((c) => rows.filter((t) => taskCategory(t) === c && t.stage === "Stage 2").length);
+    // PM workload grouped by Functional Location (asset installation → zone), stacked by Stage.
+    const FL_TOP_N = 12;
+    function flGroups(rows) {
+        const map = {};
+        rows.forEach((t) => {
+            const label = t.functionalLocationLabel || "Unmapped Functional Location";
+            const e = (map[label] ||= { label, code: t.functionalLocationCode || "", name: t.functionalLocationName || label, s1: 0, s2: 0, total: 0 });
+            if (t.stage === "Stage 2") e.s2 += 1; else e.s1 += 1;
+            e.total += 1;
+        });
+        let entries = Object.values(map).filter((e) => e.total > 0).sort((a, b) => b.total - a.total);
+        if (entries.length > FL_TOP_N) {
+            const rest = entries.slice(FL_TOP_N);
+            const others = {
+                label: "Others", code: "", name: `${rest.length} more locations`,
+                s1: rest.reduce((s, e) => s + e.s1, 0), s2: rest.reduce((s, e) => s + e.s2, 0), total: rest.reduce((s, e) => s + e.total, 0),
+            };
+            entries = entries.slice(0, FL_TOP_N).concat([others]);
+        }
+        // Highest workload at the top of a horizontal bar (reverse for Chart.js y-axis).
+        return entries.reverse();
+    }
+    function flConfig(groups) {
         return {
             type: "bar",
-            data: { labels: cats, datasets: [
-                { label: "Stage 1", data: stage1, backgroundColor: "#2563eb", borderRadius: 4 },
-                { label: "Stage 2", data: stage2, backgroundColor: "#14b8a6", borderRadius: 4 },
-            ] },
-            options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } }, scales: { x: { stacked: true, grid: { display: false } }, y: { stacked: true, beginAtZero: true, grid: { color: "#eef2f7" } } } },
+            data: {
+                labels: groups.map((e) => e.label),
+                datasets: [
+                    { label: "Stage 1", data: groups.map((e) => e.s1), backgroundColor: "#2563eb", borderRadius: 4 },
+                    { label: "Stage 2", data: groups.map((e) => e.s2), backgroundColor: "#14b8a6", borderRadius: 4 },
+                ],
+            },
+            options: {
+                indexAxis: "y", responsive: true, maintainAspectRatio: false,
+                plugins: {
+                    legend: { position: "bottom" },
+                    tooltip: { callbacks: {
+                        title: (items) => { const e = groups[items[0].dataIndex]; return e.code ? `${e.code} – ${e.name}` : e.label; },
+                        afterBody: (items) => { const e = groups[items[0].dataIndex]; return [`Stage 1 PM: ${e.s1}`, `Stage 2 PM: ${e.s2}`, `Total PM: ${e.total}`]; },
+                    } },
+                },
+                scales: {
+                    x: { stacked: true, beginAtZero: true, grid: { color: "#eef2f7" }, title: { display: true, text: "Scheduled PM tasks" } },
+                    y: { stacked: true, grid: { display: false } },
+                },
+            },
         };
+    }
+    function renderFLChart(rows) {
+        const canvas = el("pm-chart-workload");
+        if (!canvas) return;
+        const wrap = canvas.parentElement;
+        let msg = wrap.querySelector(".pm-chart-empty");
+        const groups = flGroups(rows);
+        if (!groups.length) {
+            if (charts["pm-chart-workload"]) { charts["pm-chart-workload"].destroy(); delete charts["pm-chart-workload"]; }
+            canvas.style.display = "none";
+            if (!msg) { msg = document.createElement("div"); msg.className = "pm-chart-empty"; wrap.appendChild(msg); }
+            msg.textContent = "No PM workload found for the selected filters.";
+            msg.style.display = "flex";
+            return;
+        }
+        canvas.style.display = "";
+        if (msg) msg.style.display = "none";
+        makeChart("pm-chart-workload", flConfig(groups));
     }
     function renderTopBacklog(backlogTasks) {
         const body = el("pm-top-backlog-body");

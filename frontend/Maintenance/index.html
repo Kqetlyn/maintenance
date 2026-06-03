@@ -10,7 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 
     <link rel="stylesheet" href="/shared/navbar.css">
-    <link rel="stylesheet" href="/Maintenance/style.css?v=20260603-pm-noauto-7">
+    <link rel="stylesheet" href="/Maintenance/style.css?v=20260603-pm-floc-8">
     <link rel="stylesheet" href="/shared/mira/mira-panel.css?v=20260603-mira-1">
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -249,8 +249,9 @@
                         <div class="pm-chart-wrap"><canvas id="pm-chart-status"></canvas></div>
                     </article>
                     <article class="card-shell pm-chart-card">
-                        <div class="section-head"><div><h2>PM Workload by Scope &amp; Stage</h2></div></div>
-                        <div class="pm-chart-wrap"><canvas id="pm-chart-workload"></canvas></div>
+                        <div class="section-head"><div><h2>PM Workload by Functional Location &amp; Stage</h2>
+                            <p class="section-subtitle">Scheduled PM workload grouped by asset installation location</p></div></div>
+                        <div class="pm-chart-wrap pm-chart-tall"><canvas id="pm-chart-workload"></canvas></div>
                     </article>
                 </section>
 
@@ -1498,7 +1499,7 @@
             .catch(err => console.error(err));
     </script>
     <script src="/Maintenance/script.js?v=20260603-spare-overview-3" defer></script>
-    <script src="/Maintenance/pm-schedule.js?v=20260603-pm-noauto-7" defer></script>
+    <script src="/Maintenance/pm-schedule.js?v=20260603-pm-floc-8" defer></script>
 
     <!-- ── MIRA feature flag ──────────────────────────────────────────────────
          IT can disable MIRA without touching the dashboard: set enabled:false (or
