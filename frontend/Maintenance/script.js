@@ -4022,6 +4022,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // ── All-Years Yearly Comparison ─────────────────────────────────────────
 
     const AY_YEAR_COLORS = ["#2563eb", "#16a34a", "#ea580c", "#7c3aed", "#dc2626"];
+    const FY_START_MONTH = 4; // financial year starts in April (matches backend)
     let ayData = null;
     let aySelectedYear = null;
     let ayMonthlyYear = "all";
@@ -4098,15 +4099,16 @@ document.addEventListener("DOMContentLoaded", () => {
         const monthlyYearFilter = document.getElementById("ay-monthly-year-filter");
         if (monthlyYearFilter) {
             if (ayMonthlyYear !== "all" && !years.map(String).includes(String(ayMonthlyYear))) ayMonthlyYear = "all";
-            monthlyYearFilter.innerHTML = `<option value="all">All Years</option>` + years.map((year) => (
-                `<option value="${escapeHtml(String(year))}">${escapeHtml(String(year))}</option>`
+            monthlyYearFilter.innerHTML = `<option value="all">All FY</option>` + years.map((year) => (
+                `<option value="${escapeHtml(String(year))}">FY${escapeHtml(String(year))}</option>`
             )).join("");
             monthlyYearFilter.value = ayMonthlyYear;
         }
 
         if (subtitleEl) {
             const total = summary.reduce((s, y) => s + (y.total_consumption || 0), 0);
-            subtitleEl.textContent = `${years.join(", ")} · ${payload.total_records?.toLocaleString() || 0} transactions · ${ayFmt(total)} total consumption`;
+            const fyList = years.map((y) => `FY${y}`).join(", ");
+            subtitleEl.textContent = `${fyList} (financial year, Apr–Mar) · ${payload.total_records?.toLocaleString() || 0} transactions · ${ayFmt(total)} total consumption`;
         }
 
         // KPI cards
@@ -4115,7 +4117,7 @@ document.addEventListener("DOMContentLoaded", () => {
             kpiGrid.innerHTML = summary.map((yr, i) => {
                 const color = AY_YEAR_COLORS[i % AY_YEAR_COLORS.length];
                 return `<div class="ay-kpi-card" style="--ay-accent:${color}">
-                    <div class="ay-kpi-year">${yr.year}</div>
+                    <div class="ay-kpi-year" title="${yr.fy_span || ""}">FY${yr.year}</div>
                     <div class="ay-kpi-main">${ayFmt(yr.total_consumption)}</div>
                     <div class="ay-kpi-sub">Total spare part consumption</div>
                     <div class="ay-kpi-meta">
@@ -4133,17 +4135,17 @@ document.addEventListener("DOMContentLoaded", () => {
         if (yoyRow) {
             yoyRow.innerHTML = yoyGrowth.map((g) => {
                 if (g.growth_pct === null || g.growth_pct === undefined) {
-                    return `<span class="ay-yoy-pill ay-yoy-flat">${g.from}→${g.to}: ${g.label || "New"}</span>`;
+                    return `<span class="ay-yoy-pill ay-yoy-flat">FY${g.from}→FY${g.to}: ${g.label || "New"}</span>`;
                 }
                 const cls = g.growth_pct > 5 ? "ay-yoy-up" : g.growth_pct < -5 ? "ay-yoy-down" : "ay-yoy-flat";
                 const arrow = g.growth_pct > 0 ? "▲" : g.growth_pct < 0 ? "▼" : "–";
-                return `<span class="ay-yoy-pill ${cls}">${g.from}→${g.to}: ${arrow} ${Math.abs(g.growth_pct)}%</span>`;
+                return `<span class="ay-yoy-pill ${cls}">FY${g.from}→FY${g.to}: ${arrow} ${Math.abs(g.growth_pct)}%</span>`;
             }).join("");
         }
 
         // Chart 1: Yearly bar chart
         {
-            const labels = summary.map((y) => String(y.year));
+            const labels = summary.map((y) => `FY${y.year}`);
             const values = summary.map((y) => Number(ayConvert(y.total_consumption).toFixed(ayCurrency === "SGD" ? 2 : 0)));
             const colors = summary.map((_, i) => AY_YEAR_COLORS[i % AY_YEAR_COLORS.length]);
             createChart("ay-chart-yearly", {
@@ -4163,21 +4165,23 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         }
 
-        // Chart 2: Monthly overlay — shared Jan–Dec axis, one filled line per year
+        // Chart 2: Monthly overlay — shared Apr–Mar financial-year axis, one filled line per FY
         {
-            const MONTH_LABELS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+            // Financial-year axis: April → March.
+            const MONTH_LABELS = ["Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar"];
             // Fill colours with stronger alpha so areas are visible but don't fully obscure each other
             const fillAlphas = ["44", "33", "44"];
             const chartYears = ayMonthlyYear === "all" ? years : years.filter((yr) => String(yr) === String(ayMonthlyYear));
             const datasets = chartYears.map((yr, i) => {
                 const byMo = new Array(12).fill(0);
                 (monthlyByYear[String(yr)] || []).forEach((e) => {
-                    const mo = parseInt(e.month.split("-")[1], 10) - 1;
-                    if (mo >= 0 && mo < 12) byMo[mo] = Number(ayConvert(e.total).toFixed(ayCurrency === "SGD" ? 2 : 0));
+                    const cal = parseInt(e.month.split("-")[1], 10);          // 1..12 calendar month
+                    const idx = (cal - FY_START_MONTH + 12) % 12;            // Apr→0 … Mar→11
+                    if (idx >= 0 && idx < 12) byMo[idx] = Number(ayConvert(e.total).toFixed(ayCurrency === "SGD" ? 2 : 0));
                 });
                 const color = AY_YEAR_COLORS[i % AY_YEAR_COLORS.length];
                 return {
-                    label: String(yr),
+                    label: `FY${yr}`,
                     data: byMo,
                     borderColor: color,
                     backgroundColor: color + (fillAlphas[i] || "33"),
@@ -4230,7 +4234,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }));
             createChart("ay-chart-category", {
                 type: "bar",
-                data: { labels: years.map(String), datasets },
+                data: { labels: years.map((y) => `FY${y}`), datasets },
                 options: {
                     responsive: true, maintainAspectRatio: false,
                     plugins: { legend: { display: true, position: "right", labels: { font: { size: 10 }, boxWidth: 14 } } },
@@ -4246,7 +4250,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const tabsEl = document.getElementById("ay-year-tabs");
         if (tabsEl) {
             tabsEl.innerHTML = years.map((yr) =>
-                `<button class="ay-year-tab${yr === aySelectedYear ? " active" : ""}" data-year="${yr}">${yr}</button>`
+                `<button class="ay-year-tab${yr === aySelectedYear ? " active" : ""}" data-year="${yr}">FY${yr}</button>`
             ).join("");
             tabsEl.querySelectorAll(".ay-year-tab").forEach((btn) => {
                 btn.addEventListener("click", () => {
@@ -4269,7 +4273,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     ? `<span class="${g > 5 ? "ay-growth-up" : g < -5 ? "ay-growth-down" : "ay-growth-flat"}">${g > 0 ? "▲" : g < 0 ? "▼" : "–"} ${Math.abs(g)}%</span>`
                     : `<span class="ay-growth-flat">${gObj ? (gObj.label || "New") : "—"}</span>`;
                 return `<tr>
-                    <td><strong>${yr.year}</strong></td>
+                    <td><strong>FY${yr.year}</strong></td>
                     <td>${ayFmt(yr.total_consumption)}</td>
                     <td>${yr.transaction_lines.toLocaleString()}</td>
                     <td>${yr.unique_assets}</td>
@@ -4285,7 +4289,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const ayCurrency = spareCurrency;
         const yr = aySelectedYear;
         const labelEl = document.getElementById("ay-top-year-label");
-        if (labelEl) labelEl.textContent = yr || "All Years";
+        if (labelEl) labelEl.textContent = yr ? `FY${yr}` : "All FY";
         const parts = (topPartsByYear[String(yr)] || []).slice(0, 10);
         if (!parts.length) { createChart("ay-chart-top-parts", { type: "bar", data: { labels: [], datasets: [] }, options: {} }); return; }
         createChart("ay-chart-top-parts", {
@@ -4329,7 +4333,7 @@ document.addEventListener("DOMContentLoaded", () => {
         let rows = ayData?.transactions?.length ? ayData.transactions : _ptTxnsCache;
         rows = Array.isArray(rows) ? rows : [];
         if (selectedYear !== "all") {
-            rows = rows.filter((r) => String(r.project_date || "").startsWith(selectedYear));
+            rows = rows.filter((r) => String(r.fy) === String(selectedYear));
         }
         return rows;
     }
@@ -4378,9 +4382,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 }
             } else {
                 parts = (ayData.top_parts_by_year[selectedYear] || []);
-                // Filter all-years transactions to this year for PAU
+                // Filter all-years transactions to this FY for PAU
                 if (ayData.transactions?.length) {
-                    pauTxns = ayData.transactions.filter((r) => (r.project_date || "").startsWith(selectedYear));
+                    pauTxns = ayData.transactions.filter((r) => String(r.fy) === String(selectedYear));
                 }
             }
         }
@@ -4437,8 +4441,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const yearSel = document.getElementById("pt-top-parts-year");
         if (!yearSel || !ayData?.years) return;
         const years = ayData.years || [];
-        yearSel.innerHTML = `<option value="all">All Years</option>` +
-            years.map((y) => `<option value="${y}">${y}</option>`).join("");
+        yearSel.innerHTML = `<option value="all">All FY</option>` +
+            years.map((y) => `<option value="${y}">FY${y}</option>`).join("");
         yearSel.addEventListener("change", () => renderAllPtPartsTable());
     }
 
@@ -4758,7 +4762,7 @@ document.addEventListener("DOMContentLoaded", () => {
             })
             .sort((a, b) => String(b.project_date || "").localeCompare(String(a.project_date || "")));
         const year = getPtPartYearSelection();
-        const yearLabel = year === "all" ? "all years" : year;
+        const yearLabel = year === "all" ? "all FY" : `FY${year}`;
         const label = ptSelectedPartLabel || getPtPartDisplayDescription(rows[0]) || "Selected spare part";
         if (title) title.textContent = label;
         if (subtitle) {

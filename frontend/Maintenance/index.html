@@ -948,7 +948,7 @@
                         <div><h2>All Spare Parts</h2><p class="section-subtitle">All parts aggregated by description.</p></div>
                         <div class="pt-table-year-wrap">
                             <select id="pt-top-parts-year" class="control-select">
-                                <option value="all">All Years</option>
+                                <option value="all">All FY</option>
                             </select>
                         </div>
                     </div>
@@ -1062,7 +1062,7 @@
                 <div class="ay-tabs-row">
                     <button class="ay-tab-btn active" type="button" data-aytab="yearly">Year-on-Year Comparison</button>
                     <button class="ay-tab-btn" type="button" data-aytab="spt">Specific Part Trend</button>
-                    <span class="ay-tab-meta" id="ay-subtitle">Loading multi-year data…</span>
+                    <span class="ay-tab-meta" id="ay-subtitle">Loading financial-year data…</span>
                 </div>
 
                 <!-- Panel 1: Year-on-Year Comparison -->
@@ -1071,33 +1071,33 @@
                     <div class="ay-yoy-row" id="ay-yoy-row"></div>
                     <div class="ay-charts-row">
                         <div class="ay-chart-box">
-                            <p class="ay-chart-label">Total Consumption by Year</p>
+                            <p class="ay-chart-label">Total Consumption by Financial Year</p>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-yearly"></canvas></div>
                         </div>
                         <div class="ay-chart-box">
                             <div class="ay-chart-title-row">
-                                <p class="ay-chart-label">Monthly Comparison</p>
-                                <select id="ay-monthly-year-filter" class="control-select ay-chart-select"><option value="all">All Years</option></select>
+                                <p class="ay-chart-label">Monthly Comparison (Apr–Mar)</p>
+                                <select id="ay-monthly-year-filter" class="control-select ay-chart-select"><option value="all">All FY</option></select>
                             </div>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-monthly"></canvas></div>
                         </div>
                     </div>
                     <div class="ay-charts-row">
                         <div class="ay-chart-box ay-chart-wide">
-                            <p class="ay-chart-label">Category Breakdown by Year</p>
+                            <p class="ay-chart-label">Category Breakdown by Financial Year</p>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-category"></canvas></div>
                         </div>
                         <div class="ay-chart-box ay-chart-wide">
-                            <p class="ay-chart-label">Top 10 Parts — <span id="ay-top-year-label">All Years</span></p>
+                            <p class="ay-chart-label">Top 10 Parts — <span id="ay-top-year-label">All FY</span></p>
                             <div class="ay-year-tabs" id="ay-year-tabs"></div>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-top-parts"></canvas></div>
                         </div>
                     </div>
                     <div class="ay-table-card">
-                        <h4 class="ay-table-title">Year Summary</h4>
+                        <h4 class="ay-table-title">Financial Year Summary</h4>
                         <div class="spare-table-wrap">
                             <table class="spare-table">
-                                <thead><tr><th>Year</th><th>Total Consumption</th><th>Lines</th><th>Unique Assets</th><th>Unique Work Orders</th><th>Unique Parts</th><th>YoY Consumption %</th></tr></thead>
+                                <thead><tr><th>Financial Year</th><th>Total Consumption</th><th>Lines</th><th>Unique Assets</th><th>Unique Work Orders</th><th>Unique Parts</th><th>YoY Consumption %</th></tr></thead>
                                 <tbody id="ay-summary-body"></tbody>
                             </table>
                         </div>
@@ -1506,7 +1506,7 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/Maintenance/script.js?v=20260604-spare-kpi-1" defer></script>
+    <script src="/Maintenance/script.js?v=20260604-spare-fy-1" defer></script>
     <script src="/Maintenance/pm-schedule.js?v=20260603-pm-pending-9" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->

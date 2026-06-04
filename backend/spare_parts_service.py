@@ -2771,6 +2771,21 @@ def _project_transactions_all_years_records_from_path(path: Path) -> tuple[list[
 
 # ── All-Years CSV Transactions Parser ────────────────────────────────────────
 
+# Financial year starts in April (month 4). FY label = the calendar year in which
+# the financial year ENDS, e.g. Apr 2025 → Mar 2026 is "FY2026".
+FY_START_MONTH = 4
+
+
+def _fiscal_year(year: int, month: int) -> int:
+    """Map a calendar (year, month) to its financial-year label."""
+    return year + 1 if month >= FY_START_MONTH else year
+
+
+def _fy_span_label(fy: int) -> str:
+    """Human-readable FY span, e.g. 'Apr 2025 to Mar 2026' for fy=2026."""
+    return f"Apr {fy - 1} to Mar {fy}"
+
+
 # CSV column layout (0-indexed, after skipping textbox header rows)
 _CSV_COL_DATE = 20
 _CSV_COL_TRANS_ID = 21
@@ -2816,7 +2831,7 @@ def build_all_years_transactions_payload() -> dict:
             "category_by_year": {}, "top_parts_by_year": {}, "errors": [],
         }
 
-    _AY_CACHE_V = 2  # bump to invalidate stale cache after code changes
+    _AY_CACHE_V = 3  # bump to invalidate stale cache after code changes (now FY-keyed)
     try:
         _al_sig = _file_signature(ASSET_MASTER_PATH)
         _wo_sig = _pt_work_order_sources_signature()
@@ -2982,15 +2997,24 @@ def build_all_years_transactions_payload() -> dict:
     except Exception as exc:
         errors.append(f"Asset list enrichment failed: {exc}")
 
-    years = sorted({r["year"] for r in records})
+    # Attach financial-year label to every record (calendar year/month preserved).
+    for r in records:
+        mo = int(r["month"][5:7]) if r.get("month") else 1
+        r["fy"] = _fiscal_year(r["year"], mo)
 
-    # Per-year summary
+    # "years" is the financial-year axis used by the consumption charts/tabs.
+    years = sorted({r["fy"] for r in records})
+
+    # Per-FY summary
     yearly_summary = []
     for yr in years:
-        yr_rows = [r for r in records if r["year"] == yr]
+        yr_rows = [r for r in records if r["fy"] == yr]
         total = sum(r["total_consumption"] or 0 for r in yr_rows)
         yearly_summary.append({
             "year": yr,
+            "fy": yr,
+            "fy_label": f"FY{yr}",
+            "fy_span": _fy_span_label(yr),
             "total_consumption": round(total, 2),
             "transaction_lines": len(yr_rows),
             "unique_assets": len({r["asset_id"] for r in yr_rows if r["asset_id"]}),
@@ -2998,22 +3022,23 @@ def build_all_years_transactions_payload() -> dict:
             "unique_parts": len({r["clean_description"] for r in yr_rows if r["clean_description"]}),
         })
 
-    # Monthly trend per year: {year: [{month, total}]}
+    # Monthly trend per FY: {fy: [{month, total}]} — month stays 'YYYY-MM';
+    # the frontend orders the axis Apr→Mar.
     monthly_by_year: dict[str, list] = {}
     for yr in years:
         monthly: dict[str, float] = {}
         for r in records:
-            if r["year"] == yr and r["month"]:
+            if r["fy"] == yr and r["month"]:
                 monthly[r["month"]] = monthly.get(r["month"], 0) + (r["total_consumption"] or 0)
         monthly_by_year[str(yr)] = [{"month": k, "total": round(v, 2)}
                                      for k, v in sorted(monthly.items())]
 
-    # Category breakdown per year: {year: [{category, total, pct}]}
+    # Category breakdown per FY: {fy: [{category, total, pct}]}
     category_by_year: dict[str, list] = {}
     for yr in years:
         by_cat: dict[str, float] = {}
         for r in records:
-            if r["year"] == yr:
+            if r["fy"] == yr:
                 by_cat[r["item_category"]] = by_cat.get(r["item_category"], 0) + (r["total_consumption"] or 0)
         cat_total = sum(by_cat.values()) or 1
         category_by_year[str(yr)] = [
@@ -3021,12 +3046,12 @@ def build_all_years_transactions_payload() -> dict:
             for k, v in sorted(by_cat.items(), key=lambda x: x[1], reverse=True)
         ]
 
-    # Parts per year with full aggregation
+    # Parts per FY with full aggregation
     top_parts_by_year: dict[str, list] = {}
     for yr in years:
         by_desc: dict[str, dict] = {}
         for r in records:
-            if r["year"] != yr:
+            if r["fy"] != yr:
                 continue
             k = r["clean_description"] or r["original_description"] or "Unknown"
             if k not in by_desc:
@@ -3081,6 +3106,7 @@ def build_all_years_transactions_payload() -> dict:
         "status": "ok",
         "errors": errors,
         "years": years,
+        "fy_start_month": FY_START_MONTH,
         "total_records": len(records),
         "yearly_summary": yearly_summary,
         "monthly_by_year": monthly_by_year,
@@ -3091,6 +3117,7 @@ def build_all_years_transactions_payload() -> dict:
             {
                 "project_date": r["project_date"],
                 "year": r["year"],
+                "fy": r["fy"],
                 "month": r["month"],
                 "transaction_id": r["transaction_id"],
                 "work_order_id": r["work_order_id"],
