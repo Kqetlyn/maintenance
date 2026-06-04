@@ -424,6 +424,10 @@ document.addEventListener("DOMContentLoaded", () => {
             state.sparePartsFilters.search = event.target.value.trim().toLowerCase();
             renderSparePartsDashboard(state.sparePartsData || {});
         }, 200));
+        document.getElementById("spare-manual-review-search")?.addEventListener("input", debounce((event) => {
+            spareManualReviewSearchTerm = event.target.value.trim().toLowerCase();
+            renderSpareManualReviewTable();
+        }, 150));
         document.querySelectorAll("[data-spare-panel]").forEach((button) => {
             button.addEventListener("click", () => {
                 state.spareActivePanel = button.dataset.sparePanel || "external";
@@ -3915,7 +3919,36 @@ document.addEventListener("DOMContentLoaded", () => {
             formatShortDate(row.last_purchase_date),
         ], "No classified spare part purchases for the selected filters.");
 
-        renderSpareTable("spare-manual-review-table-body", filtered.manualReviewRows, 8, (row) => [
+        spareManualReviewRowsCache = filtered.manualReviewRows || [];
+        renderSpareManualReviewTable();
+    }
+
+    let spareManualReviewRowsCache = [];
+    let spareManualReviewSearchTerm = "";
+
+    function spareManualReviewRowMatches(row, term) {
+        if (!term) return true;
+        return [
+            row.po_number,
+            row.code,
+            row.original_description,
+            row.translated_description,
+            row.clean_description,
+            row.vendor_name,
+            row.supplier,
+            (row.review_reasons || []).join(" "),
+            row.classification_reason,
+            formatShortDate(row.po_date),
+        ].some((value) => String(value || "").toLowerCase().includes(term));
+    }
+
+    function renderSpareManualReviewTable() {
+        const term = spareManualReviewSearchTerm;
+        const rows = (spareManualReviewRowsCache || []).filter((row) => spareManualReviewRowMatches(row, term));
+        const emptyMessage = term
+            ? `No manual review rows match "${term}".`
+            : "No manual review PO items for the selected filters.";
+        renderSpareTable("spare-manual-review-table-body", rows, 8, (row) => [
             row.po_number || "--",
             formatShortDate(row.po_date),
             row.code || "--",
@@ -3924,7 +3957,12 @@ document.addEventListener("DOMContentLoaded", () => {
             formatSpareCurrency(row.total_cost),
             row.vendor_name || row.supplier || "--",
             (row.review_reasons || []).join("; ") || row.classification_reason || "Manual Review",
-        ], "No manual review PO items for the selected filters.");
+        ], emptyMessage);
+        const countEl = document.getElementById("spare-manual-review-count");
+        if (countEl) {
+            const total = (spareManualReviewRowsCache || []).length;
+            countEl.textContent = term ? `${rows.length} of ${total}` : `${total}`;
+        }
     }
 
     function renderSpareTable(id, rows, colspan, cellMapper, emptyMessage, rowOptionsMapper) {

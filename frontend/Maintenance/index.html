@@ -10,7 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
-    <link rel="stylesheet" href="/Maintenance/style.css?v=20260604-spare-kpi-1">
+    <link rel="stylesheet" href="/Maintenance/style.css?v=20260604-mr-search-1">
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -620,7 +620,13 @@
                     </article>
 
                     <article class="spare-panel-table">
-                        <div class="spare-panel-head"><h3>Manual Review Table</h3><p>Rows flagged for missing item code, description too short to classify, translation failure, low confidence, weak match, or missing total price.</p></div>
+                        <div class="spare-panel-head spare-panel-head-search">
+                            <div>
+                                <h3>Manual Review Table <span class="spare-panel-count" id="spare-manual-review-count">--</span></h3>
+                                <p>Rows flagged for missing item code, description too short to classify, translation failure, low confidence, weak match, or missing total price.</p>
+                            </div>
+                            <input type="search" id="spare-manual-review-search" class="spare-panel-search" placeholder="Search PO no., description, item code, vendor…" autocomplete="off" aria-label="Search manual review table">
+                        </div>
                         <div class="table-wrap spare-table-wrap">
                             <table>
                                 <thead><tr><th>PO No.</th><th>PO Date</th><th>Item Code</th><th>Original Description</th><th>Translated Description</th><th>Total Price</th><th>Vendor Name</th><th>Reason for Review</th></tr></thead>
@@ -1506,7 +1512,7 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/Maintenance/script.js?v=20260604-spare-fy-3" defer></script>
+    <script src="/Maintenance/script.js?v=20260604-mr-search-1" defer></script>
     <script src="/Maintenance/pm-schedule.js?v=20260603-pm-pending-9" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->

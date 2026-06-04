@@ -1278,6 +1278,43 @@ body.maintenance-equipment .stack-item.active {
     line-height: 1.35;
 }
 
+.spare-panel-head-search {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.spare-panel-count {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 9px;
+    border-radius: 999px;
+    background: #eef2f7;
+    color: #475569;
+    font-size: 0.72rem;
+    font-weight: 700;
+    vertical-align: middle;
+}
+
+.spare-panel-search {
+    flex: 0 0 auto;
+    width: min(320px, 100%);
+    padding: 8px 12px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 0.85rem;
+    background: #fff;
+}
+
+.spare-panel-search:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+}
+
 .spare-panel-table .table-wrap {
     margin-top: 0;
     max-width: 100%;
