@@ -3310,8 +3310,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const inStockRows = filtered.inventory.filter((row) => Number(row?.current_quantity) > 0);
         const inStockItems = pickSummaryNumber("in_stock_items", inStockRows.length);
         const inStockValue = pickSummaryNumber("in_stock_value", sumSpareValue(inStockRows, "stock_value"));
-        const drawnValue = pickSummaryNumber("internal_drawn_value", sumSpareValue(filtered.storeDrawn, "value"));
-        const drawnCount = pickSummaryNumber("internal_drawn_count", filtered.storeDrawn.length);
+        const stockedCount = pickSummaryNumber("stocked_spare_part_po_count", filtered.sparePoRows.filter((row) => row?.classification === "Stocked Spare Part Purchase").length);
         const nonStockCount = pickSummaryNumber("non_stock_spare_part_po_count", filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase").length);
         const servicesCount = pickSummaryNumber("non_spare_part_po_count", filtered.nonSpareRows.length);
         const manualReviewCount = pickSummaryNumber("manual_review_po_items", filtered.poRows.filter((row) => row?.classification === "Manual Review").length);
@@ -3337,8 +3336,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
         setSpareKpiValue("spare-in-stock-items", formatInteger(inStockItems));
         setSpareKpiValue("spare-in-stock-value", formatSpareCurrency(inStockValue));
-        setSpareKpiValue("spare-drawn-value", formatSpareCurrency(drawnValue));
-        setSpareKpiValue("spare-drawn-count", formatInteger(drawnCount));
+        setSpareKpiValue("spare-stocked-value", formatSpareCurrency(stockedPoValue));
+        setSpareKpiValue("spare-stocked-count", formatInteger(stockedCount));
         setSpareKpiValue("spare-non-stock-spare-po-value", formatSpareCurrency(nonStockPoValue));
         setSpareKpiValue("spare-non-stock-count", formatInteger(nonStockCount));
         setSpareKpiValue("spare-non-spare-service-po-value", formatSpareCurrency(nonSpareValue));
