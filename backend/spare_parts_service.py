@@ -1714,6 +1714,9 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "total_items": len(inventory_records),
                 "total_current_quantity": round(sum(float(value) for value in current_quantities), 3) if current_quantities else None,
                 "total_inventory_value": inventory_value,
+                # Current in-stock = unique items with on-hand quantity > 0, and their value.
+                "in_stock_items": sum(1 for row in inventory_records if float(row.get("current_quantity") or 0) > 0),
+                "in_stock_value": round(sum(float(row.get("stock_value") or 0) for row in inventory_records if float(row.get("current_quantity") or 0) > 0 and row.get("stock_value") is not None), 2) or None,
                 "low_stock_items": sum(1 for row in inventory_records if row.get("stock_status_group") == "Low Stock"),
                 "out_of_stock_items": sum(1 for row in inventory_records if row.get("stock_status_group") == "Out of Stock"),
                 "overstock_items": sum(1 for row in inventory_records if row.get("stock_status_group") == "Overstock"),
@@ -1740,6 +1743,7 @@ def _build_structured_spare_parts_payload(paths, source_status):
             "summary": {
                 "internal_drawn_quantity": round(sum(float(row.get("quantity_drawn") or 0) for row in movement_records), 3) if movement_records else None,
                 "internal_drawn_value": round(internal_drawn_value, 2) if movement_records else None,
+                "internal_drawn_count": len(movement_records),
                 "external_bought_quantity": round(sum(float(row.get("quantity_ordered") or 0) for row in external_spare_records), 3) if external_spare_records else None,
                 "external_bought_value": external_value,
                 "total_spare_part_consumption_value": round(total_consumption_value, 2) if total_consumption_value else None,
@@ -1787,6 +1791,7 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "spare_part_po_count": len(external_spare_records),
                 "stocked_spare_part_po_count": len(stocked_spare_records),
                 "non_stock_spare_part_po_count": len(non_stock_spare_records),
+                "non_spare_part_po_count": len(non_spare_service_records),
                 "exact_item_code_matches": exact_code_matches,
                 "description_matches": description_matches,
                 "translation_failed_items": translation_failed,
@@ -1801,6 +1806,14 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "current_inventory_value": inventory_value,
                 "current_stocked_spare_part_items": len(inventory_records),
                 "current_stock_quantity": round(sum(float(value) for value in current_quantities), 3) if current_quantities else None,
+                # Row 1 KPIs: current in-stock parts (on-hand qty > 0) and their value.
+                "in_stock_items": sum(1 for row in inventory_records if float(row.get("current_quantity") or 0) > 0),
+                "in_stock_value": round(sum(float(row.get("stock_value") or 0) for row in inventory_records if float(row.get("current_quantity") or 0) > 0 and row.get("stock_value") is not None), 2) or None,
+                # Row 2 KPIs: consumption split (drawn from store / non-stock / services) value + count.
+                "internal_drawn_value": round(internal_drawn_value, 2) if movement_records else None,
+                "internal_drawn_count": len(movement_records),
+                "non_stock_spare_part_po_count": len(non_stock_spare_records),
+                "non_spare_part_po_count": len(non_spare_service_records),
                 "external_po_spare_part_value": external_value,
                 "stocked_spare_part_po_value": stocked_po_value,
                 "non_stock_spare_part_po_value": non_stock_po_value,

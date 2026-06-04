@@ -1042,6 +1042,34 @@ body.maintenance-equipment .stack-item.active {
     margin-top: 4px;
 }
 
+.spare-kpi-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.spare-overview-shell .spare-summary-grid.spare-kpi-row-primary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.spare-overview-shell .spare-summary-grid.spare-kpi-row-consumption {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.spare-kpi-dual .spare-kpi-sub {
+    display: block;
+    margin-top: 2px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+}
+
+.spare-kpi-dual .spare-kpi-sub span {
+    font-weight: 700;
+    color: var(--text-strong, #1e293b);
+}
+
 .spare-summary-grid .summary-card-kpi,
 .spare-health-kpi-grid .summary-card-kpi {
     min-height: 118px;

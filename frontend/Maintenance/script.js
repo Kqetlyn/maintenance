@@ -3304,6 +3304,13 @@ document.addEventListener("DOMContentLoaded", () => {
         const nonStockPoValue = pickSummaryNumber("non_stock_spare_part_po_value", filteredNonStockPoValue);
         const nonSpareValue = pickSummaryNumber("non_spare_part_service_po_value", filteredNonSpareValue);
         const currentStockedItems = pickSummaryNumber("current_stocked_spare_part_items", filtered.inventory.length);
+        const inStockRows = filtered.inventory.filter((row) => Number(row?.current_quantity) > 0);
+        const inStockItems = pickSummaryNumber("in_stock_items", inStockRows.length);
+        const inStockValue = pickSummaryNumber("in_stock_value", sumSpareValue(inStockRows, "stock_value"));
+        const drawnValue = pickSummaryNumber("internal_drawn_value", sumSpareValue(filtered.storeDrawn, "value"));
+        const drawnCount = pickSummaryNumber("internal_drawn_count", filtered.storeDrawn.length);
+        const nonStockCount = pickSummaryNumber("non_stock_spare_part_po_count", filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase").length);
+        const servicesCount = pickSummaryNumber("non_spare_part_po_count", filtered.nonSpareRows.length);
         const manualReviewCount = pickSummaryNumber("manual_review_po_items", filtered.poRows.filter((row) => row?.classification === "Manual Review").length);
         const inventoryQty = pickSummaryNumber("current_stock_quantity", filteredInventoryQty);
         const spareQty = pickSummaryNumber("gen_po_spare_part_quantity", sumSpareQuantity(filtered.sparePoRows, "quantity_ordered"));
@@ -3325,12 +3332,14 @@ document.addEventListener("DOMContentLoaded", () => {
         const health = calculateSpareStockHealthMetrics(filtered.inventory);
         if (useSummary && inventoryQty !== null) health.quantityTotal = inventoryQty;
 
-        setSpareKpiValue("spare-current-stocked-items", formatInteger(currentStockedItems));
-        setSpareKpiValue("spare-external-spare-po-value", formatSpareCurrency(externalSpareValue));
-        setSpareKpiValue("spare-stocked-spare-po-value", formatSpareCurrency(stockedPoValue));
+        setSpareKpiValue("spare-in-stock-items", formatInteger(inStockItems));
+        setSpareKpiValue("spare-in-stock-value", formatSpareCurrency(inStockValue));
+        setSpareKpiValue("spare-drawn-value", formatSpareCurrency(drawnValue));
+        setSpareKpiValue("spare-drawn-count", formatInteger(drawnCount));
         setSpareKpiValue("spare-non-stock-spare-po-value", formatSpareCurrency(nonStockPoValue));
+        setSpareKpiValue("spare-non-stock-count", formatInteger(nonStockCount));
         setSpareKpiValue("spare-non-spare-service-po-value", formatSpareCurrency(nonSpareValue));
-        setSpareKpiValue("spare-manual-review-po-items", formatInteger(manualReviewCount));
+        setSpareKpiValue("spare-services-count", formatInteger(servicesCount));
 
         setSpareKpiValue("spare-health-total-parts", health.quantityTotal === null ? "No data" : formatNullableNumber(health.quantityTotal));
         setSpareKpiValue("spare-health-normal-count", formatInteger(health.inStock));
