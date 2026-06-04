@@ -3207,7 +3207,10 @@ document.addEventListener("DOMContentLoaded", () => {
         const inventorySummaryRows = buildSpareInventorySummaryRows(inventory, sparePoRows, filters.stockStatus);
         const topPurchaseRows = buildSpareTopPurchaseRows(sparePoRows);
         const topVendorRows = buildSpareVendorRows(sparePoRows);
-        return { inventory, poRows, sparePoRows, nonSpareRows, manualReviewRows, inventorySummaryRows, topPurchaseRows, topVendorRows };
+        const storeDrawn = (payload?.consumption?.store_drawn_records || [])
+            .filter((row) => !filters.search || [row?.code, row?.name, row?.item_name, row?.description]
+                .some((value) => String(value || "").toLowerCase().includes(filters.search)));
+        return { inventory, poRows, sparePoRows, nonSpareRows, manualReviewRows, inventorySummaryRows, topPurchaseRows, topVendorRows, storeDrawn };
     }
 
     function sumSpareValue(rows, key) {
