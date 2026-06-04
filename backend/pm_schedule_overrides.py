@@ -26,8 +26,10 @@ from maintenance_service import DATA_DIR
 
 OVERRIDES_PATH = Path(DATA_DIR) / "pm_schedule_updates.json"
 
-# Stored status vocabulary. "Overdue" is a DYNAMIC display state, never stored.
-STATUS_SCHEDULED = "Scheduled"
+# Stored status vocabulary. The default/unedited status is "Pending" and changes
+# ONLY when a user edits the task. "Overdue" is a derived metric (KPI/calendar),
+# never the stored status.
+STATUS_SCHEDULED = "Pending"
 STATUS_DONE = "Done"
 STATUS_BACKLOG = "Backlog"
 STATUS_DEFERRED = "Deferred"
@@ -42,7 +44,8 @@ ALLOWED_STATUSES = {
 
 # Legacy values that may exist in older saved files → map to the new vocabulary.
 _LEGACY_STATUS_MAP = {
-    "auto done / pending verification": STATUS_SCHEDULED,   # auto-done removed → revert to Scheduled
+    "scheduled": STATUS_SCHEDULED,                          # renamed Scheduled → Pending
+    "auto done / pending verification": STATUS_SCHEDULED,   # auto-done removed → revert to Pending
     "auto done": STATUS_SCHEDULED,
     "not done / backlog": STATUS_BACKLOG,
 }
@@ -242,7 +245,9 @@ def derive_operational_fields(task: dict, today: date) -> None:
         planned and status == STATUS_SCHEDULED and today < planned <= today + timedelta(days=30)
     )
     task["daysOverdue"] = max((today - week_end).days, 0) if (is_overdue and week_end) else 0
-    task["displayStatus"] = STATUS_OVERDUE if is_overdue else status
+    # Status stays as stored (Pending until a user edits it). Overdue is exposed
+    # only as a derived metric (isOverdueOp), not as the task's status.
+    task["displayStatus"] = status
     task["completionDate"] = task.get("actualCompletionDate")
     # never an inferred/auto completion
     task["autoUpdated"] = False

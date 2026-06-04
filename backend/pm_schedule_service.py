@@ -18,7 +18,6 @@ real planning-based number rather than "N/A".
 
 from __future__ import annotations
 
-import openpyxl
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -34,83 +33,32 @@ from pm_schedule_overrides import apply_overrides_and_autodone
 from pm_planner_store import list_manual_tasks
 
 # ── Functional-location mapping (Asset_Master: Asset Installation + Functional Locations) ──
-_FL_CACHE = {"sig": None, "data": None}
+# The "Asset Installation" sheet only holds D365 functional-location CODES for the
+# Stage-2 equipment (ENPD) assets. Every asset, however, has a System/Area on the
+# Asset_Master sheet, so we fall back to that (mapped to a zone where possible)
+# instead of dumping the utility assets into "Unmapped".
 UNMAPPED_FL = "Unmapped Functional Location"
 
 
-def load_functional_location_map() -> dict:
-    """Return {ASSET_ID: {code, name, type, parent, label}} resolved to the asset's
-    ZONE-level functional location (e.g. ZN3 — Zone 3 Assembly). Cached by file sig."""
-    path = Path(DATA_DIR) / "master" / "Asset_Master.xlsx"
-    try:
-        st = path.stat()
-        sig = (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return {}
-    if _FL_CACHE["sig"] == sig and _FL_CACHE["data"] is not None:
-        return _FL_CACHE["data"]
-
-    fl_master, asset_fl = {}, {}
-    try:
-        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-        if "Functional Locations" in wb.sheetnames:
-            for i, row in enumerate(wb["Functional Locations"].iter_rows(values_only=True)):
-                if i == 0 or not row or not row[0]:
-                    continue
-                code = str(row[0]).strip()
-                # Normalise en/em dashes inside the name so "Zone 3 – Assembly"
-                # reads cleanly as "Zone 3 Assembly" in the "Code – Name" label.
-                raw_name = str(row[1] or "").replace("–", " ").replace("—", " ").replace("�", " ")
-                fl_master[code] = {
-                    "name": " ".join(raw_name.split()),
-                    "type": str(row[2] or "").strip(),
-                    "parent": str(row[3] or "").strip(),
-                }
-        if "Asset Installation" in wb.sheetnames:
-            for i, row in enumerate(wb["Asset Installation"].iter_rows(values_only=True)):
-                if i == 0 or not row or not row[0]:
-                    continue
-                asset = str(row[0]).strip().upper()
-                fl = str(row[1] or "").strip()
-                if asset and fl:
-                    asset_fl[asset] = fl
-        wb.close()
-    except Exception:
-        return {}
-
-    def resolve_zone(code):
-        seen, cur = set(), code
-        while cur and cur in fl_master and cur not in seen:
-            seen.add(cur)
-            if fl_master[cur].get("type") == "ZONE":
-                return cur
-            cur = fl_master[cur].get("parent")
-        head = code.split("-")[0] if code else ""
-        if head in fl_master and fl_master[head].get("type") == "ZONE":
-            return head
-        return code if code in fl_master else None
-
-    out = {}
-    for asset, fl in asset_fl.items():
-        resolved = resolve_zone(fl)
-        if resolved and resolved in fl_master:
-            entry = fl_master[resolved]
-            out[asset] = {
-                "code": resolved, "name": entry["name"], "type": entry.get("type"),
-                "parent": entry.get("parent"), "label": f"{resolved} – {entry['name']}",
-            }
-    _FL_CACHE.update(sig=sig, data=out)
-    return out
+def _zone_code_from_text(text: str) -> str:
+    low = (text or "").lower()
+    idx = low.find("zone")
+    if idx >= 0:
+        for ch in low[idx + 4: idx + 8]:
+            if ch.isdigit():
+                return "ZN" + ch
+    return ""
 
 
 def _attach_functional_location(tasks: list[dict]) -> None:
-    fl_map = load_functional_location_map()
+    """System/Area is the functional location for the PM workload chart — use it
+    directly for every task (it is populated for all assets, equipment and utility)."""
     for task in tasks:
-        fl = fl_map.get(str(task.get("assetId") or "").upper())
-        if fl:
-            task["functionalLocationCode"] = fl["code"]
-            task["functionalLocationName"] = fl["name"]
-            task["functionalLocationLabel"] = fl["label"]
+        sa = str(task.get("systemArea") or "").strip()
+        if sa and sa.lower() not in {"unassigned", "general", "others", ""}:
+            task["functionalLocationCode"] = _zone_code_from_text(sa)
+            task["functionalLocationName"] = sa
+            task["functionalLocationLabel"] = sa
         else:
             task["functionalLocationCode"] = ""
             task["functionalLocationName"] = UNMAPPED_FL

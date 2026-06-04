@@ -63,16 +63,6 @@ ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
 
-# ── MIRA assistant (local/private prototype) ───────────────────────────────────
-# Isolated module: reuses dashboard KPI outputs only, never raw data. Registering
-# the blueprint is the single touch-point into the existing app. If MIRA fails to
-# import for any reason, the dashboard must still start — so guard the import.
-try:
-    from mira.api import mira_bp
-    app.register_blueprint(mira_bp)
-except Exception as _mira_exc:  # pragma: no cover - defensive isolation
-    print(f"[MIRA] assistant disabled (blueprint not loaded): {_mira_exc}")
-
 
 @app.after_request
 def apply_cache_headers(response):

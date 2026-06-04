@@ -10,8 +10,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 
     <link rel="stylesheet" href="/shared/navbar.css">
-    <link rel="stylesheet" href="/Maintenance/style.css?v=20260603-pm-floc-8">
-    <link rel="stylesheet" href="/shared/mira/mira-panel.css?v=20260603-mira-1">
+    <link rel="stylesheet" href="/Maintenance/style.css?v=20260603-pm-pending-9">
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -76,7 +75,6 @@
             <button type="button" class="toggle-btn active" data-view-tab="overview">PM Schedule</button>
             <button type="button" class="toggle-btn" data-view-tab="spare_parts">Spare Parts</button>
             <button type="button" class="toggle-btn" data-view-tab="downtime">Downtime</button>
-            <button type="button" class="toggle-btn mira-tab-btn" data-view-tab="mira" data-mira-tab hidden>MIRA</button>
         </section>
 
         <section id="overview-view" class="maintenance-view">
@@ -168,7 +166,7 @@
                         </div>
                     </div>
                     <div class="pm-calendar-legend" aria-hidden="true">
-                        <span><i class="pm-dot pm-dot-blue"></i>Scheduled</span>
+                        <span><i class="pm-dot pm-dot-blue"></i>Pending</span>
                         <span><i class="pm-dot pm-dot-green"></i>Done</span>
                         <span><i class="pm-dot pm-dot-red"></i>Overdue</span>
                         <span><i class="pm-dot pm-dot-amber"></i>Backlog</span>
@@ -250,7 +248,7 @@
                     </article>
                     <article class="card-shell pm-chart-card">
                         <div class="section-head"><div><h2>PM Workload by Functional Location &amp; Stage</h2>
-                            <p class="section-subtitle">Scheduled PM workload grouped by asset installation location</p></div></div>
+                            <p class="section-subtitle">Scheduled PM workload grouped by System / Area (functional location)</p></div></div>
                         <div class="pm-chart-wrap pm-chart-tall"><canvas id="pm-chart-workload"></canvas></div>
                     </article>
                 </section>
@@ -308,7 +306,7 @@
                         <label class="pm-edit-field">
                             <span>Status</span>
                             <select id="pm-edit-status">
-                                <option value="Scheduled">Scheduled</option>
+                                <option value="Pending">Pending</option>
                                 <option value="Done">Done</option>
                                 <option value="Backlog">Backlog</option>
                                 <option value="Deferred">Deferred</option>
@@ -1204,12 +1202,6 @@
 
         </section>
 
-        <!-- MIRA assistant view (replaces the former Analysis tab). All MIRA
-             markup is rendered by /shared/mira/mira-panel.js into #mira-root. -->
-        <section id="mira-view" class="maintenance-view hidden">
-            <div id="mira-root" class="mira-root"></div>
-        </section>
-
         <section id="downtime-view" class="maintenance-view hidden">
             <div class="maintenance-downtime-host">
                 <iframe
@@ -1499,20 +1491,7 @@
             .catch(err => console.error(err));
     </script>
     <script src="/Maintenance/script.js?v=20260603-spare-yoy-4" defer></script>
-    <script src="/Maintenance/pm-schedule.js?v=20260603-pm-floc-8" defer></script>
-
-    <!-- ── MIRA feature flag ──────────────────────────────────────────────────
-         IT can disable MIRA without touching the dashboard: set enabled:false (or
-         window.ENABLE_MIRA = false). When disabled, the MIRA tab + panel stay
-         hidden and the assistant never initialises. -->
-    <script>
-        window.MIRA_CONFIG = {
-            // Disabled for now. Set enabled:true (or window.ENABLE_MIRA = true) to re-enable.
-            enabled: (typeof window.ENABLE_MIRA === "boolean") ? window.ENABLE_MIRA : false,
-            apiBase: "/api/mira"
-        };
-    </script>
-    <script src="/shared/mira/mira-panel.js?v=20260603-mira-1" defer></script>
+    <script src="/Maintenance/pm-schedule.js?v=20260603-pm-pending-9" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->
     <div id="pau-modal" class="pau-modal-overlay" hidden>

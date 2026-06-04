@@ -21,14 +21,13 @@
     const PALETTE = ["#2563eb", "#0ea5e9", "#14b8a6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#64748b", "#ec4899", "#84cc16"];
     const STAGE_COLORS = { "Stage 1": "#2563eb", "Stage 2": "#14b8a6", "Unmapped": "#94a3b8", "Needs Stage Review": "#f59e0b" };
 
-    // Stored statuses the edit form can set (manual only — no auto-done).
-    const OP_STATUSES = ["Scheduled", "Done", "Backlog", "Deferred", "Not Applicable", "Cancelled"];
-    // Includes the dynamic "Overdue" display state for charts/breakdowns.
+    // Stored statuses the edit form can set (manual only — default is Pending).
+    const OP_STATUSES = ["Pending", "Done", "Backlog", "Deferred", "Not Applicable", "Cancelled"];
     const STATUS_COLORS = {
-        "Scheduled": "#2563eb", "Done": "#10b981", "Overdue": "#ef4444",
+        "Pending": "#2563eb", "Done": "#10b981", "Overdue": "#ef4444",
         "Backlog": "#f59e0b", "Deferred": "#8b5cf6", "Not Applicable": "#94a3b8", "Cancelled": "#64748b",
     };
-    const STATUS_BREAKDOWN_ORDER = ["Scheduled", "Done", "Overdue", "Backlog", "Deferred", "Not Applicable", "Cancelled"];
+    const STATUS_BREAKDOWN_ORDER = ["Pending", "Done", "Backlog", "Deferred", "Not Applicable", "Cancelled"];
     const API = "/api/maintenance/pm-schedule";
     const COMPLIANCE_TARGET = 90;
 
@@ -380,8 +379,8 @@
 
     // ── Operational status helpers ───────────────────────────────────────────
     // Stored status (manual only). "Overdue" is a dynamic DISPLAY state from the backend.
-    function storedStatus(task) { return task.status || "Scheduled"; }
-    function opStatus(task) { return task.displayStatus || task.status || "Scheduled"; }   // for display + filtering
+    function storedStatus(task) { return task.status || "Pending"; }
+    function opStatus(task) { return task.displayStatus || task.status || "Pending"; }   // for display + filtering
     function isDoneStatus(s) { return s === "Done"; }                                       // completion is manual only
     function isDone(task) { return Boolean(task.isDone); }
     function isOverdueOp(task) { return Boolean(task.isOverdueOp); }
@@ -603,7 +602,7 @@
 
         const weekStart = startOfWeek(new Date());
         const weekEnd = addDays(weekStart, 6);
-        const dueWeek = yearTasks.filter((t) => { const d = parseDate(t.plannedDate); return d && d >= weekStart && d <= weekEnd && storedStatus(t) === "Scheduled"; }).length;
+        const dueWeek = yearTasks.filter((t) => { const d = parseDate(t.plannedDate); return d && d >= weekStart && d <= weekEnd && storedStatus(t) === "Pending"; }).length;
 
         setText("pm-ov-context", `${stageLabel(meta)} · ${scopeLabel()} · ${meta.monthLabel} ${meta.year} · ${fmt(yearTasks.length)} PM tasks in view · completion is manual only`);
         setText("pm-ov-sched-month", fmt(scheduled));
@@ -906,7 +905,7 @@
         makeChart("pm-chart-status", doughnutConfig(emptyOr(chartFromCounts(countBy(yearTasks, opStatus), STATUS_BREAKDOWN_ORDER)), STATUS_COLORS));
         renderFLChart(yearTasks);
 
-        const backlogTasks = yearTasks.filter(isBacklogTask);
+        const backlogTasks = yearTasks.filter((t) => isBacklogTask(t) || isOverdueOp(t));
         makeChart("pm-chart-backlog-system", barConfig(emptyOr(chartFromCounts(countBy(backlogTasks, (t) => t.systemArea), null, 12)), { horizontal: true, color: "#ef4444" }));
         renderTopBacklog(backlogTasks);
     }
@@ -1074,7 +1073,7 @@
             <span><b>Scheduled week ends:</b> ${task.scheduledWeekEnd ? dateLabel(task.scheduledWeekEnd) : "—"}</span>`;
 
         const status = presetStatus || storedStatus(task);
-        el("pm-edit-status").value = OP_STATUSES.includes(status) ? status : "Scheduled";
+        el("pm-edit-status").value = OP_STATUSES.includes(status) ? status : "Pending";
         el("pm-edit-scheduled").value = (task.plannedDate || "").slice(0, 10);
         el("pm-edit-description").value = task.pmDescription || "";
         // For a quick "Mark Done", pre-fill today's completion date for convenience.
