@@ -220,7 +220,8 @@ def derive_operational_fields(task: dict, today: date) -> None:
     isOverdueOp, isBacklog, isDeferred, isLateCompleted, isOnTimeCompleted,
     isDueThisMonth, isDueSoon, displayStatus, daysOverdue.
     """
-    status = task.get("status") or STATUS_SCHEDULED
+    status = normalize_status(task.get("status") or STATUS_SCHEDULED)
+    task["status"] = status
     planned = _parse_iso(task.get("plannedDate"))
     week_end = (planned + timedelta(days=6)) if planned else None
     task["scheduledWeekEnd"] = week_end.isoformat() if week_end else None
