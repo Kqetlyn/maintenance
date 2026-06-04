@@ -10,7 +10,7 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260528-history-date-range-1">
+    <link rel="stylesheet" href="style.css?v=20260604-data-review-edit-1">
     <link rel="stylesheet" href="/shared/navbar.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1256,10 +1256,11 @@
                                         <th>Created / Raised</th>
                                         <th>Description</th>
                                         <th>Translated Description</th>
+                                        <th>Action</th>
                                     </tr>
                                 </thead>
                                 <tbody id="data-quality-action-body">
-                                    <tr><td colspan="8" class="empty-cell">Loading data reliability actions.</td></tr>
+                                    <tr><td colspan="9" class="empty-cell">Loading data reliability actions.</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1288,6 +1289,13 @@
                         </div>
                     </div>
                     <div id="data-reliability-duplicate-target"></div>
+                    <div class="card nested-card dr-history-card">
+                        <div class="card-title">Data Review Edit History</div>
+                        <p class="card-subtitle">Every confirm, edit, and duplicate resolution across the review lists. Re-open any entry to amend a mistake.</p>
+                        <div id="dr-history-body" class="dr-history-list">
+                            <p class="dr-history-empty">No edits yet. Confirmed corrections and duplicate resolutions will be logged here.</p>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -1722,6 +1730,6 @@
 
     </main>
 
-    <script src="script.js?v=20260528-history-date-range-1" defer></script>
+    <script src="script.js?v=20260604-data-review-edit-1" defer></script>
 </body>
 </html>

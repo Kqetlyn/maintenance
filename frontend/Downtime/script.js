@@ -1098,6 +1098,8 @@ function getAcknowledgementStatus(row) {
 }
 
 function getDataQualityFlags(row) {
+    // A confirmed correction (Data Review) makes the row count as valid for KPIs.
+    if (dataReviewCorrectionResolvedFor(row)) return ["Valid"];
     const rawFlags = row?.data_quality_flags;
     if (Array.isArray(rawFlags) && rawFlags.length) return rawFlags.map((flag) => String(flag || "").trim()).filter(Boolean);
     const single = String(row?.data_quality_flag || "").trim();
@@ -2546,6 +2548,7 @@ function renderTopicDataReliabilityPanel() {
         setText("topic-data-review-count", "--");
         renderDataReliabilityActionList([]);
         renderDataReliabilityHistoryTable([]);
+        renderDataReviewHistoryPanel();
         return;
     }
     const qualityValid = scoped.filter(isDataQualityValid).length;
@@ -2557,6 +2560,7 @@ function renderTopicDataReliabilityPanel() {
     setText("topic-data-reliability-sub", `${fmtNumber(qualityValid)} of ${fmtNumber(scoped.length)} work order records are valid.`);
     renderDataReliabilityActionList(buildWorkOrderSlaModel(scoped, getWorkOrderSlaReferenceDate()).entries);
     renderDataReliabilityHistoryTable(scoped);
+    renderDataReviewHistoryPanel();
 }
 
 function getCriticalMrItems(rows = []) {
@@ -4737,12 +4741,13 @@ function renderWorkOrderResponseSection(rows = []) {
 function renderDataReliabilityActionList(entries = []) {
     const body = document.getElementById("data-quality-action-body");
     if (!body) return;
+    dataReviewActionSnapshots = {};
     const actionRows = (entries || []).filter((entry) => {
         const qualityFlags = getDataQualityFlags(entry.row).filter((flag) => flag !== "Valid");
         return qualityFlags.length || isWorkOrderSlaMissingStatus(entry.slaStatus);
     }).slice(0, 250);
     if (!actionRows.length) {
-        body.innerHTML = `<tr><td colspan="8" class="empty-cell">No data-quality action records in the current scope.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="9" class="empty-cell">No data-quality action records in the current scope. Confirmed rows now count toward KPIs.</td></tr>`;
         return;
     }
     body.innerHTML = actionRows.map((entry, index) => {
@@ -4751,24 +4756,41 @@ function renderDataReliabilityActionList(entries = []) {
         const slaIssue = isWorkOrderSlaMissingStatus(entry.slaStatus)
             ? [entry.slaStatus, ...(entry.delayLines || []).filter((line) => line !== "Within target")].join(" | ")
             : "--";
-        const created = entry.created?.date || getMrRaisedDate(row).date;
+        const originalCreated = entry.created?.date || getMrRaisedDate(row).date;
         const translatedDescription = cleanMrValue(row?.translated_description);
+        const mrId = getMrRequestId(row, index) || entry.id || "--";
+        const assetName = getMachineEquipmentName(row) || "--";
+        const assetId = row?.asset_id || row?.machine_code || "--";
+        const key = getDataReviewRowKey(row);
+        const ov = getCorrectionOverride(key);
+        dataReviewActionSnapshots[key] = {
+            mrId, assetName, assetId,
+            createdISO: originalCreated instanceof Date && !Number.isNaN(originalCreated.getTime()) ? originalCreated.toISOString().slice(0, 10) : "",
+            flags: qualityFlags,
+        };
+        const correctedCreated = ov?.corrections?.createdDate ? new Date(ov.corrections.createdDate) : null;
+        const displayCreated = (correctedCreated && !Number.isNaN(correctedCreated.getTime())) ? correctedCreated : originalCreated;
+        const editedBadge = ov && ov.status === "edited" ? ` <span class="dr-pending-chip">edited · not confirmed</span>` : "";
         return `
             <tr>
                 <td>
-                    <div class="cell-title">${escapeHtml(getMrRequestId(row, index) || entry.id || "--")}</div>
+                    <div class="cell-title">${escapeHtml(mrId)}${editedBadge}</div>
                     <div class="cell-sub">${escapeHtml(getMrWorkOrderOnlyId(row) || "--")}</div>
                 </td>
                 <td>
-                    <div class="cell-title">${escapeHtml(getMachineEquipmentName(row) || "--")}</div>
-                    <div class="cell-sub">${escapeHtml(row?.asset_id || row?.machine_code || "--")}</div>
+                    <div class="cell-title">${escapeHtml(ov?.corrections?.assetName || assetName)}</div>
+                    <div class="cell-sub">${escapeHtml(ov?.corrections?.assetId || assetId)}</div>
                 </td>
                 <td>${renderBadgeCell("status", getMrStatus(row))}</td>
                 <td>${escapeHtml(qualityFlags.length ? qualityFlags.join("; ") : "Valid")}</td>
                 <td>${escapeHtml(slaIssue)}</td>
-                <td>${escapeHtml(created ? fmtDateOnly(created) : "--")}</td>
+                <td>${escapeHtml(displayCreated ? fmtDateOnly(displayCreated) : "--")}</td>
                 <td class="description-cell">${escapeHtml(getMrDescription(row) || "--")}</td>
                 <td class="description-cell">${escapeHtml(translatedDescription || "--")}</td>
+                <td class="dr-action-cell">
+                    <button type="button" class="dr-btn dr-btn-edit" data-dr-action="edit-correction" data-dr-key="${escapeHtml(key)}">Edit</button>
+                    <button type="button" class="dr-btn dr-btn-confirm" data-dr-action="confirm-correction" data-dr-key="${escapeHtml(key)}">Confirm</button>
+                </td>
             </tr>
         `;
     }).join("");
@@ -10299,6 +10321,14 @@ function renderDupWoGroup(grpRows, action, cardClass) {
     const equipment = getMachineEquipmentName(firstRow) || assetId || "Unknown Asset";
     const desc = getMrDescription(firstRow);
 
+    const dupKey = getDuplicateGroupKey(grpRows);
+    dataReviewDuplicateSnapshots[dupKey] = {
+        assetName: equipment,
+        assetId,
+        desc,
+        count: grpRows.length,
+    };
+
     const shownRows = grpRows.slice(0, DUP_WO_ROWS_PER_GROUP_LIMIT);
     const hiddenCount = Math.max(0, grpRows.length - shownRows.length);
     const tableRows = shownRows.map((row, i) => renderMachineHistoryRow(row, i)).join("");
@@ -10313,6 +10343,10 @@ function renderDupWoGroup(grpRows, action, cardClass) {
                 ${assetId && assetId !== equipment ? `<span class="dup-group-asset-id">${escapeHtml(assetId)}</span>` : ""}
                 <span class="dup-group-badge">${grpRows.length} WOs</span>
                 <span class="dup-action-label">${escapeHtml(action)}</span>
+                <span class="dr-dup-controls">
+                    <button type="button" class="dr-btn dr-btn-edit" data-dr-action="edit-duplicate" data-dr-key="${escapeHtml(dupKey)}">Edit</button>
+                    <button type="button" class="dr-btn dr-btn-confirm" data-dr-action="confirm-duplicate" data-dr-key="${escapeHtml(dupKey)}">Confirm reviewed</button>
+                </span>
             </div>
             ${desc ? `<div class="dup-group-desc">${escapeHtml(desc)}</div>` : ""}
             <div class="dup-wo-table-wrap">
@@ -10357,7 +10391,7 @@ function renderDuplicateWoPanel(category) {
     const config = getDuplicateCategoryConfig(category);
     const panel = document.getElementById(config.panelId);
     if (!panel) return;
-    const groups = duplicateWorkOrderGroupsCache[config.key] || [];
+    const groups = config.key === "sameDay" ? duplicateActiveGroups() : (duplicateWorkOrderGroupsCache[config.key] || []);
     if (!groups.length) {
         panel.innerHTML = `<p class="dup-empty">${escapeHtml(config.empty)}</p>`;
         return;
@@ -10408,7 +10442,7 @@ function renderDuplicateWoResults(groups) {
         sameDay: groups.sameDayGroups || [],
     };
 
-    const total = duplicateWorkOrderGroupsCache.sameDay.length;
+    const total = duplicateActiveGroups().length;
     if (summaryEl) {
         summaryEl.innerHTML = total === 0
             ? `<span class="dup-summary-clean">&#10003; No duplicates detected</span>`
@@ -10452,6 +10486,447 @@ function renderDuplicateWoSection(rows) {
         if (token !== duplicateWoAnalysisToken) return;
         renderDuplicateWoResults(detectDuplicateWorkOrders(rows));
     }, 1200);
+}
+
+// ─── Data Review: edit / amend / confirm + edit history ──────────────────────
+// Confirmed corrections and duplicate resolutions are stored as an override
+// layer in localStorage (source Excel / D365 data is never modified). Confirming
+// a correction marks the row data-quality valid so it counts toward KPIs and
+// drops off the review list. Every change is logged to an edit history that can
+// be re-opened to amend a mistake.
+
+const DATA_REVIEW_OVERRIDES_KEY = "downtime.dataReviewOverrides.v1";
+const DATA_REVIEW_HISTORY_KEY = "downtime.dataReviewHistory.v1";
+const DATA_REVIEW_HISTORY_LIMIT = 500;
+
+const DATA_REVIEW_CORRECTION_FIELDS = [
+    { key: "createdDate", label: "Corrected Created / Raised Date", type: "date" },
+    { key: "assetId", label: "Corrected Asset ID", type: "text" },
+    { key: "assetName", label: "Corrected Asset / Machine Name", type: "text" },
+    { key: "slaStart", label: "Corrected SLA Start Date", type: "date" },
+    { key: "slaEnd", label: "Corrected SLA End Date", type: "date" },
+];
+
+let dataReviewOverrides = loadDataReviewOverrides();
+let dataReviewHistory = loadDataReviewHistory();
+// In-memory snapshots so modal/handlers can read the current row/group by key.
+let dataReviewActionSnapshots = {};
+let dataReviewDuplicateSnapshots = {};
+
+function loadDataReviewOverrides() {
+    const empty = { corrections: {}, duplicates: {} };
+    if (typeof window === "undefined" || !window.localStorage) return empty;
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(DATA_REVIEW_OVERRIDES_KEY) || "{}");
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return empty;
+        return {
+            corrections: (parsed.corrections && typeof parsed.corrections === "object") ? parsed.corrections : {},
+            duplicates: (parsed.duplicates && typeof parsed.duplicates === "object") ? parsed.duplicates : {},
+        };
+    } catch (error) {
+        console.warn("Data review overrides could not be loaded:", error);
+        return empty;
+    }
+}
+
+function saveDataReviewOverrides() {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+        window.localStorage.setItem(DATA_REVIEW_OVERRIDES_KEY, JSON.stringify(dataReviewOverrides));
+    } catch (error) {
+        console.warn("Data review overrides could not be saved:", error);
+    }
+}
+
+function loadDataReviewHistory() {
+    if (typeof window === "undefined" || !window.localStorage) return [];
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(DATA_REVIEW_HISTORY_KEY) || "[]");
+        return Array.isArray(parsed) ? parsed : [];
+    } catch (error) {
+        console.warn("Data review history could not be loaded:", error);
+        return [];
+    }
+}
+
+function saveDataReviewHistory() {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+        if (dataReviewHistory.length > DATA_REVIEW_HISTORY_LIMIT) {
+            dataReviewHistory = dataReviewHistory.slice(0, DATA_REVIEW_HISTORY_LIMIT);
+        }
+        window.localStorage.setItem(DATA_REVIEW_HISTORY_KEY, JSON.stringify(dataReviewHistory));
+    } catch (error) {
+        console.warn("Data review history could not be saved:", error);
+    }
+}
+
+function appendDataReviewHistory(entry) {
+    dataReviewHistory.unshift({
+        id: `dr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        ts: new Date().toISOString(),
+        ...entry,
+    });
+    saveDataReviewHistory();
+}
+
+function getDataReviewRowKey(row) {
+    if (!row || typeof row !== "object") return "";
+    const wo = cleanExportIdentifier(row.work_order_id || row.wo_id);
+    const req = cleanExportIdentifier(row.maintenance_order_id || row.request_id || row.mr_id || row.mr_no);
+    const asset = String(row.asset_id || row.machine_code || "").trim();
+    let created = "";
+    try {
+        const d = getMrRaisedDate(row).date;
+        if (d instanceof Date && !Number.isNaN(d.getTime())) created = d.toISOString().slice(0, 10);
+    } catch (error) { /* ignore */ }
+    return [wo, req, asset, created].filter(Boolean).join("|");
+}
+
+function getDuplicateGroupKey(grpRows) {
+    const ids = (grpRows || [])
+        .map((r) => cleanExportIdentifier(r.work_order_id || r.wo_id) || cleanExportIdentifier(r.request_id || r.maintenance_order_id) || "")
+        .filter(Boolean)
+        .sort();
+    if (ids.length) return `dup|${ids.join(",")}`;
+    const first = (grpRows || [])[0] || {};
+    return `dup|${String(first.asset_id || "").trim()}|${(getMrDescription(first) || "").slice(0, 40)}`;
+}
+
+function dataReviewHasCorrections() {
+    return !!(dataReviewOverrides.corrections && Object.keys(dataReviewOverrides.corrections).length);
+}
+
+// Override-aware: a confirmed correction makes the row count as data-quality valid.
+function dataReviewCorrectionResolvedFor(row) {
+    if (!dataReviewHasCorrections()) return false;
+    const key = getDataReviewRowKey(row);
+    if (!key) return false;
+    const ov = dataReviewOverrides.corrections[key];
+    return !!(ov && ov.status === "confirmed");
+}
+
+function getCorrectionOverride(key) {
+    return (key && dataReviewOverrides.corrections[key]) || null;
+}
+
+function setCorrectionOverride(key, patch, meta = {}) {
+    if (!key) return;
+    const prev = getCorrectionOverride(key);
+    const next = {
+        corrections: { ...(prev?.corrections || {}), ...(patch.corrections || {}) },
+        note: patch.note !== undefined ? patch.note : (prev?.note || ""),
+        status: patch.status || prev?.status || "edited",
+        updatedAt: new Date().toISOString(),
+    };
+    dataReviewOverrides.corrections[key] = next;
+    saveDataReviewOverrides();
+    appendDataReviewHistory({
+        list: "correction",
+        key,
+        title: meta.title || key,
+        action: patch.status === "confirmed" ? "confirmed" : "edited",
+        changes: meta.changes || [],
+        note: next.note,
+        prevSnapshot: prev ? JSON.parse(JSON.stringify(prev)) : null,
+    });
+}
+
+function getDuplicateOverride(key) {
+    return (key && dataReviewOverrides.duplicates[key]) || null;
+}
+
+function setDuplicateOverride(key, patch, meta = {}) {
+    if (!key) return;
+    const prev = getDuplicateOverride(key);
+    const next = {
+        resolution: patch.resolution || prev?.resolution || "Confirmed reviewed",
+        note: patch.note !== undefined ? patch.note : (prev?.note || ""),
+        status: patch.status || prev?.status || "edited",
+        updatedAt: new Date().toISOString(),
+    };
+    dataReviewOverrides.duplicates[key] = next;
+    saveDataReviewOverrides();
+    appendDataReviewHistory({
+        list: "duplicate",
+        key,
+        title: meta.title || key,
+        action: patch.status === "confirmed" ? "confirmed" : "edited",
+        changes: meta.changes || [{ field: "Resolution", from: prev?.resolution || "—", to: next.resolution }],
+        note: next.note,
+        prevSnapshot: prev ? JSON.parse(JSON.stringify(prev)) : null,
+    });
+}
+
+function revertDataReviewHistoryEntry(historyId) {
+    const entry = dataReviewHistory.find((h) => h.id === historyId);
+    if (!entry) return;
+    const store = entry.list === "duplicate" ? dataReviewOverrides.duplicates : dataReviewOverrides.corrections;
+    if (entry.prevSnapshot) {
+        store[entry.key] = JSON.parse(JSON.stringify(entry.prevSnapshot));
+    } else {
+        delete store[entry.key];
+    }
+    saveDataReviewOverrides();
+    appendDataReviewHistory({
+        list: entry.list,
+        key: entry.key,
+        title: entry.title,
+        action: "reverted",
+        changes: [{ field: "Reverted change from", from: fmtDataReviewTimestamp(entry.ts), to: "previous state" }],
+        note: "",
+        prevSnapshot: null,
+    });
+    refreshDataReviewViews();
+}
+
+function fmtDataReviewTimestamp(iso) {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "--";
+    return `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+}
+
+// ── Modal ────────────────────────────────────────────────────────────────────
+
+function ensureDataReviewModal() {
+    let modal = document.getElementById("dr-edit-modal");
+    if (modal) return modal;
+    modal = document.createElement("div");
+    modal.id = "dr-edit-modal";
+    modal.className = "dr-modal-overlay";
+    modal.hidden = true;
+    modal.innerHTML = `
+        <div class="dr-modal" role="dialog" aria-modal="true" aria-labelledby="dr-modal-title">
+            <div class="dr-modal-head">
+                <h3 id="dr-modal-title">Edit record</h3>
+                <button type="button" class="dr-modal-close" data-dr-action="modal-close" aria-label="Close">&times;</button>
+            </div>
+            <p class="dr-modal-context" id="dr-modal-context"></p>
+            <div class="dr-modal-body" id="dr-modal-body"></div>
+            <div class="dr-modal-actions">
+                <button type="button" class="dr-btn dr-btn-ghost" data-dr-action="modal-close">Cancel</button>
+                <button type="button" class="dr-btn dr-btn-save" data-dr-action="modal-save">Save edit</button>
+                <button type="button" class="dr-btn dr-btn-confirm" data-dr-action="modal-confirm">Confirm &amp; use for KPI</button>
+            </div>
+        </div>`;
+    document.body.appendChild(modal);
+    return modal;
+}
+
+let dataReviewModalContext = null;
+
+function openCorrectionModal(key) {
+    const snap = dataReviewActionSnapshots[key];
+    if (!snap) return;
+    const ov = getCorrectionOverride(key);
+    const modal = ensureDataReviewModal();
+    dataReviewModalContext = { type: "correction", key };
+    modal.querySelector("#dr-modal-title").textContent = "Amend record for KPI use";
+    modal.querySelector("#dr-modal-context").innerHTML =
+        `<strong>${escapeHtml(snap.mrId || "--")}</strong> · ${escapeHtml(snap.assetName || "--")} `
+        + `<span class="dr-flag-chip">${escapeHtml((snap.flags || []).join("; ") || "Review")}</span>`;
+    const fieldsHtml = DATA_REVIEW_CORRECTION_FIELDS.map((f) => {
+        const current = (ov?.corrections?.[f.key] ?? "") || dataReviewOriginalFieldValue(f.key, snap);
+        return `<label class="dr-field"><span>${escapeHtml(f.label)}</span>`
+            + `<input type="${f.type}" data-dr-field="${f.key}" value="${escapeHtml(String(current || ""))}"></label>`;
+    }).join("");
+    modal.querySelector("#dr-modal-body").innerHTML = fieldsHtml
+        + `<label class="dr-field dr-field-wide"><span>Reviewer Note</span>`
+        + `<textarea data-dr-field="note" rows="2" placeholder="What was corrected and why">${escapeHtml(ov?.note || "")}</textarea></label>`;
+    modal.querySelector(`[data-dr-action="modal-confirm"]`).hidden = false;
+    modal.hidden = false;
+}
+
+function dataReviewOriginalFieldValue(fieldKey, snap) {
+    if (fieldKey === "createdDate") return snap.createdISO || "";
+    if (fieldKey === "assetId") return snap.assetId || "";
+    if (fieldKey === "assetName") return snap.assetName || "";
+    return "";
+}
+
+function openDuplicateModal(key) {
+    const snap = dataReviewDuplicateSnapshots[key];
+    if (!snap) return;
+    const ov = getDuplicateOverride(key);
+    const modal = ensureDataReviewModal();
+    dataReviewModalContext = { type: "duplicate", key };
+    modal.querySelector("#dr-modal-title").textContent = "Resolve duplicate group";
+    modal.querySelector("#dr-modal-context").innerHTML =
+        `<strong>${escapeHtml(snap.assetName || "--")}</strong> · ${escapeHtml(snap.count)} work orders `
+        + (snap.desc ? `<span class="dr-flag-chip">${escapeHtml(snap.desc)}</span>` : "");
+    const options = ["Confirmed reviewed", "Not a duplicate — keep all", "Duplicate confirmed — merge", "Ignore"];
+    const chosen = ov?.resolution || "Confirmed reviewed";
+    modal.querySelector("#dr-modal-body").innerHTML =
+        `<label class="dr-field dr-field-wide"><span>Resolution</span><select data-dr-field="resolution">`
+        + options.map((o) => `<option value="${escapeHtml(o)}"${o === chosen ? " selected" : ""}>${escapeHtml(o)}</option>`).join("")
+        + `</select></label>`
+        + `<label class="dr-field dr-field-wide"><span>Reviewer Note</span>`
+        + `<textarea data-dr-field="note" rows="2" placeholder="Decision reasoning">${escapeHtml(ov?.note || "")}</textarea></label>`;
+    modal.querySelector(`[data-dr-action="modal-confirm"]`).hidden = false;
+    modal.hidden = false;
+}
+
+function readDataReviewModalFields() {
+    const modal = document.getElementById("dr-edit-modal");
+    const out = {};
+    modal.querySelectorAll("[data-dr-field]").forEach((el) => {
+        out[el.getAttribute("data-dr-field")] = el.value.trim();
+    });
+    return out;
+}
+
+function closeDataReviewModal() {
+    const modal = document.getElementById("dr-edit-modal");
+    if (modal) modal.hidden = true;
+    dataReviewModalContext = null;
+}
+
+function saveDataReviewModal(confirm) {
+    if (!dataReviewModalContext) return;
+    const fields = readDataReviewModalFields();
+    if (dataReviewModalContext.type === "correction") {
+        const key = dataReviewModalContext.key;
+        const snap = dataReviewActionSnapshots[key] || {};
+        const prev = getCorrectionOverride(key);
+        const corrections = {};
+        const changes = [];
+        DATA_REVIEW_CORRECTION_FIELDS.forEach((f) => {
+            const val = fields[f.key] || "";
+            if (val) corrections[f.key] = val;
+            const from = (prev?.corrections?.[f.key] ?? "") || dataReviewOriginalFieldValue(f.key, snap) || "—";
+            if (String(val) !== String(prev?.corrections?.[f.key] ?? dataReviewOriginalFieldValue(f.key, snap) ?? "")) {
+                changes.push({ field: f.label, from: from || "—", to: val || "—" });
+            }
+        });
+        setCorrectionOverride(key, {
+            corrections,
+            note: fields.note || "",
+            status: confirm ? "confirmed" : "edited",
+        }, { title: snap.mrId || key, changes });
+    } else if (dataReviewModalContext.type === "duplicate") {
+        const key = dataReviewModalContext.key;
+        const snap = dataReviewDuplicateSnapshots[key] || {};
+        setDuplicateOverride(key, {
+            resolution: fields.resolution || "Confirmed reviewed",
+            note: fields.note || "",
+            status: confirm ? "confirmed" : "edited",
+        }, { title: snap.assetName || key });
+    }
+    closeDataReviewModal();
+    refreshDataReviewViews();
+}
+
+// ── History panel ────────────────────────────────────────────────────────────
+
+function renderDataReviewHistoryPanel() {
+    const body = document.getElementById("dr-history-body");
+    if (!body) return;
+    if (!dataReviewHistory.length) {
+        body.innerHTML = `<p class="dr-history-empty">No edits yet. Confirmed corrections and duplicate resolutions will be logged here.</p>`;
+        return;
+    }
+    body.innerHTML = dataReviewHistory.slice(0, 100).map((h) => {
+        const actionClass = h.action === "confirmed" ? "dr-hist-confirm" : h.action === "reverted" ? "dr-hist-revert" : "dr-hist-edit";
+        const changesHtml = (h.changes || []).length
+            ? `<ul class="dr-hist-changes">${h.changes.map((c) => `<li>${escapeHtml(c.field)}: <span class="dr-hist-from">${escapeHtml(String(c.from))}</span> &rarr; <span class="dr-hist-to">${escapeHtml(String(c.to))}</span></li>`).join("")}</ul>`
+            : "";
+        const noteHtml = h.note ? `<div class="dr-hist-note">&ldquo;${escapeHtml(h.note)}&rdquo;</div>` : "";
+        const listLabel = h.list === "duplicate" ? "Duplicate" : "Correction";
+        const canAmend = h.action !== "reverted";
+        return `
+            <div class="dr-hist-item">
+                <div class="dr-hist-row">
+                    <span class="dr-hist-badge ${actionClass}">${escapeHtml(h.action)}</span>
+                    <span class="dr-hist-list">${escapeHtml(listLabel)}</span>
+                    <span class="dr-hist-title">${escapeHtml(h.title || h.key || "")}</span>
+                    <span class="dr-hist-time">${escapeHtml(fmtDataReviewTimestamp(h.ts))}</span>
+                </div>
+                ${changesHtml}
+                ${noteHtml}
+                <div class="dr-hist-actions">
+                    ${canAmend ? `<button type="button" class="dr-btn dr-btn-mini" data-dr-action="amend-history" data-dr-id="${escapeHtml(h.id)}" data-dr-list="${escapeHtml(h.list)}" data-dr-key="${escapeHtml(h.key)}">Re-amend</button>` : ""}
+                    ${canAmend ? `<button type="button" class="dr-btn dr-btn-mini dr-btn-ghost" data-dr-action="revert-history" data-dr-id="${escapeHtml(h.id)}">Undo</button>` : ""}
+                </div>
+            </div>`;
+    }).join("");
+}
+
+// ── Duplicate active-group helpers ───────────────────────────────────────────
+
+function duplicateActiveGroups() {
+    const groups = duplicateWorkOrderGroupsCache.sameDay || [];
+    if (!dataReviewOverrides.duplicates || !Object.keys(dataReviewOverrides.duplicates).length) return groups;
+    return groups.filter((g) => {
+        const ov = dataReviewOverrides.duplicates[getDuplicateGroupKey(g)];
+        return !(ov && ov.status === "confirmed");
+    });
+}
+
+function refreshDuplicateWoCounts() {
+    const total = duplicateActiveGroups().length;
+    const summaryEl = document.getElementById("dup-wo-summary-badges");
+    if (summaryEl) {
+        summaryEl.innerHTML = total === 0
+            ? `<span class="dup-summary-clean">&#10003; No duplicates detected</span>`
+            : `<span class="dup-summary-badge dup-sameday-badge">${fmtNumber(total)} Double Entry</span>`;
+    }
+    const count = document.getElementById("dup-sameday-count");
+    if (count) count.textContent = fmtNumber(total);
+    const panel = document.getElementById("dup-sameday-panel");
+    if (panel && panel.classList.contains("dup-panel-open")) renderDuplicateWoPanel("same-day");
+}
+
+function refreshDataReviewViews() {
+    try {
+        if (typeof downtimeOverviewRowsCache !== "undefined" && Array.isArray(downtimeOverviewRowsCache) && downtimeOverviewRowsCache.length) {
+            renderDowntimeOverviewFromRows(downtimeOverviewRowsCache);
+        } else {
+            renderTopicDataReliabilityPanel();
+        }
+    } catch (error) {
+        console.warn("Data review view refresh failed:", error);
+    }
+    refreshDuplicateWoCounts();
+    renderDataReviewHistoryPanel();
+}
+
+// ── Click handling (delegated, attached once) ────────────────────────────────
+
+function handleDataReviewClick(event) {
+    const btn = event.target.closest("[data-dr-action]");
+    if (!btn) return;
+    const action = btn.getAttribute("data-dr-action");
+    const key = btn.getAttribute("data-dr-key");
+    if (action === "modal-close") { closeDataReviewModal(); return; }
+    if (action === "modal-save") { saveDataReviewModal(false); return; }
+    if (action === "modal-confirm") { saveDataReviewModal(true); return; }
+    if (action === "edit-correction") { openCorrectionModal(key); return; }
+    if (action === "confirm-correction") {
+        const snap = dataReviewActionSnapshots[key] || {};
+        setCorrectionOverride(key, { status: "confirmed" }, { title: snap.mrId || key, changes: [{ field: "Status", from: "Needs correction", to: "Confirmed for KPI" }] });
+        refreshDataReviewViews();
+        return;
+    }
+    if (action === "edit-duplicate") { openDuplicateModal(key); return; }
+    if (action === "confirm-duplicate") {
+        const snap = dataReviewDuplicateSnapshots[key] || {};
+        setDuplicateOverride(key, { status: "confirmed" }, { title: snap.assetName || key });
+        refreshDataReviewViews();
+        return;
+    }
+    if (action === "amend-history") {
+        const list = btn.getAttribute("data-dr-list");
+        if (list === "duplicate") openDuplicateModal(key); else openCorrectionModal(key);
+        return;
+    }
+    if (action === "revert-history") {
+        revertDataReviewHistoryEntry(btn.getAttribute("data-dr-id"));
+        return;
+    }
+}
+
+if (typeof document !== "undefined") {
+    document.addEventListener("click", handleDataReviewClick);
 }
 
 // ─── Key Downtime Indicators (KDI) ───────────────────────────────────────────

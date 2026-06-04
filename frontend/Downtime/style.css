@@ -3704,6 +3704,83 @@ tr:hover td {
     font-style: italic;
 }
 
+/* ── Data Review: edit / confirm / history ── */
+.dr-btn {
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    cursor: pointer;
+    background: #eef2f7;
+    color: #1e293b;
+    transition: background 0.15s, border-color 0.15s;
+}
+.dr-btn + .dr-btn { margin-left: 6px; }
+.dr-btn:hover { background: #e2e8f0; }
+.dr-btn-edit { background: #eef2ff; color: #3730a3; border-color: #c7d2fe; }
+.dr-btn-edit:hover { background: #e0e7ff; }
+.dr-btn-confirm { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+.dr-btn-confirm:hover { background: #bbf7d0; }
+.dr-btn-save { background: #1d4ed8; color: #fff; }
+.dr-btn-save:hover { background: #1e40af; }
+.dr-btn-ghost { background: transparent; color: var(--text-muted); border-color: #e2e8f0; }
+.dr-btn-mini { padding: 3px 8px; font-size: 0.68rem; }
+.dr-action-cell { white-space: nowrap; }
+.dr-dup-controls { display: inline-flex; gap: 6px; margin-left: 10px; }
+.dr-pending-chip {
+    display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px;
+    font-size: 0.62rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.03em;
+    background: #fef3c7; color: #92400e;
+}
+.dr-flag-chip {
+    display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+    font-size: 0.68rem; font-weight: 600; background: #fee2e2; color: #b91c1c;
+}
+
+/* Modal */
+.dr-modal-overlay {
+    position: fixed; inset: 0; z-index: 1000;
+    background: rgba(15, 23, 42, 0.45);
+    display: flex; align-items: center; justify-content: center; padding: 16px;
+}
+.dr-modal-overlay[hidden] { display: none; }
+.dr-modal {
+    background: #fff; border-radius: 14px; width: min(560px, 100%);
+    max-height: 90vh; overflow: auto; box-shadow: 0 24px 60px rgba(15, 23, 42, 0.25);
+    padding: 20px 22px;
+}
+.dr-modal-head { display: flex; align-items: center; justify-content: space-between; }
+.dr-modal-head h3 { margin: 0; font-size: 1.05rem; }
+.dr-modal-close { border: none; background: none; font-size: 1.5rem; line-height: 1; cursor: pointer; color: var(--text-muted); }
+.dr-modal-context { margin: 6px 0 14px; font-size: 0.85rem; color: var(--text-muted); }
+.dr-modal-body { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.dr-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.78rem; font-weight: 600; color: #334155; }
+.dr-field-wide { grid-column: 1 / -1; }
+.dr-field input, .dr-field select, .dr-field textarea {
+    padding: 7px 9px; border: 1px solid #cbd5e1; border-radius: 7px; font: inherit; font-weight: 500;
+}
+.dr-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+
+/* History */
+.dr-history-list { display: flex; flex-direction: column; gap: 10px; max-height: 360px; overflow: auto; }
+.dr-history-empty { color: var(--text-muted); font-size: 0.85rem; margin: 4px 0; }
+.dr-hist-item { border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 12px; background: #f8fafc; }
+.dr-hist-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dr-hist-badge { padding: 1px 8px; border-radius: 999px; font-size: 0.62rem; font-weight: 700; text-transform: uppercase; }
+.dr-hist-confirm { background: #dcfce7; color: #166534; }
+.dr-hist-edit { background: #eef2ff; color: #3730a3; }
+.dr-hist-revert { background: #fee2e2; color: #b91c1c; }
+.dr-hist-list { font-size: 0.7rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; }
+.dr-hist-title { font-size: 0.82rem; font-weight: 700; color: #1e293b; }
+.dr-hist-time { margin-left: auto; font-size: 0.72rem; color: var(--text-muted); }
+.dr-hist-changes { margin: 6px 0 0; padding-left: 16px; font-size: 0.76rem; color: #475569; }
+.dr-hist-from { color: #b91c1c; }
+.dr-hist-to { color: #166534; font-weight: 600; }
+.dr-hist-note { margin-top: 4px; font-size: 0.78rem; font-style: italic; color: #475569; }
+.dr-hist-actions { margin-top: 8px; display: flex; gap: 6px; }
+@media (max-width: 560px) { .dr-modal-body { grid-template-columns: 1fr; } }
+
 .dup-group-desc {
     color: var(--text-dark);
     margin-bottom: 6px;
