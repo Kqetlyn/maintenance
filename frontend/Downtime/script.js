@@ -2378,12 +2378,15 @@ const SL_BADGE_COLORS = {
     "4": { bg: "#dbeafe", text: "#1d4ed8" },
 };
 
-function buildSeverityBreakdownHtml(map, limit = 3) {
-    const rows = [...map.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, limit);
-    if (!rows.length) return `<span class="sl-empty">No open MR</span>`;
-    return rows.map(([label, count]) => {
+const SEVERITY_LEVEL_ORDER = ["1", "2", "3", "4"];
+
+// Fixed, ordered S1–S4 layout. Every level is shown, even when its count is 0,
+// so the card reads consistently each render.
+function buildSeverityBreakdownHtml(map) {
+    return SEVERITY_LEVEL_ORDER.map((label) => {
+        const count = map.get(label) || 0;
         const { bg, text } = SL_BADGE_COLORS[label] || { bg: "#e2e8f0", text: "#475569" };
-        return `<div class="sl-item"><span class="sl-badge" style="background:${bg};color:${text}">SL ${escapeHtml(label)}</span><span class="sl-count">${fmtNumber(count)}</span></div>`;
+        return `<div class="sl-item"><span class="sl-badge" style="background:${bg};color:${text}">S${escapeHtml(label)}</span><span class="sl-count">${fmtNumber(count)}</span></div>`;
     }).join("");
 }
 
@@ -2392,7 +2395,7 @@ function buildSeverityBreakdownCriticalHtml(map, limit = 2) {
     if (!rows.length) return `<span class="sl-trend-label">No critical open MR</span>`;
     const items = rows.map(([label, count]) => {
         const { bg, text } = SL_BADGE_COLORS[label] || { bg: "#e2e8f0", text: "#475569" };
-        return `<span class="sl-badge-sm" style="background:${bg};color:${text}">SL ${escapeHtml(label)}</span><span class="sl-crit-count">${fmtNumber(count)}</span>`;
+        return `<span class="sl-badge-sm" style="background:${bg};color:${text}">S${escapeHtml(label)}</span><span class="sl-crit-count">${fmtNumber(count)}</span>`;
     }).join(" ");
     return `<span class="sl-trend-label">Critical:</span>${items}`;
 }
