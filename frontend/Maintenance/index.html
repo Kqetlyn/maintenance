@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
 
-    <link rel="stylesheet" href="/shared/navbar.css">
+    <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/Maintenance/style.css?v=20260604-spare-kpi-1">
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -1496,7 +1496,7 @@
 
     <script src="/shared/navbar.js"></script>
     <script>
-        fetch('/shared/navbar.html')
+        fetch('/shared/navbar.html?v=20260604-ai-note-1')
             .then(res => {
                 if (!res.ok) throw new Error('Navbar failed to load');
                 return res.text();
