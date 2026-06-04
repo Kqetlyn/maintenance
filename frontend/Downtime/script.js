@@ -6519,6 +6519,12 @@ function ensureCanvas(canvasId) {
     return document.getElementById(canvasId);
 }
 
+function setChartContainerHeight(canvasId, heightPx) {
+    const container = document.querySelector(`.chart-container[data-chart-id="${canvasId}"]`);
+    if (!container) return;
+    container.style.height = `${Math.max(260, Number(heightPx) || 260)}px`;
+}
+
 async function loadDowntimeCacheFile() {
     try {
         const response = await fetch(`./downtime-cache.json?v=20260504-binary-criticality&_=${Date.now()}`, {
@@ -11133,6 +11139,7 @@ function kdiRenderMttrGroupChart(groups, assetRows = [], selectedGroup = "", ran
             ? `MTTR by Asset / Machine Name${selectedGroup ? ` - ${selectedGroup}` : ""} - highest first`
             : `MTTR by Machine Group${selectedGroup ? ` - ${selectedGroup}` : ""} - highest first`;
     }
+    setChartContainerHeight(id, valid.length * 32 + 72);
     if (!valid.length) { renderEmptyChart(id, "No MTTR data for the selected filters"); return; }
     const labels = valid.map((row) => usingAssets ? (row.assetName || row.assetId || "--") : row.machineName);
     const data = valid.map((row) => Number(row.avgMttr || 0));
@@ -11162,7 +11169,14 @@ function kdiRenderMttrGroupChart(groups, assetRows = [], selectedGroup = "", ran
                     ticks: { callback: (v) => fmtAxisHours(v) },
                     title: { display: true, text: "Avg MTTR (hrs)" },
                 },
-                y: { grid: { display: false }, ticks: { font: { size: 11, weight: "600" } } },
+                y: {
+                    grid: { display: false },
+                    ticks: {
+                        autoSkip: false,
+                        padding: 6,
+                        font: { size: 11, weight: "600" },
+                    },
+                },
             },
         },
     });
@@ -11407,6 +11421,7 @@ function kdiRenderMtbfGroupChart(groups, assetRows = [], selectedGroup = "", ran
             ? `MTBF by Asset / Machine Name${selectedGroup ? ` - ${selectedGroup}` : ""} - lowest first (needs most attention)`
             : `MTBF by Machine Group${selectedGroup ? ` - ${selectedGroup}` : ""} - lowest first (needs most attention)`;
     }
+    setChartContainerHeight(id, valid.length * 32 + 72);
     if (!valid.length) { renderEmptyChart(id, "No MTBF data for the selected filters"); return; }
     const labels = valid.map((row) => usingAssets ? (row.assetName || row.assetId || "--") : row.machineName);
     const dataHours = valid.map((row) => Number(row.avgMtbf || 0));
@@ -11437,7 +11452,14 @@ function kdiRenderMtbfGroupChart(groups, assetRows = [], selectedGroup = "", ran
                     ticks: { callback: (v) => `${v}d` },
                     title: { display: true, text: "Avg MTBF (days)" },
                 },
-                y: { grid: { display: false }, ticks: { font: { size: 11, weight: "600" } } },
+                y: {
+                    grid: { display: false },
+                    ticks: {
+                        autoSkip: false,
+                        padding: 6,
+                        font: { size: 11, weight: "600" },
+                    },
+                },
             },
         },
     });
