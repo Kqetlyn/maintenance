@@ -902,28 +902,97 @@ def get_pm_schedule_status(filters: dict) -> dict:
     pm = _pm_payload(f)
     overview = pm.get("overview", {}) or {}
     kpis = overview.get("kpis", {}) or {}
+    # Period-scoped KPIs (selected month/year) — match the PM dashboard page exactly.
+    period = overview.get("periodKpis", {}) or {}
     charts = overview.get("charts", {}) or {}
     dq = (overview.get("dataQuality", {}) or {}).get("counts", {})
+
+    def _eq(scope_key):
+        s = pm.get(scope_key, {}) or {}
+        return (s.get("periodKpis", {}) or {}).get("scheduledInMonth", (s.get("kpis", {}) or {}).get("totalScheduled"))
+
     return {
         "window": ctx.month_label(f),
         "stage": f["stage"],
-        "total_scheduled": kpis.get("totalScheduled"),
-        "due_this_month": kpis.get("dueThisMonth"),
+        # Period-scoped values (do NOT use whole-dataset totals).
+        "total_scheduled": period.get("scheduledInMonth", kpis.get("dueThisMonth")),
+        "due_this_month": period.get("dueThisMonth", kpis.get("dueThisMonth")),
         "due_soon": kpis.get("dueSoon"),
-        "completed": kpis.get("completed"),
+        "completed": period.get("completedInMonth", kpis.get("completed")),
+        "on_time_completed": period.get("onTimeInMonth"),
         "completed_manual_only": True,
-        "compliance_pct": kpis.get("compliancePct"),
-        "overdue": kpis.get("overdue"),
-        "backlog": kpis.get("backlog"),
+        "compliance_pct": period.get("compliancePct", kpis.get("compliancePct")),
+        "overdue": period.get("overdueInMonth", kpis.get("overdue")),
+        "backlog": period.get("backlogInMonth", kpis.get("backlog")),
+        "deferred": period.get("deferredInMonth"),
+        "late_completed": period.get("lateInMonth"),
+        "no_pic": period.get("noPicInMonth"),
+        "year_scheduled": period.get("yearTaskCount"),
+        "total_scheduled_all_periods": kpis.get("totalScheduled"),
         "coverage": kpis.get("coverage"),
         "missing_mapping": kpis.get("missingMapping"),
         "needs_review": kpis.get("needsReview"),
-        "by_stage": charts.get("scheduledByStage"),
-        "by_main_group": charts.get("workloadByMainGroup"),
+        "by_stage": period.get("byStage", charts.get("scheduledByStage")),
+        "by_main_group": period.get("byAssetCategory", charts.get("workloadByMainGroup")),
+        "by_asset_category": period.get("byAssetCategory"),
+        "by_functional_location": period.get("byFunctionalLocation"),
         "data_quality": dq,
-        "equipment_total": (pm.get("equipment", {}).get("kpis", {}) or {}).get("totalScheduled"),
-        "utility_total": (pm.get("utility", {}).get("kpis", {}) or {}).get("totalScheduled"),
-        "source": "pm_schedule_service.build_pm_schedule_payload",
+        "equipment_total": _eq("equipment"),
+        "utility_total": _eq("utility"),
+        "source": "pm_schedule_service.build_pm_schedule_payload (period-scoped overview.periodKpis)",
+        "period_scoped": True,
+    }
+
+
+def get_verified_pm_metrics(filters: dict) -> dict:
+    """Verified, period-scoped PM metrics with a data envelope (Part C debug output).
+
+    Numbers come from build_pm_schedule_payload's period-scoped overview.periodKpis
+    (manual-Done only). Mirrors the downtime verified-metrics structure.
+    """
+    f = ctx.normalize_filters(filters)
+    pm_payload = _pm_payload(f)
+    meta = pm_payload.get("meta", {}) or {}
+    status = get_pm_schedule_status(f)
+    warnings = []
+    if (status.get("missing_mapping") or 0) > 0:
+        warnings.append(f"{status['missing_mapping']} PM records are missing asset mapping.")
+    if (status.get("needs_review") or 0) > 0:
+        warnings.append(f"{status['needs_review']} PM records still need review.")
+    if status.get("total_scheduled") == 0:
+        warnings.append("No PM tasks are scheduled for the selected month/year.")
+    return {
+        "summary_type": "pm_summary",
+        "filters": {
+            "year": f.get("year"),
+            "month": f.get("month"),
+            "stage": f.get("stage") or "all",
+            "asset_category": f.get("mainAssetGroup") or "All",
+            "functional_location": f.get("subAssetGroup") or "All",
+        },
+        "data_quality": {
+            "source": "PM Schedule (pm_schedule_service.build_pm_schedule_payload)",
+            "rows_loaded": meta.get("taskCountAllStages"),
+            "rows_after_filter": status.get("total_scheduled"),
+            "date_range": ctx.month_label(f),
+            "last_refreshed": meta.get("generatedAt"),
+            "warnings": warnings,
+        },
+        "metrics": {
+            "scheduled_pm": status.get("total_scheduled"),
+            "due_this_month": status.get("due_this_month"),
+            "completed_pm": status.get("completed"),
+            "on_time_pm": status.get("on_time_completed"),
+            "overdue_pm": status.get("overdue"),
+            "backlog_pm": status.get("backlog"),
+            "deferred_pm": status.get("deferred"),
+            "pm_compliance_percent": status.get("compliance_pct"),
+            "year_scheduled": status.get("year_scheduled"),
+            "pm_by_stage": status.get("by_stage"),
+            "pm_by_asset_category": status.get("by_asset_category"),
+            "pm_by_functional_location": status.get("by_functional_location"),
+        },
+        "completed_basis": "manual Done only (no auto-done; scheduled week is target only)",
     }
 
 

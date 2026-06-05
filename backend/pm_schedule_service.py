@@ -513,6 +513,65 @@ def _kpis(tasks, *, today, sel_year, sel_month, mapped_asset_total):
     }
 
 
+def _completion_year_month(task):
+    """(year, month) of a task's manual completion date, or None."""
+    raw = task.get("completionDate") or task.get("actualCompletionDate")
+    if not raw:
+        return None
+    text = str(raw).strip()
+    try:
+        parsed = datetime.fromisoformat(text[:19].replace("Z", ""))
+        return (parsed.year, parsed.month)
+    except Exception:
+        pass
+    if len(text) >= 7 and text[4:5] == "-":
+        try:
+            return (int(text[:4]), int(text[5:7]))
+        except ValueError:
+            return None
+    return None
+
+
+def _period_kpis(tasks, *, sel_year, sel_month):
+    """PM KPIs scoped to the SELECTED month/year — matches the PM dashboard page.
+
+    Completion is MANUAL ONLY (isDone). Compliance = on-time completed / scheduled
+    in the selected month. Overdue / backlog are scoped to the selected month's
+    tasks (not the whole dataset). Scheduled week/date is only the target period.
+    """
+    month_tasks = [t for t in tasks if t.get("plannedMonth") == sel_month and t.get("plannedYear") == sel_year]
+    year_tasks = [t for t in tasks if t.get("plannedYear") == sel_year]
+    scheduled = len(month_tasks)
+    completed = sum(
+        1 for t in year_tasks
+        if t.get("isDone") and _completion_year_month(t) == (sel_year, sel_month)
+    )
+    on_time = sum(1 for t in month_tasks if t.get("isOnTimeCompleted"))
+    overdue = sum(1 for t in month_tasks if t.get("isOverdueOp"))
+    backlog = sum(1 for t in month_tasks if t.get("isBacklog"))
+    deferred = sum(1 for t in month_tasks if t.get("isDeferred"))
+    late = sum(1 for t in month_tasks if t.get("isLateCompleted"))
+    no_pic = sum(1 for t in month_tasks if not str(t.get("contractorOrPIC") or "").strip())
+    compliance = round(on_time / scheduled * 100, 1) if scheduled else None
+    return {
+        "scheduledInMonth": scheduled,
+        "dueThisMonth": scheduled,
+        "completedInMonth": completed,
+        "onTimeInMonth": on_time,
+        "compliancePct": compliance,
+        "overdueInMonth": overdue,
+        "backlogInMonth": backlog,
+        "deferredInMonth": deferred,
+        "lateInMonth": late,
+        "noPicInMonth": no_pic,
+        "yearTaskCount": len(year_tasks),
+        "byStage": _counter_to_chart(Counter(t["stage"] for t in month_tasks), order=["Stage 1", "Stage 2"]),
+        "byAssetCategory": _counter_to_chart(Counter(t["mainAssetGroup"] for t in month_tasks), top=10),
+        "byFunctionalLocation": _counter_to_chart(
+            Counter(t.get("functionalLocationLabel") or "Unassigned" for t in month_tasks), top=10),
+    }
+
+
 def _data_quality(tasks):
     seen = set()
     duplicates = 0
@@ -602,6 +661,7 @@ def _overview_section(tasks, *, today, sel_year, sel_month, mapped_asset_total):
     }
     return {
         "kpis": kpis,
+        "periodKpis": _period_kpis(tasks, sel_year=sel_year, sel_month=sel_month),
         "charts": charts,
         "dataQuality": {"counts": dq_counts, "rows": dq_rows},
     }
@@ -650,6 +710,7 @@ def _scope_section(tasks, *, scope, today, sel_year, sel_month, mapped_asset_tot
 
     return {
         "kpis": kpis,
+        "periodKpis": _period_kpis(scoped, sel_year=sel_year, sel_month=sel_month),
         "charts": charts,
         top_label: _counter_to_chart(top_counter, top=10),
         "tables": {
