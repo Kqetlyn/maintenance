@@ -7,20 +7,10 @@ from datetime import datetime
 from flask import Flask, jsonify, redirect, send_from_directory, request
 import os
 
-# ── Service imports (all kept — Maintenance page depends on all of them) ────────
-from maintenance_service import (
-    build_maintenance_overview_payload,
-    build_filter_payload,
-    build_list_payload,
-    build_monthly_payload,
-    build_summary_payload,
-    build_timeline_payload,
-    build_equipment_filter_payload,
-    build_equipment_list_payload,
-    build_equipment_monthly_payload,
-    build_equipment_summary_payload,
-    build_equipment_timeline_payload,
-)
+# ── Service imports ─────────────────────────────────────────────────────────────
+# The legacy maintenance overview / utility / equipment builders are no longer
+# imported here — those endpoints were removed. PM Schedule, Spare Parts and
+# Downtime have their own services below.
 from pm_schedule_service import build_pm_schedule_payload
 from pm_schedule_overrides import save_override as save_pm_override
 from pm_planner_store import (
@@ -50,6 +40,12 @@ from downtime_service import (
     get_work_order_import_status,
     import_work_order_file,
 )
+try:
+    from mira.api import mira_bp
+except Exception as mira_import_error:
+    mira_bp = None
+else:
+    mira_import_error = None
 
 # ── Path configuration ────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -62,6 +58,10 @@ ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
+if mira_bp is not None:
+    app.register_blueprint(mira_bp)
+else:
+    print(f"MIRA routes unavailable: {mira_import_error}")
 
 
 @app.after_request
@@ -272,96 +272,10 @@ def maintenance_pm_schedule_delete():
     return jsonify({"ok": deleted, "deleted": deleted})
 
 
-@app.route("/api/maintenance/overview")
-def maintenance_overview():
-    return jsonify(
-        build_maintenance_overview_payload(
-            month_value=request.args.get("month"),
-            status=request.args.get("status", "all"),
-            category=request.args.get("category", "all"),
-            search=request.args.get("search", ""),
-            sort=request.args.get("sort", "date_asc"),
-            year=request.args.get("year", type=int),
-            mix_month_value=request.args.get("mix_month"),
-        )
-    )
-
-
-@app.route("/api/maintenance/utility/summary")
-def maintenance_utility_summary():
-    return jsonify(build_summary_payload(request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/utility/monthly")
-def maintenance_utility_monthly():
-    return jsonify(build_monthly_payload(request.args.get("month"), request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/utility/list")
-def maintenance_utility_list():
-    return jsonify(
-        build_list_payload(
-            month_value=request.args.get("month"),
-            status=request.args.get("status", "all"),
-            category=request.args.get("category", "all"),
-            location=request.args.get("location", "all"),
-            inspection=request.args.get("inspection", "all"),
-            search=request.args.get("search", ""),
-            sort=request.args.get("sort", "due_date_asc"),
-            year=request.args.get("year", type=int),
-            aggregate=request.args.get("aggregate", "occurrence"),
-        )
-    )
-
-
-@app.route("/api/maintenance/utility/timeline")
-def maintenance_utility_timeline():
-    return jsonify(build_timeline_payload(request.args.get("year", type=int), request.args.get("month")))
-
-
-@app.route("/api/maintenance/utility/filters")
-def maintenance_utility_filters():
-    return jsonify(build_filter_payload(request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/equipment/summary")
-def maintenance_equipment_summary():
-    return jsonify(build_equipment_summary_payload(request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/equipment/monthly")
-def maintenance_equipment_monthly():
-    return jsonify(build_equipment_monthly_payload(request.args.get("month"), request.args.get("year", type=int)))
-
-
-@app.route("/api/maintenance/equipment/list")
-def maintenance_equipment_list():
-    return jsonify(
-        build_equipment_list_payload(
-            month_value=request.args.get("month"),
-            status=request.args.get("status", "all"),
-            category=request.args.get("category", "all"),
-            location=request.args.get("location", "all"),
-            inspection=request.args.get("inspection", "all"),
-            search=request.args.get("search", ""),
-            sort=request.args.get("sort", "due_date_asc"),
-            year=request.args.get("year", type=int),
-            aggregate=request.args.get("aggregate", "occurrence"),
-            priority=request.args.get("priority", "all"),
-            critical=request.args.get("critical", "all"),
-            week=request.args.get("week", "all"),
-        )
-    )
-
-
-@app.route("/api/maintenance/equipment/timeline")
-def maintenance_equipment_timeline():
-    return jsonify(build_equipment_timeline_payload(request.args.get("year", type=int), request.args.get("month")))
-
-
-@app.route("/api/maintenance/equipment/filters")
-def maintenance_equipment_filters():
-    return jsonify(build_equipment_filter_payload(request.args.get("year", type=int)))
+# Legacy maintenance overview / utility / equipment endpoints removed — those
+# pages are no longer in use (only PM Schedule, Spare Parts, Downtime and MIRA
+# remain). PM Schedule is served by pm_schedule_service; the old maintenance_service
+# list/summary/equipment builders are no longer wired to any route.
 
 
 @app.route("/api/maintenance/spare_parts")

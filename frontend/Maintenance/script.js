@@ -95,7 +95,7 @@ document.addEventListener("DOMContentLoaded", () => {
         { value: "custom", label: "Custom Range" },
     ];
     const state = {
-        activeView: ["overview", "spare_parts", "analysis", "downtime"].includes(initialView) ? initialView : "overview",
+        activeView: ["overview", "spare_parts", "downtime", "mira"].includes(initialView) ? initialView : "overview",
         overviewMonth: "",
         overviewCategory: "all",
         overviewStatus: "all",

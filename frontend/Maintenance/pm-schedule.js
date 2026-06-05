@@ -36,6 +36,10 @@
         view: "overview",
         payload: null,
         taskIndex: new Map(),
+        queryStage: "all",
+        queryScope: "all",
+        queryYear: String(new Date().getFullYear()),
+        queryMonth: String(new Date().getMonth() + 1),
         calendarMode: "month",
         calendarDate: null,
         selectedDate: null,
@@ -61,8 +65,6 @@
     document.addEventListener("DOMContentLoaded", init);
 
     function init() {
-        populateMonthSelect();
-        bindFilters();
         bindTabButtons();
         bindCalendarControls();
         bindTaskFilters();
@@ -136,30 +138,6 @@
     }
 
     // ── Filters ──────────────────────────────────────────────────────────────
-    function populateMonthSelect() {
-        const sel = el("pm-month-filter");
-        if (!sel || sel.options.length) return;
-        const now = new Date();
-        MONTHS.forEach((label, idx) => {
-            const opt = document.createElement("option");
-            opt.value = String(idx + 1);
-            opt.textContent = label;
-            sel.appendChild(opt);
-        });
-        sel.value = String(now.getMonth() + 1);
-    }
-
-    function bindFilters() {
-        // Year / stage / month change the server query.
-        ["pm-stage-filter", "pm-year-filter", "pm-month-filter"].forEach((id) => {
-            el(id)?.addEventListener("change", () => refresh().catch((e) => console.error(e)));
-        });
-        // Category / system / group / status are client-side re-renders.
-        ["pm-category-filter", "pm-system-filter", "pm-asset-group-filter", "pm-status-filter"].forEach((id) => {
-            el(id)?.addEventListener("change", () => renderPmSchedule());
-        });
-    }
-
     function bindTabButtons() {
         document.querySelectorAll("[data-view-tab]").forEach((btn) => {
             btn.addEventListener("click", () => {
@@ -202,8 +180,7 @@
     }
 
     function updateFilterVisibility() {
-        const wrap = el("pm-global-filters");
-        if (wrap) wrap.hidden = !PM_VIEWS.has(state.view);
+        return;
     }
 
     // On-page Stage (Both/Stage 1/Stage 2) + Scope (Both/Production Equipment/Utilities)
@@ -211,16 +188,14 @@
     function bindPageFilters() {
         document.querySelectorAll("[data-pm-stage]").forEach((btn) => {
             btn.addEventListener("click", () => {
-                const sel = el("pm-stage-filter");
-                if (sel) sel.value = btn.dataset.pmStage;
+                state.queryStage = btn.dataset.pmStage || "all";
                 syncPageFilters();
                 refresh().catch((e) => console.error(e));
             });
         });
         document.querySelectorAll("[data-pm-scope]").forEach((btn) => {
             btn.addEventListener("click", () => {
-                const sel = el("pm-category-filter");
-                if (sel) sel.value = btn.dataset.pmScope;
+                state.queryScope = btn.dataset.pmScope || "all";
                 syncPageFilters();
                 renderPmSchedule();
             });
@@ -228,17 +203,17 @@
     }
 
     function syncPageFilters() {
-        const stage = el("pm-stage-filter")?.value || "all";
-        const scope = el("pm-category-filter")?.value || "all";
+        const stage = state.queryStage || "all";
+        const scope = state.queryScope || "all";
         document.querySelectorAll("[data-pm-stage]").forEach((b) => b.classList.toggle("active", b.dataset.pmStage === stage));
         document.querySelectorAll("[data-pm-scope]").forEach((b) => b.classList.toggle("active", b.dataset.pmScope === scope));
     }
 
     function currentParams() {
         const p = new URLSearchParams();
-        p.set("stage", el("pm-stage-filter")?.value || "all");
-        const year = el("pm-year-filter")?.value || "";
-        const month = el("pm-month-filter")?.value || "";
+        p.set("stage", state.queryStage || "all");
+        const year = state.queryYear || "";
+        const month = state.queryMonth || "";
         if (year) p.set("year", year);
         if (month) p.set("month", month);
         return p;
@@ -265,14 +240,9 @@
     }
 
     function syncYearSelect(meta) {
-        const sel = el("pm-year-filter");
-        if (!sel || !meta) return;
-        const years = meta.availableYears && meta.availableYears.length ? meta.availableYears : [meta.year];
-        const desired = sel.value || String(meta.year);
-        sel.innerHTML = years.map((y) => `<option value="${y}">${y}</option>`).join("");
-        sel.value = years.map(String).includes(desired) ? desired : String(meta.year);
-        const monthSel = el("pm-month-filter");
-        if (monthSel && !monthSel.value) monthSel.value = String(meta.month);
+        if (!meta) return;
+        state.queryYear = String(meta.year || state.queryYear || new Date().getFullYear());
+        state.queryMonth = String(meta.month || state.queryMonth || (new Date().getMonth() + 1));
     }
 
     function stageLabel(meta) {
@@ -281,7 +251,7 @@
     }
 
     function scopeLabel() {
-        const scope = (el("pm-category-filter")?.value || "all").toLowerCase();
+        const scope = String(state.queryScope || "all").toLowerCase();
         if (scope === "equipment") return "Production Equipment";
         if (scope === "utility") return "Utilities";
         return "Production Equipment + Utilities";
@@ -299,12 +269,7 @@
     }
 
     function hydratePmFilterOptions() {
-        const tasks = allScheduleTasks();
-        const scope = (el("pm-category-filter")?.value || "all").toLowerCase();
-        const scoped = tasks.filter((task) => scope === "all" || String(task.scope || "").toLowerCase() === scope);
-        fillSelect("pm-system-filter", unique(scoped, "systemArea"), "All");
-        fillSelect("pm-asset-group-filter", unique(scoped, "mainAssetGroup"), "All");
-        fillSelect("pm-status-filter", OP_STATUSES.concat(["Overdue"]), "All");
+        return;
     }
 
     function fillSelect(id, values, allLabel = "All") {
@@ -351,10 +316,10 @@
 
     function selectedFilters() {
         return {
-            scope: (el("pm-category-filter")?.value || "all").toLowerCase(),
-            system: el("pm-system-filter")?.value || "all",
-            assetGroup: el("pm-asset-group-filter")?.value || "all",
-            status: el("pm-status-filter")?.value || "all",
+            scope: String(state.queryScope || "all").toLowerCase(),
+            system: "all",
+            assetGroup: "all",
+            status: "all",
         };
     }
 
@@ -379,8 +344,19 @@
 
     // ── Operational status helpers ───────────────────────────────────────────
     // Stored status (manual only). "Overdue" is a dynamic DISPLAY state from the backend.
-    function storedStatus(task) { return task.status || "Pending"; }
-    function opStatus(task) { return task.displayStatus || task.status || "Pending"; }   // for display + filtering
+    const LEGACY_PM_STATUS_MAP = {
+        "scheduled": "Pending",
+        "auto done / pending verification": "Pending",
+        "auto done": "Pending",
+        "not done / backlog": "Backlog",
+    };
+    function normalizedPmStatus(value) {
+        const text = String(value || "").trim();
+        if (!text) return "Pending";
+        return LEGACY_PM_STATUS_MAP[text.toLowerCase()] || text;
+    }
+    function storedStatus(task) { return normalizedPmStatus(task.status); }
+    function opStatus(task) { return normalizedPmStatus(task.displayStatus || task.status || "Pending"); }   // for display + filtering
     function isDoneStatus(s) { return s === "Done"; }                                       // completion is manual only
     function isDone(task) { return Boolean(task.isDone); }
     function isOverdueOp(task) { return Boolean(task.isOverdueOp); }
@@ -403,7 +379,7 @@
         if (status === "Not Applicable" || status === "Cancelled") return "pm-badge-slate";
         return "pm-badge-blue";
     }
-    function shortStatus(status) { return status; }
+    function shortStatus(status) { return normalizedPmStatus(status); }
 
     // ── Date helpers ─────────────────────────────────────────────────────────
     function parseDate(value) {

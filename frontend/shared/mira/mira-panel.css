@@ -1,0 +1,760 @@
+.mira-root {
+    --mira-bg: #f5f7fb;
+    --mira-card: #ffffff;
+    --mira-card-soft: #f8fbff;
+    --mira-border: #d9e2ef;
+    --mira-border-strong: #c8d4e5;
+    --mira-text: #11233b;
+    --mira-muted: #6b7b93;
+    --mira-accent: #1f6feb;
+    --mira-accent-soft: rgba(31, 111, 235, 0.12);
+    --mira-good: #13795b;
+    --mira-good-soft: rgba(19, 121, 91, 0.12);
+    --mira-watch: #b7791f;
+    --mira-watch-soft: rgba(183, 121, 31, 0.14);
+    --mira-critical: #c05621;
+    --mira-critical-soft: rgba(192, 86, 33, 0.12);
+    --mira-shadow: 0 10px 28px rgba(15, 32, 59, 0.06);
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    color: var(--mira-text);
+}
+
+.mira-page-card,
+.mira-response-card {
+    position: relative;
+    background: var(--mira-card);
+    border: 1px solid var(--mira-border);
+    border-radius: 20px;
+    box-shadow: var(--mira-shadow);
+}
+
+.mira-page-card {
+    padding: 22px 24px;
+}
+
+.mira-hero-card {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 20px;
+    overflow: hidden;
+    background:
+        linear-gradient(135deg, rgba(31, 111, 235, 0.08), rgba(255, 255, 255, 0) 45%),
+        var(--mira-card);
+}
+
+.mira-hero-card::before,
+.mira-response-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 5px;
+    border-radius: 20px 0 0 20px;
+    background: linear-gradient(180deg, #7eb5ff 0%, #1f6feb 100%);
+}
+
+.mira-hero-card h2,
+.mira-panel-head h3 {
+    margin: 4px 0 0;
+    font-size: 24px;
+    line-height: 1.2;
+    font-weight: 700;
+    color: var(--mira-text);
+}
+
+.mira-panel-head h3 {
+    font-size: 18px;
+}
+
+.mira-hero-card p,
+.mira-panel-head p,
+.mira-empty-state p,
+.mira-statement-text,
+.mira-summary-text,
+.mira-report-narrative {
+    margin: 0;
+    color: var(--mira-muted);
+    line-height: 1.65;
+}
+
+.mira-hero-badges,
+.mira-badge-row,
+.mira-inline-items {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.mira-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 30px;
+    padding: 0 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    border: 1px solid transparent;
+    white-space: nowrap;
+}
+
+.mira-badge-accent {
+    background: var(--mira-accent-soft);
+    border-color: rgba(31, 111, 235, 0.18);
+    color: var(--mira-accent);
+}
+
+.mira-badge-muted {
+    background: #f1f5fb;
+    border-color: var(--mira-border);
+    color: var(--mira-muted);
+}
+
+.mira-badge-light {
+    background: #f7fafd;
+    border-color: var(--mira-border);
+    color: var(--mira-text);
+}
+
+.mira-badge-subtle {
+    background: #fbfcfe;
+    border-color: var(--mira-border);
+    color: var(--mira-muted);
+}
+
+.mira-eyebrow,
+.mira-section-label,
+.mira-mini-label {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--mira-muted);
+}
+
+.mira-panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.mira-panel-head-tight {
+    margin-bottom: 14px;
+}
+
+.mira-input-card {
+    background:
+        linear-gradient(180deg, rgba(31, 111, 235, 0.03), rgba(255, 255, 255, 0) 52%),
+        var(--mira-card);
+}
+
+.mira-control-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 14px;
+    margin-top: 16px;
+}
+
+.mira-field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.mira-field span {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mira-muted);
+}
+
+.mira-field select,
+.mira-textarea {
+    width: 100%;
+    font: inherit;
+    color: var(--mira-text);
+    background: #fbfdff;
+    border: 1px solid var(--mira-border);
+    border-radius: 14px;
+    padding: 12px 14px;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.mira-field select:focus,
+.mira-textarea:focus {
+    outline: none;
+    border-color: rgba(31, 111, 235, 0.45);
+    box-shadow: 0 0 0 4px rgba(31, 111, 235, 0.08);
+    background: #ffffff;
+}
+
+.mira-textarea {
+    resize: vertical;
+    min-height: 98px;
+    line-height: 1.55;
+}
+
+.mira-input-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 18px;
+}
+
+.mira-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 42px;
+    padding: 0 16px;
+    border-radius: 12px;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: transform 0.08s ease, border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.mira-btn:hover {
+    transform: translateY(-1px);
+}
+
+.mira-btn:disabled {
+    opacity: 0.6;
+    cursor: progress;
+    transform: none;
+}
+
+.mira-btn-primary {
+    color: #ffffff;
+    border: 1px solid transparent;
+    background: linear-gradient(135deg, #2e7df4 0%, #1f6feb 100%);
+    box-shadow: 0 10px 20px rgba(31, 111, 235, 0.18);
+}
+
+.mira-btn-secondary {
+    color: var(--mira-text);
+    border: 1px solid var(--mira-border);
+    background: #ffffff;
+}
+
+.mira-btn-small {
+    min-height: 34px;
+    padding: 0 12px;
+    font-size: 12px;
+}
+
+.mira-response-shell {
+    padding-top: 20px;
+}
+
+.mira-responses {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.mira-empty-state {
+    border: 1px dashed var(--mira-border-strong);
+    border-radius: 18px;
+    background: linear-gradient(180deg, #fbfcfe 0%, #f7faff 100%);
+    padding: 28px;
+}
+
+.mira-empty-state h4,
+.mira-summary-title,
+.mira-report-title,
+.mira-response-card h4 {
+    margin: 0 0 8px;
+    font-size: 16px;
+    line-height: 1.3;
+    font-weight: 700;
+    color: var(--mira-text);
+}
+
+.mira-response-card {
+    padding: 20px 22px;
+    overflow: hidden;
+    background:
+        linear-gradient(180deg, rgba(31, 111, 235, 0.02), rgba(255, 255, 255, 0) 52%),
+        var(--mira-card);
+}
+
+.mira-response-error::before {
+    background: linear-gradient(180deg, #f7a36b 0%, #d46b08 100%);
+}
+
+.mira-response-header {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid #ecf1f8;
+}
+
+.mira-response-title-block {
+    display: grid;
+    gap: 6px;
+}
+
+.mira-response-title {
+    margin: 0;
+    font-size: 20px;
+    line-height: 1.25;
+    font-weight: 700;
+    color: var(--mira-text);
+}
+
+.mira-response-subtitle,
+.mira-response-meta,
+.mira-response-question,
+.mira-summary-footnote {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--mira-muted);
+}
+
+.mira-response-question {
+    font-style: italic;
+}
+
+.mira-kpi-strip-card {
+    margin-top: 14px;
+    border: 1px solid var(--mira-border);
+    border-radius: 18px;
+    background: linear-gradient(180deg, #fcfdff 0%, #f8fbff 100%);
+    padding: 16px 18px;
+}
+
+.mira-kpi-strip {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.mira-kpi-card {
+    display: grid;
+    gap: 6px;
+    min-height: 118px;
+    padding: 14px;
+    border-radius: 16px;
+    border: 1px solid var(--mira-border);
+    background: #ffffff;
+}
+
+.mira-kpi-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mira-muted);
+}
+
+.mira-kpi-value {
+    font-size: 24px;
+    line-height: 1.1;
+    color: var(--mira-text);
+}
+
+.mira-kpi-helper {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: var(--mira-muted);
+}
+
+.mira-status-good {
+    border-color: rgba(19, 121, 91, 0.22);
+    background: linear-gradient(180deg, rgba(19, 121, 91, 0.07), #ffffff 72%);
+}
+
+.mira-status-watch {
+    border-color: rgba(183, 121, 31, 0.24);
+    background: linear-gradient(180deg, rgba(183, 121, 31, 0.08), #ffffff 72%);
+}
+
+.mira-status-critical {
+    border-color: rgba(192, 86, 33, 0.22);
+    background: linear-gradient(180deg, rgba(192, 86, 33, 0.08), #ffffff 72%);
+}
+
+.mira-statement-card,
+.mira-summary-card,
+.mira-list-card,
+.mira-slide-card,
+.mira-inline-list {
+    border: 1px solid var(--mira-border);
+    border-radius: 18px;
+    background: var(--mira-card-soft);
+    padding: 16px 18px;
+}
+
+.mira-statement-card {
+    margin-bottom: 14px;
+}
+
+.mira-statement-card-compact {
+    padding-bottom: 14px;
+}
+
+.mira-summary-grid,
+.mira-followup-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 14px;
+}
+
+.mira-summary-grid-main {
+    margin-top: 16px;
+}
+
+.mira-followup-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mira-summary-card,
+.mira-list-card {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.mira-summary-card-wide {
+    grid-column: 1 / -1;
+}
+
+.mira-summary-subtitle {
+    margin-top: -4px;
+}
+
+.mira-metric-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.mira-summary-card-wide .mira-metric-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.mira-metric-chip {
+    min-width: 132px;
+    display: grid;
+    gap: 3px;
+    padding: 10px 12px;
+    border-radius: 14px;
+    border: 1px solid var(--mira-border);
+    background: #ffffff;
+}
+
+.mira-summary-card-wide .mira-metric-chip {
+    min-width: 0;
+}
+
+.mira-tone-good {
+    border-color: rgba(19, 121, 91, 0.22);
+    background: rgba(19, 121, 91, 0.06);
+}
+
+.mira-tone-watch {
+    border-color: rgba(183, 121, 31, 0.28);
+    background: rgba(183, 121, 31, 0.08);
+}
+
+.mira-tone-critical {
+    border-color: rgba(192, 86, 33, 0.26);
+    background: rgba(192, 86, 33, 0.08);
+}
+
+.mira-metric-label {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mira-muted);
+}
+
+.mira-metric-value {
+    font-size: 18px;
+    line-height: 1.2;
+    color: var(--mira-text);
+}
+
+.mira-metric-note {
+    font-size: 11px;
+    color: var(--mira-muted);
+}
+
+.mira-bullet-list {
+    margin: 0;
+    padding-left: 18px;
+    display: grid;
+    gap: 8px;
+    color: var(--mira-text);
+}
+
+.mira-bullet-list li {
+    line-height: 1.55;
+}
+
+.mira-note-card {
+    background: #fffaf3;
+    border-color: #f0dcc0;
+}
+
+.mira-priority-card {
+    background: linear-gradient(180deg, rgba(31, 111, 235, 0.05), #ffffff 78%);
+}
+
+.mira-ai-placeholder-card {
+    border: 1px dashed var(--mira-border-strong);
+    border-radius: 18px;
+    background: linear-gradient(180deg, #fbfcfe 0%, #f6f8fc 100%);
+    padding: 16px 18px;
+}
+
+.mira-visual-stack {
+    display: grid;
+    gap: 10px;
+}
+
+.mira-summary-card-wide .mira-visual-stack {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mira-visual-card {
+    display: grid;
+    gap: 8px;
+    padding: 12px 14px;
+    border-radius: 14px;
+    border: 1px solid #e7edf6;
+    background: #ffffff;
+}
+
+.mira-visual-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mira-muted);
+}
+
+.mira-split-bar,
+.mira-progress-rail {
+    display: flex;
+    width: 100%;
+    min-height: 10px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #eaf0f7;
+}
+
+.mira-split-segment,
+.mira-progress-fill {
+    display: block;
+    min-width: 0;
+    height: 10px;
+}
+
+.mira-segment-good {
+    background: #33a27a;
+}
+
+.mira-segment-watch {
+    background: #d09a3c;
+}
+
+.mira-segment-critical {
+    background: #d77049;
+}
+
+.mira-segment-neutral {
+    background: #87a6d9;
+}
+
+.mira-visual-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+}
+
+.mira-visual-meta-item {
+    font-size: 12px;
+    color: var(--mira-muted);
+}
+
+.mira-value-segments {
+    display: grid;
+    gap: 8px;
+}
+
+.mira-value-segment {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    border-radius: 12px;
+    border: 1px solid var(--mira-border);
+    background: #fbfdff;
+}
+
+.mira-value-segment-label {
+    font-size: 12px;
+    color: var(--mira-muted);
+}
+
+.mira-value-segment-value {
+    font-size: 13px;
+    color: var(--mira-text);
+}
+
+.mira-slide-card {
+    margin-top: 14px;
+    background:
+        linear-gradient(135deg, rgba(31, 111, 235, 0.08), rgba(255, 255, 255, 0) 55%),
+        #ffffff;
+}
+
+.mira-slide-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 14px;
+}
+
+.mira-slide-text {
+    margin: 6px 0 0;
+    font-size: 15px;
+    line-height: 1.6;
+    color: var(--mira-text);
+}
+
+.mira-data-used {
+    margin-top: 14px;
+    border: 1px solid var(--mira-border);
+    border-radius: 18px;
+    background: #fbfcfe;
+    overflow: hidden;
+}
+
+.mira-data-used[open] {
+    background: #ffffff;
+}
+
+.mira-data-used-summary {
+    cursor: pointer;
+    list-style: none;
+    padding: 16px 18px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--mira-text);
+    border-bottom: 1px solid transparent;
+}
+
+.mira-data-used[open] .mira-data-used-summary {
+    border-bottom-color: var(--mira-border);
+}
+
+.mira-data-used-summary::-webkit-details-marker {
+    display: none;
+}
+
+.mira-data-used-body {
+    display: grid;
+    gap: 12px;
+    padding: 0 18px 18px;
+}
+
+.mira-inline-items {
+    margin-top: 10px;
+}
+
+.mira-table-wrap {
+    overflow-x: auto;
+    border-radius: 14px;
+    border: 1px solid var(--mira-border);
+    background: #ffffff;
+}
+
+.mira-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.mira-table th,
+.mira-table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid #edf2f7;
+    white-space: nowrap;
+}
+
+.mira-table th {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--mira-muted);
+    background: #f8fbff;
+}
+
+.mira-report-card {
+    background: linear-gradient(180deg, rgba(31, 111, 235, 0.03), rgba(255, 255, 255, 0) 52%), var(--mira-card);
+}
+
+.mira-report-body {
+    display: grid;
+    gap: 14px;
+}
+
+@media (max-width: 1100px) {
+    .mira-kpi-strip,
+    .mira-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .mira-summary-card-wide .mira-metric-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 860px) {
+    .mira-page-card {
+        padding: 18px;
+    }
+
+    .mira-hero-card,
+    .mira-panel-head,
+    .mira-slide-head {
+        flex-direction: column;
+    }
+
+    .mira-kpi-strip,
+    .mira-summary-grid,
+    .mira-followup-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .mira-summary-card-wide .mira-metric-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .mira-summary-card-wide .mira-visual-stack {
+        grid-template-columns: 1fr;
+    }
+
+    .mira-input-actions {
+        flex-direction: column;
+    }
+}

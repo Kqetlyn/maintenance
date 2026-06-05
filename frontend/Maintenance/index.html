@@ -11,6 +11,7 @@
 
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/Maintenance/style.css?v=20260604-mr-search-1">
+    <link rel="stylesheet" href="/shared/mira/mira-panel.css?v=20260605-mira-ui-8">
 
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
@@ -23,58 +24,13 @@
                 <h1 id="maintenance-page-title">Preventive Maintenance Schedule</h1>
                 <p class="subtitle" id="maintenance-page-subtitle">Monthly PM planning, completion tracking, backlog, and compliance overview.</p>
             </div>
-            <div class="header-right">
-                <div id="pm-global-filters" class="pm-global-filters" hidden>
-                    <label class="pm-filter">
-                        <span>Scope</span>
-                        <select id="pm-category-filter">
-                            <option value="all">Both</option>
-                            <option value="equipment">Production Equipment</option>
-                            <option value="utility">Utilities</option>
-                        </select>
-                    </label>
-                    <label class="pm-filter">
-                        <span>Stage</span>
-                        <select id="pm-stage-filter">
-                            <option value="all">Both</option>
-                            <option value="stage1">Stage 1</option>
-                            <option value="stage2">Stage 2</option>
-                        </select>
-                    </label>
-                    <label class="pm-filter">
-                        <span>Year</span>
-                        <select id="pm-year-filter"></select>
-                    </label>
-                    <label class="pm-filter">
-                        <span>Month</span>
-                        <select id="pm-month-filter"></select>
-                    </label>
-                    <label class="pm-filter">
-                        <span>System / Area</span>
-                        <select id="pm-system-filter">
-                            <option value="all">All</option>
-                        </select>
-                    </label>
-                    <label class="pm-filter">
-                        <span>Asset Group</span>
-                        <select id="pm-asset-group-filter">
-                            <option value="all">All</option>
-                        </select>
-                    </label>
-                    <label class="pm-filter">
-                        <span>Status</span>
-                        <select id="pm-status-filter">
-                            <option value="all">All</option>
-                        </select>
-                    </label>
-                </div>
-            </div>
         </header>
 
         <section class="card-shell view-toggle maintenance-tab-toggle">
             <button type="button" class="toggle-btn active" data-view-tab="overview">PM Schedule</button>
             <button type="button" class="toggle-btn" data-view-tab="spare_parts">Spare Parts</button>
             <button type="button" class="toggle-btn" data-view-tab="downtime">Downtime</button>
+            <button type="button" class="toggle-btn" data-view-tab="mira" data-mira-tab>MIRA</button>
         </section>
 
         <section id="overview-view" class="maintenance-view">
@@ -1237,6 +1193,10 @@
             </div>
         </section>
 
+        <section id="mira-view" class="maintenance-view hidden">
+            <div id="mira-root" class="mira-root"></div>
+        </section>
+
         <section id="utility-view" class="maintenance-view hidden">
             <div id="pm-scope" class="pm-module" hidden>
                 <p id="pm-sc-context" class="pm-context-line">Preventive maintenance schedule tracking.</p>
@@ -1512,8 +1472,9 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/Maintenance/script.js?v=20260604-mr-search-1" defer></script>
-    <script src="/Maintenance/pm-schedule.js?v=20260603-pm-pending-9" defer></script>
+    <script src="/Maintenance/script.js?v=20260604-legacy-cleanup-1" defer></script>
+    <script src="/Maintenance/pm-schedule.js?v=20260605-pm-header-filters-11" defer></script>
+    <script src="/shared/mira/mira-panel.js?v=20260605-mira-ui-8" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->
     <div id="pau-modal" class="pau-modal-overlay" hidden>
