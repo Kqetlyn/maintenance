@@ -76,6 +76,31 @@ def _summary_response(intent: str, data: dict, *, filters: dict | None = None, r
     })
 
 
+@mira_bp.route("/overview", methods=["GET", "POST"])
+def overview():
+    """FAST verified-metrics overview (NO LLM) — renders KPI cards immediately.
+
+    Numbers are deterministic backend KPIs. The AI wording is fetched separately
+    via /ai-summary so the page never blocks on Ollama.
+    """
+    raw = _read_filters()
+    filters = ctx.normalize_filters(raw)
+    data = kpi.get_dashboard_kpi_summary(filters)
+    status = get_provider_status()
+    pres = presentation.build_presentation(
+        "monthly_summary", data, filters, provider_name=status["provider"],
+    )
+    guarded = guard.guard_summary(data, mode="kpi_summary")
+    return jsonify({
+        "ok": True,
+        "filters": filters,
+        "presentation": guard._deep_redact(pres),
+        "data": guarded["data"],
+        "provider_status": status,
+        "draft_label": config.DRAFT_LABEL,
+    })
+
+
 @mira_bp.route("/ai-summary", methods=["GET", "POST"])
 def ai_summary():
     """Verified metrics -> Ollama (or rule-based) -> structured summary JSON.

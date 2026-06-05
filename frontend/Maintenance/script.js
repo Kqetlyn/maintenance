@@ -95,7 +95,7 @@ document.addEventListener("DOMContentLoaded", () => {
         { value: "custom", label: "Custom Range" },
     ];
     const state = {
-        activeView: ["overview", "spare_parts", "downtime", "mira"].includes(initialView) ? initialView : "overview",
+        activeView: ["mira_overview", "overview", "spare_parts", "downtime", "mira"].includes(initialView) ? initialView : "mira_overview",
         overviewMonth: "",
         overviewCategory: "all",
         overviewStatus: "all",
@@ -244,6 +244,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const isAnalysis = state.activeView === "analysis";
         const isDowntime = state.activeView === "downtime";
         const isMira = state.activeView === "mira";
+        const isMiraOverview = state.activeView === "mira_overview";
         document.body.classList.toggle("maintenance-equipment", isEquipment);
         document.body.classList.toggle("maintenance-spare-parts", isSpareParts);
         document.body.classList.toggle("maintenance-analysis", isAnalysis);
@@ -253,8 +254,9 @@ document.addEventListener("DOMContentLoaded", () => {
         if (weeklyCompletionCard) {
             weeklyCompletionCard.hidden = !isOverview && !isEquipment;
         }
+        document.getElementById("mira-overview-view")?.classList.toggle("hidden", !isMiraOverview);
         document.getElementById("overview-view")?.classList.toggle("hidden", !isOverview);
-        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis || isDowntime || isMira);
+        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis || isDowntime || isMira || isMiraOverview);
         document.getElementById("spare-parts-view")?.classList.toggle("hidden", !isSpareParts);
         document.getElementById("analysis-view")?.classList.toggle("hidden", !isAnalysis);
         document.getElementById("downtime-view")?.classList.toggle("hidden", !isDowntime);
@@ -320,6 +322,13 @@ document.addEventListener("DOMContentLoaded", () => {
     async function loadActiveView() {
         resetViewState();
         updateViewCopy();
+
+        if (state.activeView === "mira_overview") {
+            // MIRA Overview is self-contained (shared/mira/mira-overview.js): it fetches
+            // verified metrics + the AI summary itself. Render/refresh on activation.
+            if (typeof window.renderMiraOverview === "function") window.renderMiraOverview();
+            return;
+        }
 
         if (state.activeView === "downtime") {
             await loadEmbeddedDowntimeView();
