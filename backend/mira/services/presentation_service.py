@@ -555,8 +555,16 @@ def _management_view_data_used(data: dict, filters: dict, notes: list[str]) -> d
     spare = data.get("spare_parts") or {}
     work_orders = data.get("work_orders", {}) or {}
     downtime = data.get("downtime_summary", {}) or {}
-    applied = [f"Period: {data.get('window') or ctx.month_label(filters)}", f"Scope: {_scope_label(filters)}"]
+    _w = ctx.resolved_window(filters)
+    applied = [
+        f"Period: {data.get('window') or ctx.month_label(filters)}",
+        f"Period mode: {filters.get('period_mode')}",
+        f"Date range: {_w['start_date'].isoformat()} to {_w['end_date'].isoformat()}",
+        f"Scope: {_scope_label(filters)}",
+    ]
     return {
+        "period_mode": filters.get("period_mode"),
+        "date_range": f"{_w['start_date'].isoformat()} to {_w['end_date'].isoformat()}",
         "source_tables": [
             "Downtime dashboard work-order rows",
             "PM schedule task payload",

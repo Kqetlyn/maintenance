@@ -71,9 +71,13 @@ def _downtime_management(filters: dict) -> dict:
 
 
 def _pm_payload(filters: dict) -> dict:
-    key = ("pm", filters["stage"], filters["year"], filters["month"])
+    mode = filters.get("period_mode")
+    start = filters.get("start")
+    end = filters.get("end")
+    key = ("pm", filters["stage"], filters["year"], filters["month"], mode, str(start), str(end))
     return _memoized(key, lambda: build_pm_schedule_payload(
         stage=filters["stage"], year=filters["year"], month=filters["month"],
+        period_mode=mode, start=start, end=end,
     ))
 
 

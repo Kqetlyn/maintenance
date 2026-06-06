@@ -163,12 +163,21 @@
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(baseFilters ? { question, filters: baseFilters } : { question }),
             });
-            const json = await res.json();
             thinking.remove();
-            renderAnswer(json);
+            if (!res.ok) {
+                if (res.status === 404) {
+                    append(botBubble("MIRA's chat isn't loaded on the running server yet — it's an older build. "
+                        + "Please restart the backend (run_server.cmd or python app.py), then ask again."));
+                } else {
+                    append(botBubble(`MIRA backend returned an error (${res.status}). Please try again, or restart the backend.`));
+                }
+                return;
+            }
+            renderAnswer(await res.json());
         } catch (err) {
             thinking.remove();
-            append(botBubble("Data unavailable — the MIRA backend could not be reached for the selected filter."));
+            append(botBubble("Can't reach the MIRA backend. Make sure the server is running "
+                + "(run_server.cmd / python app.py) and reachable, then try again."));
         } finally {
             busy = false;
         }

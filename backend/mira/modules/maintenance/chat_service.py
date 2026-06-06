@@ -126,14 +126,27 @@ def extract_period(question: str | None) -> dict:
 
 
 def resolve_filters(question: str, base_filters: dict | None) -> dict:
-    """Merge base (dashboard) filters with the question period (question wins)."""
+    """Merge base (dashboard) filters with the question period (question wins).
+
+    No explicit period in the question -> keep the dashboard base (default YTD).
+    An explicit month/FY/YTD in the question overrides the base period_mode too, so
+    "April 2026" gives April (not YTD) even when the dashboard base is YTD.
+    """
     base = ctx.normalize_filters(base_filters)
     period = extract_period(question)
     merged = dict(base)
     if "year" in period:
         merged["year"] = period["year"]
-    if "month" in period:                       # may be None for explicit YTD
+    if period.get("_fy"):
+        merged["period_mode"] = "financial_year"
+        merged["month"] = None
+    elif period.get("_ytd"):
+        merged["period_mode"] = "ytd"
+        merged["month"] = None
+    elif period.get("month"):                   # explicit month named in the question
+        merged["period_mode"] = "monthly"
         merged["month"] = period["month"]
+    # else: no period named -> keep base (dashboard) period, default YTD.
     return ctx.normalize_filters(merged)
 
 
@@ -451,9 +464,13 @@ def _follow_up(mr: dict, pm: dict) -> list[str]:
 
 
 def _view_data_used(intent: str, f: dict, warnings: list) -> dict:
+    w = ctx.resolved_window(f)
     return {
+        "period_mode": f.get("period_mode"),
+        "period_label": ctx.month_label(f),
+        "date_range": f"{w['start_date'].isoformat()} to {w['end_date'].isoformat()}",
         "source_tables": ["Downtime MR/WO rows", "PM schedule payload", "Spare parts payload"],
-        "filters_applied": [f"Period: {ctx.month_label(f)}", f"Stage: {f.get('stage')}",
+        "filters_applied": [f"Period: {ctx.month_label(f)} ({f.get('period_mode')})", f"Stage: {f.get('stage')}",
                             f"Asset category: {f.get('mainAssetGroup') or 'All'}"],
         "data_warnings": warnings or [],
         "last_refreshed": datetime.now().astimezone().strftime("%d %b %Y, %I:%M %p"),
@@ -513,7 +530,9 @@ def answer(question: str, base_filters: dict | None) -> dict:
             # COMPACT context only — the key_numbers already hold every verified figure.
             # Sending the full nested dicts bloats the prompt and makes inference very slow.
             compact = {
-                "question": question, "intent": built["intent"], "period": period,
+                "question": question, "intent": built["intent"],
+                "period_mode": f.get("period_mode"), "period_label": period,
+                "date_range": (built["view_data_used"] or {}).get("date_range"),
                 "verified_key_numbers": built["key_numbers"],
                 "recommended_follow_up": built["follow_up"],
                 "data_warnings": built["warnings"],

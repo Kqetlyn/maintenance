@@ -18,6 +18,7 @@ real planning-based number rather than "N/A".
 
 from __future__ import annotations
 
+import calendar
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -513,45 +514,59 @@ def _kpis(tasks, *, today, sel_year, sel_month, mapped_asset_total):
     }
 
 
-def _completion_year_month(task):
-    """(year, month) of a task's manual completion date, or None."""
+def _task_planned_date(task):
+    raw = task.get("plannedDate")
+    if raw:
+        try:
+            return datetime.fromisoformat(str(raw)[:10]).date()
+        except Exception:
+            pass
+    y, m = task.get("plannedYear"), task.get("plannedMonth")
+    if y and m:
+        try:
+            return date(int(y), int(m), 1)
+        except Exception:
+            return None
+    return None
+
+
+def _completion_date(task):
+    """Manual completion date (date), or None."""
     raw = task.get("completionDate") or task.get("actualCompletionDate")
     if not raw:
         return None
     text = str(raw).strip()
     try:
-        parsed = datetime.fromisoformat(text[:19].replace("Z", ""))
-        return (parsed.year, parsed.month)
+        return datetime.fromisoformat(text[:19].replace("Z", "")).date()
     except Exception:
         pass
-    if len(text) >= 7 and text[4:5] == "-":
+    if len(text) >= 10:
         try:
-            return (int(text[:4]), int(text[5:7]))
-        except ValueError:
+            return date(int(text[:4]), int(text[5:7]), int(text[8:10]))
+        except (ValueError, IndexError):
             return None
     return None
 
 
-def _period_kpis(tasks, *, sel_year, sel_month):
-    """PM KPIs scoped to the SELECTED month/year — matches the PM dashboard page.
+def _period_kpis(tasks, *, win_start, win_end):
+    """PM KPIs scoped to a date WINDOW (YTD / month / FY / full year / custom).
 
     Completion is MANUAL ONLY (isDone). Compliance = on-time completed / scheduled
-    in the selected month. Overdue / backlog are scoped to the selected month's
-    tasks (not the whole dataset). Scheduled week/date is only the target period.
+    in the window. Overdue / backlog are scoped to the window's tasks (planned date
+    inside the window). Scheduled date/week is only the target period.
     """
-    month_tasks = [t for t in tasks if t.get("plannedMonth") == sel_month and t.get("plannedYear") == sel_year]
-    year_tasks = [t for t in tasks if t.get("plannedYear") == sel_year]
-    scheduled = len(month_tasks)
-    completed = sum(
-        1 for t in year_tasks
-        if t.get("isDone") and _completion_year_month(t) == (sel_year, sel_month)
-    )
-    on_time = sum(1 for t in month_tasks if t.get("isOnTimeCompleted"))
-    overdue = sum(1 for t in month_tasks if t.get("isOverdueOp"))
-    backlog = sum(1 for t in month_tasks if t.get("isBacklog"))
-    deferred = sum(1 for t in month_tasks if t.get("isDeferred"))
-    late = sum(1 for t in month_tasks if t.get("isLateCompleted"))
-    no_pic = sum(1 for t in month_tasks if not str(t.get("contractorOrPIC") or "").strip())
+    def in_win(d):
+        return bool(d and win_start <= d <= win_end)
+
+    period_tasks = [t for t in tasks if in_win(_task_planned_date(t))]
+    scheduled = len(period_tasks)
+    completed = sum(1 for t in period_tasks if t.get("isDone") and in_win(_completion_date(t)))
+    on_time = sum(1 for t in period_tasks if t.get("isOnTimeCompleted"))
+    overdue = sum(1 for t in period_tasks if t.get("isOverdueOp"))
+    backlog = sum(1 for t in period_tasks if t.get("isBacklog"))
+    deferred = sum(1 for t in period_tasks if t.get("isDeferred"))
+    late = sum(1 for t in period_tasks if t.get("isLateCompleted"))
+    no_pic = sum(1 for t in period_tasks if not str(t.get("contractorOrPIC") or "").strip())
     compliance = round(on_time / scheduled * 100, 1) if scheduled else None
     return {
         "scheduledInMonth": scheduled,
@@ -564,12 +579,40 @@ def _period_kpis(tasks, *, sel_year, sel_month):
         "deferredInMonth": deferred,
         "lateInMonth": late,
         "noPicInMonth": no_pic,
-        "yearTaskCount": len(year_tasks),
-        "byStage": _counter_to_chart(Counter(t["stage"] for t in month_tasks), order=["Stage 1", "Stage 2"]),
-        "byAssetCategory": _counter_to_chart(Counter(t["mainAssetGroup"] for t in month_tasks), top=10),
+        "yearTaskCount": scheduled,
+        "byStage": _counter_to_chart(Counter(t["stage"] for t in period_tasks), order=["Stage 1", "Stage 2"]),
+        "byAssetCategory": _counter_to_chart(Counter(t["mainAssetGroup"] for t in period_tasks), top=10),
         "byFunctionalLocation": _counter_to_chart(
-            Counter(t.get("functionalLocationLabel") or "Unassigned" for t in month_tasks), top=10),
+            Counter(t.get("functionalLocationLabel") or "Unassigned" for t in period_tasks), top=10),
     }
+
+
+def _pm_resolve_window(sel_year, sel_month, period_mode, today, start=None, end=None):
+    """Date window for the PM period KPIs, honouring period_mode (default YTD)."""
+    mode = (period_mode or ("monthly" if sel_month else "ytd")).lower()
+    if mode == "monthly" and sel_month:
+        last = calendar.monthrange(sel_year, sel_month)[1]
+        return date(sel_year, sel_month, 1), date(sel_year, sel_month, last)
+    if mode == "custom" and start and end:
+        s = start if isinstance(start, date) else _coerce_date(start)
+        e = end if isinstance(end, date) else _coerce_date(end)
+        if s and e and s <= e:
+            return s, e
+    if mode == "financial_year":
+        return date(sel_year - 1, 4, 1), min(date(sel_year, 3, 31), today)
+    if mode == "full_year":
+        return date(sel_year, 1, 1), date(sel_year, 12, 31)
+    # ytd (default): current year -> Jan 1..today; past year -> full year.
+    if sel_year == today.year:
+        return date(sel_year, 1, 1), today
+    return date(sel_year, 1, 1), date(sel_year, 12, 31)
+
+
+def _coerce_date(value):
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except Exception:
+        return None
 
 
 def _data_quality(tasks):
@@ -628,7 +671,7 @@ def _stage_breakdown(tasks):
     return _counter_to_chart(counter, order=[k for k in order if counter.get(k)])
 
 
-def _overview_section(tasks, *, today, sel_year, sel_month, mapped_asset_total):
+def _overview_section(tasks, *, today, sel_year, sel_month, mapped_asset_total, win_start, win_end):
     kpis = _kpis(tasks, today=today, sel_year=sel_year, sel_month=sel_month,
                  mapped_asset_total=mapped_asset_total)
     dq_counts, dq_rows = _data_quality(tasks)
@@ -661,7 +704,7 @@ def _overview_section(tasks, *, today, sel_year, sel_month, mapped_asset_total):
     }
     return {
         "kpis": kpis,
-        "periodKpis": _period_kpis(tasks, sel_year=sel_year, sel_month=sel_month),
+        "periodKpis": _period_kpis(tasks, win_start=win_start, win_end=win_end),
         "charts": charts,
         "dataQuality": {"counts": dq_counts, "rows": dq_rows},
     }
@@ -679,7 +722,7 @@ def _sort_table(rows):
     )
 
 
-def _scope_section(tasks, *, scope, today, sel_year, sel_month, mapped_asset_total, group_chart_key):
+def _scope_section(tasks, *, scope, today, sel_year, sel_month, mapped_asset_total, group_chart_key, win_start, win_end):
     scoped = [t for t in tasks if t["scope"] == scope]
     kpis = _kpis(scoped, today=today, sel_year=sel_year, sel_month=sel_month,
                  mapped_asset_total=mapped_asset_total)
@@ -710,7 +753,7 @@ def _scope_section(tasks, *, scope, today, sel_year, sel_month, mapped_asset_tot
 
     return {
         "kpis": kpis,
-        "periodKpis": _period_kpis(scoped, sel_year=sel_year, sel_month=sel_month),
+        "periodKpis": _period_kpis(scoped, win_start=win_start, win_end=win_end),
         "charts": charts,
         top_label: _counter_to_chart(top_counter, top=10),
         "tables": {
@@ -773,17 +816,22 @@ def _count_mapped_assets(asset_map, *, stage, scope=None):
 
 
 # ── Public entry point ─────────────────────────────────────────────────────────
-def build_pm_schedule_payload(stage="all", year=None, month=None):
+def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=None, start=None, end=None):
     today = datetime.now().date()
     sel_year = int(year) if year else today.year
     stage_filter = _normalize_stage_filter(stage)
 
     try:
-        sel_month = int(month) if month else today.month
+        sel_month = int(month) if month else None
     except (TypeError, ValueError):
-        sel_month = today.month
-    if not (1 <= sel_month <= 12):
-        sel_month = today.month
+        sel_month = None
+    if sel_month is not None and not (1 <= sel_month <= 12):
+        sel_month = None
+
+    # Period window for the period-scoped KPIs (default YTD when no month/mode).
+    win_start, win_end = _pm_resolve_window(sel_year, sel_month, period_mode, today, start, end)
+    # For the legacy single-month _kpis/charts and the meta label, keep a month value.
+    label_month = sel_month or today.month
 
     all_tasks, asset_map, source_meta = _build_tasks(sel_year, today)
 
@@ -817,16 +865,18 @@ def build_pm_schedule_payload(stage="all", year=None, month=None):
     mapped_total_utility = _count_mapped_assets(asset_map, stage=stage_filter, scope="utility")
 
     overview = _overview_section(
-        tasks, today=today, sel_year=sel_year, sel_month=sel_month,
-        mapped_asset_total=mapped_total_all,
+        tasks, today=today, sel_year=sel_year, sel_month=label_month,
+        mapped_asset_total=mapped_total_all, win_start=win_start, win_end=win_end,
     )
     equipment = _scope_section(
-        tasks, scope="equipment", today=today, sel_year=sel_year, sel_month=sel_month,
+        tasks, scope="equipment", today=today, sel_year=sel_year, sel_month=label_month,
         mapped_asset_total=mapped_total_equipment, group_chart_key="subAssetGroup",
+        win_start=win_start, win_end=win_end,
     )
     utility = _scope_section(
-        tasks, scope="utility", today=today, sel_year=sel_year, sel_month=sel_month,
+        tasks, scope="utility", today=today, sel_year=sel_year, sel_month=label_month,
         mapped_asset_total=mapped_total_utility, group_chart_key="systemArea",
+        win_start=win_start, win_end=win_end,
     )
     schedule = _schedule_section(tasks)
 
@@ -835,7 +885,10 @@ def build_pm_schedule_payload(stage="all", year=None, month=None):
             "stageFilter": stage_filter,
             "year": sel_year,
             "month": sel_month,
-            "monthLabel": MONTH_LABELS[sel_month - 1],
+            "monthLabel": MONTH_LABELS[label_month - 1],
+            "periodMode": (period_mode or ("monthly" if sel_month else "ytd")),
+            "periodStart": win_start.isoformat(),
+            "periodEnd": win_end.isoformat(),
             "availableYears": years,
             "availableStages": list(STAGE_VALUES),
             "today": today.isoformat(),

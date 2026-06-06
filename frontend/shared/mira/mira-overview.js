@@ -17,10 +17,19 @@
     let mounted = false;
     let loadToken = 0;
     const state = {
+        periodMode: "ytd",                       // default: Year-to-Date
         year: String(new Date().getFullYear()),
         month: String(new Date().getMonth() + 1),
         stage: "all",
     };
+
+    function periodLabel() {
+        const y = state.year;
+        if (state.periodMode === "monthly") return `${MONTHS[Number(state.month) - 1]} ${y}`;
+        if (state.periodMode === "full_year") return `Full Year ${y}`;
+        if (state.periodMode === "financial_year") return `FY${y}`;
+        return Number(y) === new Date().getFullYear() ? `YTD ${y}` : `Full Year ${y}`;
+    }
 
     // ── small safe DOM helpers (never inject data via innerHTML) ────────────────
     function el(tag, cls, text) {
@@ -45,15 +54,28 @@
         const head = el("section", "mira-ov-head");
         const titleWrap = el("div");
         titleWrap.append(
-            el("div", "mira-ov-eyebrow", "Read-only AI summary generated from verified dashboard data"),
+            el("div", "mira-ov-eyebrow", "Daily maintenance summary generated from verified dashboard data"),
             el("h1", "mira-ov-title", "MIRA Maintenance Intelligence Overview"),
         );
         head.append(titleWrap, buildControls());
         root.append(head, buildStatusRow(), buildBody());
     }
 
+    let monthSelRef = null;
+
     function buildControls() {
         const wrap = el("div", "mira-ov-controls");
+
+        const modeSel = el("select", "mira-ov-select");
+        [["ytd", "YTD"], ["monthly", "Monthly"], ["full_year", "Full Year"], ["financial_year", "Financial Year"]]
+            .forEach(([v, l]) => { const o = el("option", null, l); o.value = v; modeSel.append(o); });
+        modeSel.value = state.periodMode;
+        modeSel.addEventListener("change", () => {
+            state.periodMode = modeSel.value;
+            if (monthSelRef) monthSelRef.disabled = state.periodMode !== "monthly";
+            loadOverview();
+        });
+
         const yearSel = el("select", "mira-ov-select");
         const nowYear = new Date().getFullYear();
         [nowYear, nowYear - 1, nowYear - 2].forEach((y) => {
@@ -65,7 +87,9 @@
         const monthSel = el("select", "mira-ov-select");
         MONTHS.forEach((m, i) => { const o = el("option", null, m); o.value = String(i + 1); monthSel.append(o); });
         monthSel.value = state.month;
+        monthSel.disabled = state.periodMode !== "monthly";  // secondary unless Monthly
         monthSel.addEventListener("change", () => { state.month = monthSel.value; loadOverview(); });
+        monthSelRef = monthSel;
 
         const stageSel = el("select", "mira-ov-select");
         [["all", "All Stages"], ["stage1", "Stage 1"], ["stage2", "Stage 2"]].forEach(([v, l]) => {
@@ -74,7 +98,7 @@
         stageSel.value = state.stage;
         stageSel.addEventListener("change", () => { state.stage = stageSel.value; loadOverview(); });
 
-        [["Year", yearSel], ["Month", monthSel], ["Stage", stageSel]].forEach(([label, sel]) => {
+        [["Period", modeSel], ["Year", yearSel], ["Month", monthSel], ["Stage", stageSel]].forEach(([label, sel]) => {
             const f = el("label", "mira-ov-field");
             f.append(el("span", null, label), sel);
             wrap.append(f);
@@ -102,7 +126,8 @@
         body.id = "mira-ov-body";
         body.append(card("Executive Summary", "mira-ov-exec"),
             sectionGrid(), card("Key Issues Detected", "mira-ov-issues"),
-            card("Recommended Follow-Up", "mira-ov-followup"),
+            card("Today's Follow-Up", "mira-ov-today"),
+            card("Recommended Follow-Up (AI)", "mira-ov-followup"),
             card("Maintenance Risk Insight", "mira-ov-risk"),
             card("One-Line Management Summary", "mira-ov-oneline"),
             dataUsedCard());
@@ -157,14 +182,19 @@
 
     // ── Data loading ────────────────────────────────────────────────────────────
     function filtersBody() {
-        return { filters: { year: state.year, month: state.month, stage: state.stage } };
+        const filters = { year: state.year, stage: state.stage, period_mode: state.periodMode };
+        filters.month = state.periodMode === "monthly" ? state.month : null;
+        return { filters };
     }
 
     async function loadOverview() {
         const token = ++loadToken;
-        // Expose the selected period/stage so the floating chat can inherit it (Step 11).
-        window.MIRA_DASHBOARD_FILTERS = { year: state.year, month: state.month, stage: state.stage };
-        setText("mira-ov-st-period", `${MONTHS[Number(state.month) - 1]} ${state.year}`);
+        // Expose the selected period/stage so the floating chat can inherit it (Step 11/12).
+        window.MIRA_DASHBOARD_FILTERS = {
+            year: state.year, stage: state.stage, period_mode: state.periodMode,
+            month: state.periodMode === "monthly" ? state.month : null,
+        };
+        setText("mira-ov-st-period", periodLabel());
         setText("mira-ov-st-validation", "Validating…");
         setText("mira-ov-st-llm", "Checking…");
         // 1) FAST verified metrics + cards (no LLM).
@@ -174,10 +204,22 @@
                 body: JSON.stringify(filtersBody()),
             });
             if (token !== loadToken) return;
-            const json = await res.json();
-            renderVerified(json);
+            if (!res.ok) {
+                const msg = res.status === 404
+                    ? "MIRA Overview isn't loaded on the running server yet — please restart the backend (run_server.cmd / python app.py)."
+                    : `MIRA backend error (${res.status}). Please restart the backend and refresh.`;
+                setText("mira-ov-st-validation", res.status === 404 ? "Backend needs restart" : `Error ${res.status}`);
+                ["mira-ov-exec", "mira-ov-sec-downtime", "mira-ov-sec-pm", "mira-ov-sec-spare"]
+                    .forEach((id) => setBody(id, el("p", "mira-ov-muted", msg)));
+                return;
+            }
+            renderVerified(await res.json());
         } catch (err) {
-            if (token === loadToken) setText("mira-ov-st-validation", "Backend unavailable");
+            if (token === loadToken) {
+                setText("mira-ov-st-validation", "Backend not reachable");
+                setBody("mira-ov-exec", el("p", "mira-ov-muted",
+                    "Can't reach the MIRA backend. Make sure the server is running (run_server.cmd / python app.py), then refresh."));
+            }
             return;
         }
         // 2) ASYNC maintenance risk insights (backend-scored).
@@ -240,7 +282,9 @@
         setBody("mira-ov-exec", el("p", null, execSeed || "Verified metrics loaded. Generating summary…"));
 
         renderList("mira-ov-issues", warnings, "No data quality issues detected for this period.");
-        renderList("mira-ov-followup", (pres && pres.priority_follow_up) || [], "No specific follow-up flagged.");
+        // Today's Follow-Up = verified immediate actions (open MR, overdue PM, data quality).
+        renderList("mira-ov-today", (pres && pres.priority_follow_up) || [], "No immediate follow-up items for this period.");
+        setBody("mira-ov-followup", el("p", "mira-ov-muted", "Generating AI recommendations…"));
         setBody("mira-ov-risk", el("p", "mira-ov-muted",
             "Maintenance risk scoring (WO frequency, severity, recurrence, overdue PM, spare consumption) "
             + "will be shown here in a later phase. This is a placeholder, not a failure prediction."));
