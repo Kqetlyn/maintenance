@@ -1,6 +1,6 @@
 document.addEventListener("DOMContentLoaded", () => {
     const urlParams = new URLSearchParams(window.location.search);
-    const initialView = (urlParams.get("view") || "mira_overview").toLowerCase();
+    const initialView = (urlParams.get("view") || "overview").toLowerCase();
     const UTILITY_INSPECTION_OVERRIDES = {
         "UL-TN-01": [{ month: 1, week: "first" }],
         "UL-TN-02": [{ month: 1, week: "first" }],
@@ -95,7 +95,7 @@ document.addEventListener("DOMContentLoaded", () => {
         { value: "custom", label: "Custom Range" },
     ];
     const state = {
-        activeView: ["mira_overview", "overview", "spare_parts", "downtime"].includes(initialView) ? initialView : "mira_overview",
+        activeView: ["mira_overview", "overview", "spare_parts", "downtime"].includes(initialView) ? initialView : "overview",
         overviewMonth: "",
         overviewCategory: "all",
         overviewStatus: "all",
@@ -243,7 +243,6 @@ document.addEventListener("DOMContentLoaded", () => {
         const isSpareParts = state.activeView === "spare_parts";
         const isAnalysis = state.activeView === "analysis";
         const isDowntime = state.activeView === "downtime";
-        const isMira = state.activeView === "mira";
         const isMiraOverview = state.activeView === "mira_overview";
         document.body.classList.toggle("maintenance-equipment", isEquipment);
         document.body.classList.toggle("maintenance-spare-parts", isSpareParts);
@@ -256,34 +255,33 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         document.getElementById("mira-overview-view")?.classList.toggle("hidden", !isMiraOverview);
         document.getElementById("overview-view")?.classList.toggle("hidden", !isOverview);
-        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis || isDowntime || isMira || isMiraOverview);
+        document.getElementById("utility-view")?.classList.toggle("hidden", isOverview || isSpareParts || isAnalysis || isDowntime || isMiraOverview);
         document.getElementById("spare-parts-view")?.classList.toggle("hidden", !isSpareParts);
         document.getElementById("analysis-view")?.classList.toggle("hidden", !isAnalysis);
         document.getElementById("downtime-view")?.classList.toggle("hidden", !isDowntime);
-        document.getElementById("mira-view")?.classList.toggle("hidden", !isMira);
         document.querySelectorAll("[data-view-tab]").forEach((button) => {
             button.classList.toggle("active", (button.dataset.viewTab || "utility") === state.activeView);
         });
         setText(
             "maintenance-page-title",
-            isOverview
+            isMiraOverview
+                ? "MIRA Daily Maintenance Overview"
+                : isOverview
                 ? "Preventive Maintenance Schedule"
                 : isSpareParts
                 ? "Spare Parts"
-                : isMira
-                ? "MIRA Assistant"
                 : isDowntime
                 ? "Downtime"
                 : "PM Schedule"
         );
         setText(
             "maintenance-page-subtitle",
-            isOverview
+            isMiraOverview
+                ? "AI-assisted daily summary for PM schedule, downtime, and spare parts."
+                : isOverview
                 ? "Monthly PM planning, completion tracking, backlog, and compliance overview."
                 : isSpareParts
                 ? "Inventory and external spare-parts management view"
-                : isMira
-                ? "Local assistant that explains and summarises dashboard KPI outputs — draft analysis for review"
                 : isDowntime
                 ? "Local work-order downtime tracking and review inside the Maintenance dashboard"
                 : "Unified preventive maintenance planning and schedule visibility"
@@ -324,8 +322,8 @@ document.addEventListener("DOMContentLoaded", () => {
         updateViewCopy();
 
         if (state.activeView === "mira_overview") {
-            // MIRA Overview is self-contained (shared/mira/mira-overview.js): it fetches
-            // verified metrics + the AI summary itself. Render/refresh on activation.
+            // Self-contained Daily Maintenance Overview (shared/mira/mira-overview.js):
+            // it fetches verified metrics + the AI summary itself. Render on activation.
             if (typeof window.renderMiraOverview === "function") window.renderMiraOverview();
             return;
         }

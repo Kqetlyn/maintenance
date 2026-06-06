@@ -1,11 +1,11 @@
 /*
- * MIRA Maintenance Intelligence Overview — the first dashboard page.
+ * MIRA Daily Maintenance Overview.
  *
- * Flow: render the page shell -> fetch /api/mira/overview (FAST, verified KPIs,
- * no LLM) and render cards immediately -> fetch /api/mira/ai-summary (async) and
- * fill in the AI wording. Numbers are always the verified backend values; the LLM
- * only writes prose. If Ollama is unavailable, the rule-based fallback is used.
- * Read-only.
+ * An AI-assisted (rule-based fallback) daily report for PM Schedule, Downtime and
+ * Spare Parts, built from verified backend KPIs (/api/mira/overview, /ai-summary).
+ * Read-only: MIRA summarises and explains; it never edits any maintenance record.
+ * MIRA never recommends or assigns severity (S1-S4); severity is only shown if it
+ * already exists in the data.
  */
 (function () {
     "use strict";
@@ -16,13 +16,35 @@
 
     let mounted = false;
     let loadToken = 0;
+    let lastReport = null;          // verified data kept for "Copy report"
+
     const state = {
-        periodMode: "ytd",                       // default: Year-to-Date
+        periodMode: "ytd",          // default suits daily review (YTD-to-date data)
         year: String(new Date().getFullYear()),
         month: String(new Date().getMonth() + 1),
         stage: "all",
     };
 
+    const refs = {};
+
+    function el(tag, className, text) {
+        const node = document.createElement(tag);
+        if (className) node.className = className;
+        if (text != null) node.textContent = text;
+        return node;
+    }
+
+    function mascot(size) {
+        if (typeof window.getMiraMascotSvg === "function") return window.getMiraMascotSvg(size);
+        return `<svg viewBox="0 0 64 64" width="${size}" height="${size}" aria-hidden="true">
+            <circle cx="32" cy="32" r="30" fill="#f7f2ed"/>
+            <rect x="21" y="22" width="22" height="17" rx="8" fill="#243448"/>
+            <circle cx="28" cy="30" r="2.4" fill="#64d9d4"/><circle cx="38" cy="30" r="2.4" fill="#64d9d4"/>
+            <path d="M28 35c1.7 1.6 3.8 2.4 5.8 2.4 2 0 4-.8 5.6-2.3" fill="none" stroke="#9cebe6" stroke-width="2" stroke-linecap="round"/>
+        </svg>`;
+    }
+
+    // ── period helpers ──────────────────────────────────────────────────────────
     function periodLabel() {
         const y = state.year;
         if (state.periodMode === "monthly") return `${MONTHS[Number(state.month) - 1]} ${y}`;
@@ -31,143 +53,213 @@
         return Number(y) === new Date().getFullYear() ? `YTD ${y}` : `Full Year ${y}`;
     }
 
-    // ── small safe DOM helpers (never inject data via innerHTML) ────────────────
-    function el(tag, cls, text) {
-        const n = document.createElement(tag);
-        if (cls) n.className = cls;
-        if (text != null) n.textContent = text;
-        return n;
+    function stageLabel() {
+        return state.stage === "stage1" ? "Stage 1" : state.stage === "stage2" ? "Stage 2" : "All stages";
     }
 
-    window.renderMiraOverview = function renderMiraOverview() {
-        const root = document.getElementById("mira-overview-root");
-        if (!root) return;
-        if (!mounted) {
-            renderShell(root);
-            mounted = true;
-        }
-        loadOverview();
-    };
+    function currentFilters() {
+        return {
+            year: state.year, stage: state.stage, period_mode: state.periodMode,
+            month: state.periodMode === "monthly" ? state.month : null,
+        };
+    }
 
+    function filtersBody() {
+        return { filters: currentFilters() };
+    }
+
+    function num(value) {
+        if (value === null || value === undefined) return null;
+        const n = Number(value);
+        return Number.isFinite(n) ? n : null;
+    }
+
+    // ── overall status (no severity logic) ──────────────────────────────────────
+    function deriveStatus(data) {
+        const wo = (data && data.work_orders) || {};
+        const pm = (data && data.pm_schedule) || {};
+        const dt = (data && data.downtime_summary) || {};
+        const open = num(wo.open);
+        const overdue = num(pm.overdue);
+        const compliance = num(pm.compliance_pct);
+        const missingAsset = num(dt.missing_asset_count);
+
+        let score = 0;
+        if (open !== null && open > 150) score += 2; else if (open !== null && open > 60) score += 1;
+        if (overdue !== null && overdue > 200) score += 2; else if (overdue !== null && overdue > 30) score += 1;
+        if (compliance !== null && compliance < 50) score += 2; else if (compliance !== null && compliance < 80) score += 1;
+        if (missingAsset !== null && missingAsset > 20) score += 1;
+
+        if (score >= 4) return { level: "Critical", tone: "critical" };
+        if (score >= 2) return { level: "Attention", tone: "watch" };
+        return { level: "Normal", tone: "good" };
+    }
+
+    function ruleBasedExecutive(data) {
+        const wo = (data && data.work_orders) || {};
+        const pm = (data && data.pm_schedule) || {};
+        const dt = (data && data.downtime_summary) || {};
+        const parts = [];
+        const status = deriveStatus(data).level.toLowerCase();
+        parts.push(`Maintenance status for ${periodLabel()} (${stageLabel()}) is ${status}.`);
+        if (num(wo.total) !== null) {
+            parts.push(`${fmt(wo.total)} MR were raised, with ${fmt(wo.closed)} closed/confirmed and ${fmt(wo.open)} still open or in progress`
+                + (num(wo.closure_rate_pct) !== null ? ` (closure rate ${fmt(wo.closure_rate_pct)}%).` : "."));
+        }
+        if (num(pm.compliance_pct) !== null || num(pm.overdue) !== null) {
+            parts.push(`PM compliance is ${fmt(pm.compliance_pct)}% with ${fmt(pm.overdue)} overdue PM tasks to follow up.`);
+        }
+        if (num(dt.preventive_count) !== null && num(dt.corrective_count) !== null) {
+            parts.push(`Maintenance mix was ${fmt(dt.preventive_count)} preventive vs ${fmt(dt.corrective_count)} corrective MR.`);
+        }
+        return parts.join(" ");
+    }
+
+    function fmt(v) {
+        if (v === null || v === undefined) return "unavailable";
+        if (typeof v === "number") return Number.isInteger(v) ? v.toLocaleString() : String(v);
+        return String(v);
+    }
+
+    // ── shell ───────────────────────────────────────────────────────────────────
     function renderShell(root) {
         root.innerHTML = "";
-        const head = el("section", "mira-ov-head");
-        const titleWrap = el("div");
-        titleWrap.append(
-            el("div", "mira-ov-eyebrow", "Daily maintenance summary generated from verified dashboard data"),
-            el("h1", "mira-ov-title", "MIRA Maintenance Intelligence Overview"),
-        );
-        head.append(titleWrap, buildControls());
-        root.append(head, buildStatusRow(), buildBody());
+        const shell = el("div", "mira-ov-shell");
+        shell.append(buildHeader(), buildControls(), buildBody());
+        root.append(shell);
     }
 
-    let monthSelRef = null;
+    function buildHeader() {
+        const head = el("header", "mira-ov-header");
+        const brand = el("div", "mira-ov-brand");
+        const logo = el("div", "mira-ov-logo");
+        logo.innerHTML = mascot(46);
+        const copy = el("div");
+        copy.append(
+            el("div", "mira-ov-eyebrow", "MIRA · Maintenance Intelligence"),
+            el("h1", "mira-ov-title", "MIRA Daily Maintenance Overview"),
+            el("p", "mira-ov-subtitle", "AI-assisted daily summary for PM schedule, downtime, and spare parts."),
+        );
+        brand.append(logo, copy);
+
+        const right = el("div", "mira-ov-header-right");
+        const meta = el("div", "mira-ov-meta");
+        refs.metaGenerated = el("span", "mira-ov-meta-item", "Last generated: —");
+        refs.metaPeriod = el("span", "mira-ov-meta-item", "Period: —");
+        refs.metaStage = el("span", "mira-ov-meta-item", "Stage: —");
+        refs.metaLlm = el("span", "mira-ov-chip mira-ov-chip-muted", "Checking AI mode…");
+        meta.append(refs.metaGenerated, refs.metaPeriod, refs.metaStage, refs.metaLlm);
+
+        const actions = el("div", "mira-ov-header-actions");
+        const regen = el("button", "mira-ov-btn mira-ov-btn-primary", "Regenerate Summary");
+        regen.type = "button";
+        regen.addEventListener("click", () => loadOverview());
+        const copyBtn = el("button", "mira-ov-btn mira-ov-btn-ghost", "Copy Report");
+        copyBtn.type = "button";
+        copyBtn.addEventListener("click", copyReport);
+        refs.copyBtn = copyBtn;
+        actions.append(regen, copyBtn);
+
+        right.append(meta, actions);
+        head.append(brand, right);
+        return head;
+    }
 
     function buildControls() {
-        const wrap = el("div", "mira-ov-controls");
-
-        const modeSel = el("select", "mira-ov-select");
-        [["ytd", "YTD"], ["monthly", "Monthly"], ["full_year", "Full Year"], ["financial_year", "Financial Year"]]
-            .forEach(([v, l]) => { const o = el("option", null, l); o.value = v; modeSel.append(o); });
-        modeSel.value = state.periodMode;
-        modeSel.addEventListener("change", () => {
-            state.periodMode = modeSel.value;
-            if (monthSelRef) monthSelRef.disabled = state.periodMode !== "monthly";
-            loadOverview();
-        });
-
-        const yearSel = el("select", "mira-ov-select");
-        const nowYear = new Date().getFullYear();
-        [nowYear, nowYear - 1, nowYear - 2].forEach((y) => {
-            const o = el("option", null, String(y)); o.value = String(y); yearSel.append(o);
-        });
-        yearSel.value = state.year;
-        yearSel.addEventListener("change", () => { state.year = yearSel.value; loadOverview(); });
-
-        const monthSel = el("select", "mira-ov-select");
-        MONTHS.forEach((m, i) => { const o = el("option", null, m); o.value = String(i + 1); monthSel.append(o); });
-        monthSel.value = state.month;
-        monthSel.disabled = state.periodMode !== "monthly";  // secondary unless Monthly
-        monthSel.addEventListener("change", () => { state.month = monthSel.value; loadOverview(); });
-        monthSelRef = monthSel;
-
-        const stageSel = el("select", "mira-ov-select");
-        [["all", "All Stages"], ["stage1", "Stage 1"], ["stage2", "Stage 2"]].forEach(([v, l]) => {
-            const o = el("option", null, l); o.value = v; stageSel.append(o);
-        });
-        stageSel.value = state.stage;
-        stageSel.addEventListener("change", () => { state.stage = stageSel.value; loadOverview(); });
-
-        [["Period", modeSel], ["Year", yearSel], ["Month", monthSel], ["Stage", stageSel]].forEach(([label, sel]) => {
-            const f = el("label", "mira-ov-field");
-            f.append(el("span", null, label), sel);
-            wrap.append(f);
-        });
-        return wrap;
-    }
-
-    function buildStatusRow() {
-        const row = el("section", "mira-ov-status-row");
-        row.id = "mira-ov-status-row";
-        ["mira-ov-st-refresh", "mira-ov-st-period", "mira-ov-st-validation", "mira-ov-st-llm"]
-            .forEach((id, i) => {
-                const chip = el("div", "mira-ov-status-chip");
-                chip.append(el("span", "mira-ov-status-label",
-                    ["Last data refresh", "Selected period", "Data validation", "AI provider"][i]));
-                const val = el("strong", "mira-ov-status-value", "…"); val.id = id;
-                chip.append(val);
-                row.append(chip);
+        const wrap = el("section", "mira-ov-controls");
+        const make = (label, options, value, onChange, disabled) => {
+            const field = el("label", "mira-ov-field");
+            field.append(el("span", "mira-ov-field-label", label));
+            const sel = el("select", "mira-ov-select");
+            options.forEach(([v, l]) => {
+                const o = el("option", null, l); o.value = v; if (v === value) o.selected = true; sel.append(o);
             });
-        return row;
+            sel.disabled = !!disabled;
+            sel.addEventListener("change", () => { onChange(sel.value); loadOverview(); });
+            field.append(sel);
+            return { field, sel };
+        };
+        const period = make("Period", [["ytd", "YTD"], ["monthly", "Monthly"], ["full_year", "Full Year"], ["financial_year", "Financial Year"]],
+            state.periodMode, (v) => { state.periodMode = v; if (refs.monthSel) refs.monthSel.disabled = v !== "monthly"; });
+        const year = make("Year", [0, 1, 2].map((d) => { const y = String(new Date().getFullYear() - d); return [y, y]; }),
+            state.year, (v) => { state.year = v; });
+        const month = make("Month", MONTHS.map((m, i) => [String(i + 1), m]), state.month, (v) => { state.month = v; }, state.periodMode !== "monthly");
+        refs.monthSel = month.sel;
+        const stage = make("Stage", [["all", "All stages"], ["stage1", "Stage 1"], ["stage2", "Stage 2"]], state.stage, (v) => { state.stage = v; });
+        wrap.append(period.field, year.field, month.field, stage.field);
+        return wrap;
     }
 
     function buildBody() {
         const body = el("div", "mira-ov-body");
-        body.id = "mira-ov-body";
-        body.append(card("Executive Summary", "mira-ov-exec"),
-            sectionGrid(), card("Key Issues Detected", "mira-ov-issues"),
-            card("Today's Follow-Up", "mira-ov-today"),
-            card("Recommended Follow-Up (AI)", "mira-ov-followup"),
-            card("Maintenance Risk Insight", "mira-ov-risk"),
-            card("One-Line Management Summary", "mira-ov-oneline"),
-            dataUsedCard());
+        body.append(buildStatusCard(), buildKpiGrid(), buildRecommendations(), buildDataUsedCard());
         return body;
     }
 
-    function card(title, bodyId) {
-        const c = el("section", "mira-ov-card");
-        c.append(el("div", "mira-ov-card-title", title));
-        const b = el("div", "mira-ov-card-body"); b.id = bodyId;
-        b.append(el("p", "mira-ov-muted", "Loading…"));
-        c.append(b);
-        return c;
+    function buildStatusCard() {
+        const card = el("section", "mira-ov-status-card");
+        const top = el("div", "mira-ov-status-top");
+        refs.statusBadge = el("span", "mira-ov-status-badge", "Assessing…");
+        refs.statusPeriod = el("span", "mira-ov-status-period", "");
+        top.append(el("div", "mira-ov-status-label", "Overall Maintenance Status"), refs.statusBadge);
+        const exec = el("div", "mira-ov-exec");
+        refs.exec = el("p", "mira-ov-exec-text", "Loading verified maintenance data…");
+        exec.append(refs.exec);
+        const highlights = el("div", "mira-ov-highlights");
+        refs.highlights = el("ul", "mira-ov-list");
+        highlights.append(el("div", "mira-ov-mini-label", "Summary highlights"), refs.highlights);
+        const actions = el("div", "mira-ov-actions-today");
+        refs.actionsToday = el("ul", "mira-ov-list");
+        actions.append(el("div", "mira-ov-mini-label", "Key actions required today"), refs.actionsToday);
+        card.append(top, refs.statusPeriod, exec, el("div", "mira-ov-status-split", ""), highlights, actions);
+        // place highlights + actions side by side
+        const split = card.querySelector(".mira-ov-status-split");
+        split.append(highlights, actions);
+        return card;
     }
 
-    function sectionGrid() {
-        const grid = el("div", "mira-ov-section-grid");
-        [["Downtime / MR Summary", "mira-ov-sec-downtime"],
-         ["PM Schedule Summary", "mira-ov-sec-pm"],
-         ["Spare Parts Summary", "mira-ov-sec-spare"]].forEach(([title, id]) => {
-            const c = el("section", "mira-ov-card mira-ov-section-card");
-            c.append(el("div", "mira-ov-card-title", title));
-            const b = el("div", "mira-ov-section-body"); b.id = id;
-            b.append(el("p", "mira-ov-muted", "Loading verified metrics…"));
-            c.append(b);
-            grid.append(c);
-        });
+    function buildKpiGrid() {
+        const grid = el("div", "mira-ov-kpi-grid");
+        [["PM Schedule Summary", "pm", "teal"], ["Downtime / MR Summary", "downtime", "orange"], ["Spare Parts Summary", "spare", "blue"]]
+            .forEach(([title, key, accent]) => {
+                const card = el("section", `mira-ov-kpi-card mira-ov-accent-${accent}`);
+                card.append(el("div", "mira-ov-kpi-title", title));
+                const bodyEl = el("div", `mira-ov-kpi-body`); bodyEl.id = `mira-ov-kpi-${key}`;
+                bodyEl.append(el("p", "mira-ov-muted", "Loading…"));
+                card.append(bodyEl);
+                grid.append(card);
+            });
         return grid;
     }
 
-    function dataUsedCard() {
-        const c = el("section", "mira-ov-card mira-ov-datacard");
-        const det = el("details", "mira-ov-details");
-        det.append(el("summary", "mira-ov-card-title", "View Data Used"));
-        const b = el("div", "mira-ov-card-body"); b.id = "mira-ov-datadetail";
-        det.append(b);
-        c.append(det);
-        return c;
+    function buildRecommendations() {
+        const card = el("section", "mira-ov-rec-card");
+        card.append(el("div", "mira-ov-kpi-title", "AI Recommendations & Action List"));
+        const grid = el("div", "mira-ov-rec-grid");
+        [["Actions for today", "today"], ["Items to follow up", "followup"],
+         ["Risks to monitor", "risks"], ["Data quality issues", "dq"]].forEach(([label, key]) => {
+            const block = el("div", "mira-ov-rec-block");
+            block.append(el("div", "mira-ov-mini-label", label));
+            const ul = el("ul", "mira-ov-list"); ul.id = `mira-ov-rec-${key}`;
+            ul.append(el("li", "mira-ov-muted", "Loading…"));
+            block.append(ul);
+            grid.append(block);
+        });
+        card.append(grid);
+        return card;
     }
 
+    function buildDataUsedCard() {
+        const card = el("section", "mira-ov-data-card");
+        const det = el("details", "mira-ov-details");
+        det.append(el("summary", "mira-ov-kpi-title", "View Data Used"));
+        const body = el("div"); body.id = "mira-ov-data-detail";
+        det.append(body);
+        card.append(det);
+        return card;
+    }
+
+    // ── render helpers ──────────────────────────────────────────────────────────
     function setBody(id, node) {
         const host = document.getElementById(id);
         if (!host) return;
@@ -175,162 +267,146 @@
         host.append(node);
     }
 
-    function setText(id, text) {
-        const n = document.getElementById(id);
-        if (n) n.textContent = text;
-    }
-
-    // ── Data loading ────────────────────────────────────────────────────────────
-    function filtersBody() {
-        const filters = { year: state.year, stage: state.stage, period_mode: state.periodMode };
-        filters.month = state.periodMode === "monthly" ? state.month : null;
-        return { filters };
-    }
-
-    async function loadOverview() {
-        const token = ++loadToken;
-        // Expose the selected period/stage so the floating chat can inherit it (Step 11/12).
-        window.MIRA_DASHBOARD_FILTERS = {
-            year: state.year, stage: state.stage, period_mode: state.periodMode,
-            month: state.periodMode === "monthly" ? state.month : null,
-        };
-        setText("mira-ov-st-period", periodLabel());
-        setText("mira-ov-st-validation", "Validating…");
-        setText("mira-ov-st-llm", "Checking…");
-        // 1) FAST verified metrics + cards (no LLM).
-        try {
-            const res = await fetch(`${API}/overview`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(filtersBody()),
-            });
-            if (token !== loadToken) return;
-            if (!res.ok) {
-                const msg = res.status === 404
-                    ? "MIRA Overview isn't loaded on the running server yet — please restart the backend (run_server.cmd / python app.py)."
-                    : `MIRA backend error (${res.status}). Please restart the backend and refresh.`;
-                setText("mira-ov-st-validation", res.status === 404 ? "Backend needs restart" : `Error ${res.status}`);
-                ["mira-ov-exec", "mira-ov-sec-downtime", "mira-ov-sec-pm", "mira-ov-sec-spare"]
-                    .forEach((id) => setBody(id, el("p", "mira-ov-muted", msg)));
-                return;
-            }
-            renderVerified(await res.json());
-        } catch (err) {
-            if (token === loadToken) {
-                setText("mira-ov-st-validation", "Backend not reachable");
-                setBody("mira-ov-exec", el("p", "mira-ov-muted",
-                    "Can't reach the MIRA backend. Make sure the server is running (run_server.cmd / python app.py), then refresh."));
-            }
-            return;
-        }
-        // 2) ASYNC maintenance risk insights (backend-scored).
-        fetch(`${API}/risk`, {
-            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(filtersBody()),
-        }).then((r) => r.json()).then((json) => { if (token === loadToken) renderRisk(json); }).catch(() => {});
-
-        // 3) ASYNC AI wording (Ollama or rule-based) — does not block the cards.
-        try {
-            const res = await fetch(`${API}/ai-summary`, {
-                method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(filtersBody()),
-            });
-            if (token !== loadToken) return;
-            const json = await res.json();
-            renderAi(json);
-        } catch (err) {
-            if (token === loadToken) setText("mira-ov-st-llm", "Rule-based fallback active");
-        }
-    }
-
-    function renderRisk(risk) {
-        if (!risk || !Array.isArray(risk.top_assets)) return;
-        const wrap = el("div");
-        wrap.append(el("p", null,
-            `${risk.high_attention_count} High Attention · ${risk.medium_attention_count} Medium Attention `
-            + `of ${risk.assets_assessed} assets assessed for ${risk.period}.`));
-        if (risk.top_assets.length) {
-            const ul = el("ul", "mira-ov-list");
-            risk.top_assets.slice(0, 6).forEach((a) => {
-                ul.append(el("li", null,
-                    `${a.asset_name} — risk ${a.risk_score} (${a.risk_level}, ${a.mr_count} MR)`
-                    + (a.is_placeholder ? " · general area/placeholder" : "")));
-            });
-            wrap.append(ul);
-        }
-        wrap.append(el("p", "mira-ov-muted", risk.note
-            || "Risk is a follow-up signal, not a failure prediction."));
-        setBody("mira-ov-risk", wrap);
-    }
-
-    function renderVerified(json) {
-        const pres = json && json.presentation;
-        const vdu = pres && pres.view_data_used;
-        const status = json && json.provider_status;
-        if (vdu && vdu.last_refreshed) setText("mira-ov-st-refresh", vdu.last_refreshed);
-        const warnings = (vdu && vdu.data_warnings) || (pres && pres.data_notes) || [];
-        setText("mira-ov-st-validation", warnings.length ? `${warnings.length} data warning(s)` : "Validated");
-        if (status) setText("mira-ov-st-llm", status.status || "Rule-based summary");
-
-        const sections = (pres && pres.sections) || {};
-        renderSection("mira-ov-sec-downtime", sections.downtime_work_order_summary);
-        renderSection("mira-ov-sec-pm", sections.pm_schedule_summary);
-        renderSection("mira-ov-sec-spare", sections.spare_parts_summary);
-
-        // Executive summary: start from the verified section summaries (rule-based);
-        // the AI call replaces this with nicer prose if available.
-        const execSeed = [sections.downtime_work_order_summary, sections.pm_schedule_summary,
-            sections.spare_parts_summary].filter(Boolean).map((s) => s.summary).filter(Boolean)[0];
-        setBody("mira-ov-exec", el("p", null, execSeed || "Verified metrics loaded. Generating summary…"));
-
-        renderList("mira-ov-issues", warnings, "No data quality issues detected for this period.");
-        // Today's Follow-Up = verified immediate actions (open MR, overdue PM, data quality).
-        renderList("mira-ov-today", (pres && pres.priority_follow_up) || [], "No immediate follow-up items for this period.");
-        setBody("mira-ov-followup", el("p", "mira-ov-muted", "Generating AI recommendations…"));
-        setBody("mira-ov-risk", el("p", "mira-ov-muted",
-            "Maintenance risk scoring (WO frequency, severity, recurrence, overdue PM, spare consumption) "
-            + "will be shown here in a later phase. This is a placeholder, not a failure prediction."));
-        setBody("mira-ov-oneline", el("p", null, "Generating one-line summary…"));
-        renderDataUsed(vdu);
+    function renderList(node, items, emptyText, tone) {
+        node.innerHTML = "";
+        const arr = (items || []).filter(Boolean);
+        if (!arr.length) { node.append(el("li", "mira-ov-muted", emptyText)); return; }
+        arr.forEach((t) => node.append(el("li", tone === "warn" ? "mira-ov-warn" : null, String(t))));
     }
 
     function renderSection(id, section) {
-        if (!section) { setBody(id, el("p", "mira-ov-muted", "No data available.")); return; }
-        const wrap = el("div");
-        const chips = el("div", "mira-ov-chips");
-        (section.metrics || []).forEach((m) => {
-            const chip = el("div", `mira-ov-chip mira-tone-${m.tone || "neutral"}`);
-            chip.append(el("span", "mira-ov-chip-label", m.label),
-                el("strong", "mira-ov-chip-value", m.value));
+        const host = document.getElementById(id);
+        if (!host) return;
+        host.innerHTML = "";
+        if (!section || !Array.isArray(section.metrics) || !section.metrics.length) {
+            host.append(el("p", "mira-ov-muted", "No data available for the selected period."));
+            return;
+        }
+        const grid = el("div", "mira-ov-chip-grid");
+        section.metrics.forEach((m) => {
+            const chip = el("div", `mira-ov-kpi-chip mira-tone-${m.tone || "neutral"}`);
+            chip.append(el("span", "mira-ov-chip-label", m.label), el("strong", "mira-ov-chip-value", m.value));
             if (m.note) chip.append(el("span", "mira-ov-chip-note", m.note));
-            chips.append(chip);
+            grid.append(chip);
         });
-        wrap.append(chips);
-        if (section.summary) wrap.append(el("p", "mira-ov-sec-summary", section.summary));
-        setBody(id, wrap);
+        host.append(grid);
     }
 
-    function renderList(id, items, emptyText) {
-        if (!items || !items.length) { setBody(id, el("p", "mira-ov-muted", emptyText)); return; }
-        const ul = el("ul", "mira-ov-list");
-        items.forEach((t) => ul.append(el("li", null, String(t))));
-        setBody(id, ul);
+    // ── data loading ────────────────────────────────────────────────────────────
+    function loadOverview() {
+        const token = ++loadToken;
+        window.MIRA_DASHBOARD_FILTERS = currentFilters();
+        refs.metaPeriod.textContent = `Period: ${periodLabel()}`;
+        refs.metaStage.textContent = `Stage: ${stageLabel()}`;
+        refs.statusBadge.textContent = "Assessing…";
+        refs.statusBadge.className = "mira-ov-status-badge";
+
+        fetch(`${API}/overview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(filtersBody()) })
+            .then((r) => { if (!r.ok) throw new Error(String(r.status)); return r.json(); })
+            .then((json) => { if (token === loadToken) renderVerified(json); })
+            .catch((err) => { if (token === loadToken) renderError(err); });
+
+        // AI wording (async, never blocks the verified cards).
+        fetch(`${API}/ai-summary`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(filtersBody()) })
+            .then((r) => r.ok ? r.json() : null).then((json) => { if (token === loadToken && json) renderAi(json); })
+            .catch(() => { if (token === loadToken) setLlm("Rule-based fallback active", "muted"); });
+    }
+
+    function renderError(err) {
+        const code = String(err && err.message ? err.message : "");
+        const msg = code === "404"
+            ? "MIRA Overview isn't loaded on the running backend yet — please restart the backend (run_server.cmd / python app.py)."
+            : code.toLowerCase().includes("failed to fetch")
+            ? "Can't reach the MIRA backend. Make sure the server is running (run_server.cmd / python app.py), then refresh."
+            : `MIRA backend error (${code}). Please restart the backend and refresh.`;
+        refs.statusBadge.textContent = "Backend unavailable";
+        refs.statusBadge.className = "mira-ov-status-badge mira-ov-status-critical";
+        if (refs.exec) refs.exec.textContent = msg;
+        ["pm", "downtime", "spare"].forEach((k) => setBody(`mira-ov-kpi-${k}`, el("p", "mira-ov-muted", "No data available — backend unreachable.")));
+    }
+
+    function renderVerified(json) {
+        const pres = (json && json.presentation) || {};
+        const data = (json && json.data) || {};
+        const vdu = pres.view_data_used || {};
+        const sections = pres.sections || {};
+        lastReport = { data, pres, label: periodLabel(), stage: stageLabel() };
+
+        // Status
+        const status = deriveStatus(data);
+        refs.statusBadge.textContent = status.level;
+        refs.statusBadge.className = `mira-ov-status-badge mira-ov-status-${status.tone}`;
+        refs.statusPeriod.textContent = `Data period: ${vdu.period_label || periodLabel()}${vdu.date_range ? " · " + vdu.date_range : ""}`;
+        refs.exec.textContent = ruleBasedExecutive(data);
+        refs.metaGenerated.textContent = `Last generated: ${vdu.last_refreshed || new Date().toLocaleString()}`;
+        if (json.provider_status) setLlm(json.provider_status.status || json.provider_status, json.provider_status.llm ? "good" : "muted");
+
+        // Highlights + today's actions (rule-based, verified)
+        renderList(refs.highlights, buildHighlights(data, sections), "No notable highlights for this period.");
+        const todays = (pres.priority_follow_up || []).slice(0, 5);
+        renderList(refs.actionsToday, todays, "No immediate actions required.");
+
+        // KPI cards
+        renderSection("mira-ov-kpi-pm", sections.pm_schedule_summary);
+        renderSection("mira-ov-kpi-downtime", sections.downtime_work_order_summary);
+        renderSection("mira-ov-kpi-spare", sections.spare_parts_summary);
+
+        // Recommendations
+        const warnings = (vdu.data_warnings || pres.data_notes || []);
+        renderList(document.getElementById("mira-ov-rec-today"), todays, "No actions flagged today.");
+        renderList(document.getElementById("mira-ov-rec-followup"), buildFollowUps(data), "Nothing outstanding to follow up.");
+        renderList(document.getElementById("mira-ov-rec-risks"), buildRisks(data), "No elevated risks detected.");
+        renderList(document.getElementById("mira-ov-rec-dq"), warnings, "No data quality issues.", "warn");
+
+        renderDataUsed(vdu);
+    }
+
+    function buildHighlights(data, sections) {
+        const wo = data.work_orders || {}; const pm = data.pm_schedule || {}; const dt = data.downtime_summary || {};
+        const out = [];
+        if (num(wo.total) !== null) out.push(`${fmt(wo.total)} MR raised; ${fmt(wo.open)} open, ${fmt(wo.closed)} closed (${fmt(wo.closure_rate_pct)}% closure).`);
+        if (num(pm.compliance_pct) !== null) out.push(`PM compliance ${fmt(pm.compliance_pct)}% — ${fmt(pm.overdue)} overdue, ${fmt(pm.backlog)} backlog.`);
+        if (num(dt.preventive_count) !== null) out.push(`Maintenance mix ${fmt(dt.preventive_count)} preventive / ${fmt(dt.corrective_count)} corrective.`);
+        if (dt.top_functional_location_name) out.push(`Highest workload: ${dt.top_functional_location_name} (${fmt(dt.top_functional_location_count)} MR).`);
+        if (dt.top_actual_machine_asset_name) out.push(`Top machine asset: ${dt.top_actual_machine_asset_name} (${fmt(dt.top_actual_machine_asset_count)} MR).`);
+        return out.slice(0, 5);
+    }
+
+    function buildFollowUps(data) {
+        const wo = data.work_orders || {}; const pm = data.pm_schedule || {};
+        const out = [];
+        if (num(wo.open)) out.push(`Review ${fmt(wo.open)} open / in-progress MR.`);
+        if (num(pm.overdue)) out.push(`Action ${fmt(pm.overdue)} overdue PM tasks.`);
+        if (num(pm.backlog)) out.push(`Clear ${fmt(pm.backlog)} PM backlog items.`);
+        return out;
+    }
+
+    function buildRisks(data) {
+        const dt = data.downtime_summary || {}; const pm = data.pm_schedule || {};
+        const out = [];
+        if (num(dt.corrective_count) !== null && num(dt.preventive_count) !== null && dt.corrective_count > dt.preventive_count) {
+            out.push("Corrective work dominates the period — reactive maintenance load to monitor.");
+        }
+        if (num(pm.compliance_pct) !== null && pm.compliance_pct < 80) out.push(`PM compliance below target (${fmt(pm.compliance_pct)}%).`);
+        if (dt.top_recorded_asset_is_placeholder) out.push("Highest-volume asset is a general area/placeholder — asset tagging needs review.");
+        return out;
     }
 
     function renderDataUsed(vdu) {
-        if (!vdu) { setBody("mira-ov-datadetail", el("p", "mira-ov-muted", "No data-used detail.")); return; }
-        const wrap = el("div", "mira-ov-datagrid");
+        const host = document.getElementById("mira-ov-data-detail");
+        if (!host) return;
+        host.innerHTML = "";
+        const grid = el("div", "mira-ov-data-grid");
         const block = (label, rows) => {
-            const b = el("div", "mira-ov-datablock");
-            b.append(el("div", "mira-ov-datalabel", label));
+            const b = el("div", "mira-ov-data-block");
+            b.append(el("div", "mira-ov-mini-label", label));
             const ul = el("ul", "mira-ov-list");
-            (rows || []).forEach((r) => {
-                if (typeof r === "string") { ul.append(el("li", null, r)); return; }
-                ul.append(el("li", null, `${r.label}: ${r.value}`));
-            });
+            (rows || []).forEach((r) => ul.append(el("li", null, typeof r === "string" ? r : `${r.label}: ${r.value}`)));
             if (!(rows || []).length) ul.append(el("li", "mira-ov-muted", "—"));
-            b.append(ul);
-            return b;
+            b.append(ul); return b;
         };
-        wrap.append(
+        grid.append(
+            block("Period mode / date range", [vdu.period_mode, vdu.date_range].filter(Boolean)),
             block("Source tables", vdu.source_tables),
             block("Filters applied", vdu.filters_applied),
             block("Rows loaded", vdu.rows_loaded),
@@ -338,36 +414,78 @@
             block("KPI values used", vdu.kpi_values_used),
             block("Data warnings", vdu.data_warnings),
         );
-        const wrapOuter = el("div");
-        if (vdu.last_refreshed) wrapOuter.append(el("p", "mira-ov-muted", `Last refreshed: ${vdu.last_refreshed}`));
-        wrapOuter.append(wrap);
-        setBody("mira-ov-datadetail", wrapOuter);
+        if (vdu.last_refreshed) host.append(el("p", "mira-ov-muted", `Last refreshed: ${vdu.last_refreshed}`));
+        host.append(grid);
     }
 
     function renderAi(json) {
         const s = json && json.summary;
         if (!s) return;
-        if (json.provider_status) setText("mira-ov-st-llm", json.provider_status);
-        if (s.executive_summary) setBody("mira-ov-exec", el("p", null, s.executive_summary));
-        if (s.one_line_summary) setBody("mira-ov-oneline", el("p", "mira-ov-oneline-text", s.one_line_summary));
-        // Key issues = observations + concern; follow-up = AI follow-up.
-        const issues = [];
-        if (s.main_concern) issues.push(`Main concern: ${s.main_concern}`);
-        (s.key_observations || []).forEach((o) => issues.push(o));
-        (s.data_notes || []).forEach((n) => issues.push(n));
-        if (issues.length) renderList("mira-ov-issues", issues, "");
-        if ((s.recommended_follow_up || []).length) renderList("mira-ov-followup", s.recommended_follow_up, "");
-        // Append Key Numbers Used under the exec card.
-        if ((s.key_numbers_used || []).length) {
-            const host = document.getElementById("mira-ov-exec");
-            if (host) {
-                const kn = el("div", "mira-ov-keynums");
-                kn.append(el("div", "mira-ov-datalabel", "Key Numbers Used"));
-                const ul = el("ul", "mira-ov-list");
-                s.key_numbers_used.forEach((n) => ul.append(el("li", null, String(n))));
-                kn.append(ul);
-                host.append(kn);
-            }
+        if (json.provider_status) setLlm(json.provider_status, json.llm_active ? "good" : "muted");
+        if (s.executive_summary) refs.exec.textContent = s.executive_summary;
+        if ((s.key_observations || []).length || s.main_concern) {
+            const issues = [];
+            if (s.main_concern) issues.push(`Main concern: ${s.main_concern}`);
+            (s.key_observations || []).forEach((o) => issues.push(o));
+            renderList(refs.highlights, issues, "");
+        }
+        if ((s.recommended_follow_up || []).length) {
+            renderList(document.getElementById("mira-ov-rec-followup"), s.recommended_follow_up, "");
         }
     }
+
+    function setLlm(text, tone) {
+        if (!refs.metaLlm) return;
+        refs.metaLlm.textContent = text || "Rule-based summary";
+        refs.metaLlm.className = `mira-ov-chip mira-ov-chip-${tone === "good" ? "good" : "muted"}`;
+    }
+
+    // ── copy report ─────────────────────────────────────────────────────────────
+    function copyReport() {
+        if (!lastReport) return;
+        const d = lastReport.data || {};
+        const wo = d.work_orders || {}; const pm = d.pm_schedule || {}; const dt = d.downtime_summary || {}; const sp = d.spare_parts || {};
+        const status = deriveStatus(d).level;
+        const lines = [
+            "Maintenance Daily Summary",
+            `Period: ${lastReport.label}`,
+            `Stage: ${lastReport.stage}`,
+            `Overall Status: ${status}`,
+            "",
+            "PM Schedule:",
+            `  Scheduled ${fmt(pm.total_scheduled)}, Completed ${fmt(pm.completed)}, Overdue ${fmt(pm.overdue)}, Backlog ${fmt(pm.backlog)}, Compliance ${fmt(pm.compliance_pct)}%`,
+            "Downtime / MR:",
+            `  Raised ${fmt(wo.total)}, Open ${fmt(wo.open)}, Closed ${fmt(wo.closed)}, Closure ${fmt(wo.closure_rate_pct)}%, Preventive/Corrective ${fmt(dt.preventive_count)}/${fmt(dt.corrective_count)}`,
+            "Spare Parts:",
+            `  In-stock items ${fmt(sp.current_in_stock_items)}, Top consumed ${fmt(sp.top_consumed_part)}`,
+            "",
+            "Actions Required:",
+            ...buildFollowUps(d).map((x) => `  - ${x}`),
+        ];
+        const text = lines.join("\n");
+        const done = () => { if (refs.copyBtn) { refs.copyBtn.textContent = "Copied ✓"; setTimeout(() => { refs.copyBtn.textContent = "Copy Report"; }, 1600); } };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
+        } else { fallbackCopy(text, done); }
+    }
+
+    function fallbackCopy(text, done) {
+        const ta = el("textarea"); ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+        document.body.append(ta); ta.select();
+        try { document.execCommand("copy"); done(); } catch (_e) { /* ignore */ } finally { ta.remove(); }
+    }
+
+    window.renderMiraOverview = function renderMiraOverview() {
+        const root = document.getElementById("mira-overview-root");
+        if (!root) return;
+        if (!mounted) {
+            renderShell(root);
+            window.addEventListener("mira:provider-status", () => {
+                const st = window.MIRA_PROVIDER_STATUS;
+                if (st) setLlm(st.text, st.tone === "good" ? "good" : "muted");
+            });
+            mounted = true;
+        }
+        loadOverview();
+    };
 })();

@@ -71,6 +71,7 @@ MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 
 STAGE_VALUES = ("Stage 1", "Stage 2")
 EQUIPMENT_GROUPS = {"Production Equipment"}
+_PM_METRICS_PAYLOAD_CACHE = {}
 
 # Forward-looking window (in days) used for "Due Soon".
 DUE_SOON_WINDOW_DAYS = 30
@@ -904,3 +905,131 @@ def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=No
         "equipment": equipment,
         "utility": utility,
     }
+
+
+def build_pm_schedule_metrics_payload(stage="all", year=None, month=None, period_mode=None, start=None, end=None):
+    """Lightweight PM payload for assistant / KPI consumers.
+
+    This avoids building the full page tables and charts when a caller only needs
+    period-scoped KPIs plus a small overdue list.
+    """
+    today = datetime.now().date()
+    sel_year = int(year) if year else today.year
+    stage_filter = _normalize_stage_filter(stage)
+
+    try:
+        sel_month = int(month) if month else None
+    except (TypeError, ValueError):
+        sel_month = None
+    if sel_month is not None and not (1 <= sel_month <= 12):
+        sel_month = None
+
+    win_start, win_end = _pm_resolve_window(sel_year, sel_month, period_mode, today, start, end)
+    label_month = sel_month or today.month
+    source_status = get_pm_schedule_source_status()
+    source_signature = tuple(
+        (
+            slot,
+            str(entry.get("path") or ""),
+            str(entry.get("last_modified") or ""),
+            bool(entry.get("active")),
+        )
+        for slot, entry in sorted(source_status.items())
+    )
+    cache_key = (
+        today.isoformat(),
+        stage_filter,
+        sel_year,
+        sel_month,
+        str(period_mode or ("monthly" if sel_month else "ytd")),
+        str(start),
+        str(end),
+        source_signature,
+    )
+    cached_payload = _PM_METRICS_PAYLOAD_CACHE.get(cache_key)
+    if cached_payload is not None:
+        return cached_payload
+
+    all_tasks, asset_map, source_meta = _build_tasks(sel_year, today)
+    override_stats = apply_overrides_and_autodone(all_tasks, today)
+    source_meta["overrideStats"] = override_stats
+
+    manual_tasks = list_manual_tasks(today)
+    all_tasks.extend(manual_tasks)
+    source_meta["manualCount"] = len(manual_tasks)
+
+    _attach_functional_location(all_tasks)
+
+    tasks = all_tasks if stage_filter == "all" else [t for t in all_tasks if t["stage"] == stage_filter]
+    equipment_tasks = [t for t in tasks if t["scope"] == "equipment"]
+    utility_tasks = [t for t in tasks if t["scope"] == "utility"]
+
+    mapped_total_all = _count_mapped_assets(asset_map, stage=stage_filter)
+    mapped_total_equipment = _count_mapped_assets(asset_map, stage=stage_filter, scope="equipment")
+    mapped_total_utility = _count_mapped_assets(asset_map, stage=stage_filter, scope="utility")
+
+    overview_kpis = _kpis(tasks, today=today, sel_year=sel_year, sel_month=label_month, mapped_asset_total=mapped_total_all)
+    overview_period = _period_kpis(tasks, win_start=win_start, win_end=win_end)
+    dq_counts, _dq_rows = _data_quality(tasks)
+
+    equipment = {
+        "kpis": _kpis(
+            equipment_tasks,
+            today=today,
+            sel_year=sel_year,
+            sel_month=label_month,
+            mapped_asset_total=mapped_total_equipment,
+        ),
+        "periodKpis": _period_kpis(equipment_tasks, win_start=win_start, win_end=win_end),
+    }
+    utility = {
+        "kpis": _kpis(
+            utility_tasks,
+            today=today,
+            sel_year=sel_year,
+            sel_month=label_month,
+            mapped_asset_total=mapped_total_utility,
+        ),
+        "periodKpis": _period_kpis(utility_tasks, win_start=win_start, win_end=win_end),
+    }
+
+    overdue_rows = [_public_task(t) for t in _sort_table([t for t in tasks if t["isOverdue"]])]
+
+    years = sorted({t["plannedYear"] for t in all_tasks if t["plannedYear"]})
+    if sel_year not in years:
+        years = sorted(set(years) | {sel_year})
+
+    payload = {
+        "meta": {
+            "stageFilter": stage_filter,
+            "year": sel_year,
+            "month": sel_month,
+            "monthLabel": MONTH_LABELS[label_month - 1],
+            "periodMode": (period_mode or ("monthly" if sel_month else "ytd")),
+            "periodStart": win_start.isoformat(),
+            "periodEnd": win_end.isoformat(),
+            "availableYears": years,
+            "availableStages": list(STAGE_VALUES),
+            "today": today.isoformat(),
+            "completionBasis": "inferred",
+            "dueSoonWindowDays": DUE_SOON_WINDOW_DAYS,
+            "taskCountAllStages": len(all_tasks),
+            "taskCount": len(tasks),
+            "generatedAt": datetime.now().isoformat(),
+            **source_meta,
+        },
+        "overview": {
+            "kpis": overview_kpis,
+            "periodKpis": overview_period,
+            "dataQuality": {"counts": dq_counts},
+        },
+        "equipment": equipment,
+        "utility": utility,
+        "schedule": {
+            "tables": {
+                "overdue": overdue_rows[:300],
+            },
+        },
+    }
+    _PM_METRICS_PAYLOAD_CACHE[cache_key] = payload
+    return payload

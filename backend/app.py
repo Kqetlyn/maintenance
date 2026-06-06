@@ -194,8 +194,6 @@ def get_page_last_synced(page_key):
         return latest_source or get_path_mtime_iso(os.path.join(DATA_DIR, ASSET_MASTER_RELATIVE_PATH))
 
     return None
-
-
 @app.route("/api/page-sync/<page_key>")
 def page_sync(page_key):
     return jsonify({"page": page_key, "last_synced": get_page_last_synced(page_key)})

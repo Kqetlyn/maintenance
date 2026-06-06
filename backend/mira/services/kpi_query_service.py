@@ -6,7 +6,7 @@ EVERY value returned here is extracted from the SAME builders the dashboard uses
     * downtime_service.build_downtime_payload        -> MTTR, MTBF, open/closed WO,
                                                         data-reliability counts, WO rows
     * downtime page preventive/corrective classifier -> preventive vs corrective mix
-    * pm_schedule_service.build_pm_schedule_payload  -> PM schedule status, Stage 1/2
+    * pm_schedule_service.build_pm_schedule_metrics_payload -> PM schedule status, Stage 1/2
     * asset_mapping.load_asset_mapping               -> asset-group / stage context
 
 MIRA does NOT recompute MTTR / MTBF / open work orders / PM status. It only reads,
@@ -26,7 +26,7 @@ from datetime import date, datetime
 
 # Existing dashboard builders (top-level modules on the backend path).
 from downtime_service import build_downtime_payload
-from pm_schedule_service import build_pm_schedule_payload
+from pm_schedule_service import build_pm_schedule_metrics_payload
 from spare_parts_service import (
     build_all_years_transactions_payload,
     build_project_transactions_payload,
@@ -38,7 +38,7 @@ from ..core import context as ctx
 # Tiny per-process memo so one MIRA request that needs several KPIs does not call
 # the same heavy (already-cached) builder repeatedly. Short TTL; keyed by inputs.
 _MEMO: dict[tuple, tuple[float, object]] = {}
-_MEMO_TTL_SECONDS = 30
+_MEMO_TTL_SECONDS = 1800
 
 
 def _memoized(key, producer):
@@ -75,7 +75,7 @@ def _pm_payload(filters: dict) -> dict:
     start = filters.get("start")
     end = filters.get("end")
     key = ("pm", filters["stage"], filters["year"], filters["month"], mode, str(start), str(end))
-    return _memoized(key, lambda: build_pm_schedule_payload(
+    return _memoized(key, lambda: build_pm_schedule_metrics_payload(
         stage=filters["stage"], year=filters["year"], month=filters["month"],
         period_mode=mode, start=start, end=end,
     ))
@@ -901,7 +901,7 @@ def get_data_reliability_issues(filters: dict) -> dict:
 
 
 def get_pm_schedule_status(filters: dict) -> dict:
-    """Preventive maintenance schedule status, reused from build_pm_schedule_payload."""
+    """Preventive maintenance schedule status, reused from build_pm_schedule_metrics_payload."""
     f = ctx.normalize_filters(filters)
     pm = _pm_payload(f)
     overview = pm.get("overview", {}) or {}
@@ -943,7 +943,7 @@ def get_pm_schedule_status(filters: dict) -> dict:
         "data_quality": dq,
         "equipment_total": _eq("equipment"),
         "utility_total": _eq("utility"),
-        "source": "pm_schedule_service.build_pm_schedule_payload (period-scoped overview.periodKpis)",
+        "source": "pm_schedule_service.build_pm_schedule_metrics_payload (period-scoped overview.periodKpis)",
         "period_scoped": True,
     }
 
@@ -951,7 +951,7 @@ def get_pm_schedule_status(filters: dict) -> dict:
 def get_verified_pm_metrics(filters: dict) -> dict:
     """Verified, period-scoped PM metrics with a data envelope (Part C debug output).
 
-    Numbers come from build_pm_schedule_payload's period-scoped overview.periodKpis
+    Numbers come from build_pm_schedule_metrics_payload's period-scoped overview.periodKpis
     (manual-Done only). Mirrors the downtime verified-metrics structure.
     """
     f = ctx.normalize_filters(filters)
@@ -975,7 +975,7 @@ def get_verified_pm_metrics(filters: dict) -> dict:
             "functional_location": f.get("subAssetGroup") or "All",
         },
         "data_quality": {
-            "source": "PM Schedule (pm_schedule_service.build_pm_schedule_payload)",
+            "source": "PM Schedule (pm_schedule_service.build_pm_schedule_metrics_payload)",
             "rows_loaded": meta.get("taskCountAllStages"),
             "rows_after_filter": status.get("total_scheduled"),
             "date_range": ctx.month_label(f),
@@ -1217,6 +1217,230 @@ def get_dashboard_kpi_summary(filters: dict, *, include_spare_parts: bool = True
 # ── Limited Filtered Rows Mode (NOT default) ─────────────────────────────────────
 # Returns a small, field-limited slice of work-order rows the builder already
 # computed. The privacy guard still scrubs and caps this before it leaves MIRA.
+def get_verified_downtime_metrics(filters: dict) -> dict:
+    """Verified downtime / MR metrics for the selected window."""
+    summary = get_dashboard_kpi_summary(filters, include_spare_parts=False)
+    return {
+        "window": summary.get("window"),
+        "stage": summary.get("stage"),
+        "filters": summary.get("filters"),
+        "work_orders": summary.get("work_orders"),
+        "mttr_hours": summary.get("mttr_hours"),
+        "mtbf_hours": summary.get("mtbf_hours"),
+        "downtime_summary": summary.get("downtime_summary"),
+        "data_reliability": summary.get("data_reliability"),
+        "source": "verified dashboard downtime / MR summary",
+    }
+
+
+def get_verified_spare_parts_metrics(filters: dict) -> dict:
+    """Verified spare-parts metrics for the selected window."""
+    return get_spare_parts_summary(filters)
+
+
+def get_verified_summary_metrics(filters: dict) -> dict:
+    """Verified all-in-one maintenance summary for the selected window."""
+    return get_dashboard_kpi_summary(filters)
+
+
+def get_top_assets_by_mr_count(filters: dict, *, limit: int = 5) -> dict:
+    """Top recorded assets/areas and top actual machine assets by MR count."""
+    f = ctx.normalize_filters(filters)
+    rows = _selected_period_work_order_rows(f)
+    recorded_counts: Counter[tuple[str | None, str]] = Counter()
+    actual_counts: Counter[tuple[str | None, str]] = Counter()
+    for row in rows:
+        asset = _asset_identity(row)
+        recorded_counts[asset] += 1
+        asset_id, asset_name = asset
+        if asset_id and not _is_missing_asset_id(row) and not _is_general_area_asset(asset_name):
+            actual_counts[asset] += 1
+
+    def top_rows(counter: Counter[tuple[str | None, str]]):
+        result = []
+        for (asset_id, asset_name), count in counter.most_common(limit):
+            result.append({
+                "asset_id": asset_id,
+                "asset_name": asset_name,
+                "mr_count": int(count),
+                "is_placeholder": _is_general_area_asset(asset_name) or str(asset_id or "").strip().upper() in _MISSING_ASSET_ID_TOKENS,
+            })
+        return result
+
+    activity = get_mr_activity_summary(f)
+    return {
+        "window": activity["window"],
+        "stage": activity["stage"],
+        "top_recorded_asset": {
+            "asset_id": activity["top_recorded_asset_id"],
+            "asset_name": activity["top_recorded_asset_name"],
+            "mr_count": activity["top_recorded_asset_count"],
+            "is_placeholder": activity["top_recorded_asset_is_placeholder"],
+            "reason": activity["top_recorded_asset_reason"],
+        },
+        "top_actual_machine_asset": {
+            "asset_id": activity["top_actual_machine_asset_id"],
+            "asset_name": activity["top_actual_machine_asset_name"],
+            "mr_count": activity["top_actual_machine_asset_count"],
+            "reason": activity["top_actual_machine_asset_reason"],
+        },
+        "top_recorded_assets": top_rows(recorded_counts),
+        "top_actual_machine_assets": top_rows(actual_counts),
+        "rows_loaded": len(rows),
+        "source": activity["source"],
+    }
+
+
+def get_top_functional_locations(filters: dict, *, limit: int = 5) -> dict:
+    """Functional locations ranked by selected-period MR count."""
+    f = ctx.normalize_filters(filters)
+    rows = _selected_period_work_order_rows(f)
+    counts: Counter[str] = Counter(_functional_location_value(row) for row in rows)
+    ranked = [
+        {"functional_location": name, "mr_count": int(count)}
+        for name, count in counts.most_common(limit)
+    ]
+    activity = get_mr_activity_summary(f)
+    return {
+        "window": activity["window"],
+        "stage": activity["stage"],
+        "top_functional_location": {
+            "name": activity["top_functional_location_name"],
+            "mr_count": activity["top_functional_location_count"],
+            "reason": activity["top_functional_location_reason"],
+        },
+        "functional_locations": ranked,
+        "rows_loaded": len(rows),
+        "source": activity["source"],
+    }
+
+
+def get_open_mr_records(filters: dict, *, limit: int = 10) -> dict:
+    """Open / in-progress selected-period MR records with safe public fields only."""
+    f = ctx.normalize_filters(filters)
+    rows = [
+        row for row in _selected_period_work_order_rows(f)
+        if _mr_status_bucket(row) == "open"
+    ]
+
+    def sort_key(row: dict):
+        severity = _severity_label(row) or "S99"
+        raised = _mr_raised_date(row)
+        return (_SEVERITY_ORDER.get(severity, 99), -(raised.toordinal() if raised else 0))
+
+    public_rows = []
+    for row in sorted(rows, key=sort_key)[: max(int(limit or 0), 1)]:
+        asset_id, asset_name = _asset_identity(row)
+        raised = _mr_raised_date(row)
+        public_rows.append({
+            "request_id": str(row.get("request_id") or row.get("work_order_id") or "").strip() or None,
+            "asset_id": asset_id,
+            "asset_name": asset_name,
+            "functional_location": _functional_location_value(row),
+            "status": str(row.get("request_state") or row.get("status") or "Open").strip() or "Open",
+            "severity": _severity_label(row),
+            "raised_date": raised.isoformat() if raised else None,
+        })
+
+    activity = get_mr_activity_summary(f)
+    return {
+        "window": activity["window"],
+        "stage": activity["stage"],
+        "open_count": activity["open_count"],
+        "carry_over_open_mr": activity["carry_over_open_mr"],
+        "records": public_rows,
+        "rows_loaded": len(rows),
+        "source": activity["source"],
+    }
+
+
+def get_overdue_pm_records(filters: dict, *, limit: int = 10) -> dict:
+    """Overdue PM tasks from the verified PM payload."""
+    f = ctx.normalize_filters(filters)
+    payload = _pm_payload(f)
+    overdue_rows = (((payload.get("schedule") or {}).get("tables") or {}).get("overdue") or [])
+
+    def matches(task: dict) -> bool:
+        if f.get("assetId") and str(task.get("assetId") or "").strip().upper() != f["assetId"].upper():
+            return False
+        if f.get("mainAssetGroup"):
+            group = str(task.get("mainAssetGroup") or "").lower()
+            if f["mainAssetGroup"].lower() not in group:
+                return False
+        if f.get("subAssetGroup"):
+            area = " ".join(str(task.get(key) or "") for key in ("systemArea", "subAssetGroup", "location")).lower()
+            if f["subAssetGroup"].lower() not in area:
+                return False
+        return True
+
+    filtered_rows = [task for task in overdue_rows if matches(task)]
+    public_rows = []
+    for task in filtered_rows[: max(int(limit or 0), 1)]:
+        public_rows.append({
+            "pm_task_id": task.get("pmTaskId"),
+            "asset_id": task.get("assetId"),
+            "asset_name": task.get("assetName"),
+            "system_area": task.get("systemArea"),
+            "planned_date": task.get("plannedDate"),
+            "planned_month": task.get("plannedMonthLabel"),
+            "pm_description": task.get("pmDescription"),
+            "days_overdue": task.get("daysOverdue"),
+            "stage": task.get("stage"),
+            "scope": task.get("scope"),
+        })
+
+    status = get_pm_schedule_status(f)
+    return {
+        "window": status["window"],
+        "stage": status["stage"],
+        "overdue_count": len(filtered_rows),
+        "backlog_count": status.get("backlog"),
+        "records": public_rows,
+        "rows_loaded": len(overdue_rows),
+        "source": status["source"],
+    }
+
+
+def get_top_spare_parts_consumption(filters: dict, *, limit: int = 5) -> dict:
+    """Top consumed spare parts for the selected window."""
+    f = ctx.normalize_filters(filters)
+    project_payload = _project_transactions_payload()
+    rows = (project_payload.get("transactions") or []) if project_payload.get("status") == "ok" else []
+    filtered_rows = [row for row in rows if _window_contains(row.get("project_date"), f)]
+    part_map: dict[str, dict] = {}
+    for row in filtered_rows:
+        key = str(
+            row.get("translated_description")
+            or row.get("clean_description")
+            or row.get("original_description")
+            or "Unknown"
+        ).strip() or "Unknown"
+        bucket = part_map.setdefault(key, {"part_name": key, "value": 0.0, "quantity": 0.0, "transactions": 0})
+        bucket["value"] += float(row.get("total_consumption") or 0)
+        bucket["quantity"] += float(row.get("quantity_used") or 0)
+        bucket["transactions"] += 1
+    ranked = sorted(part_map.values(), key=lambda item: (-item["value"], item["part_name"]))[:limit]
+    spare = get_spare_parts_summary(f)
+    return {
+        "window": spare["window"],
+        "stage": spare["stage"],
+        "top_consumed_part": spare.get("top_consumed_part"),
+        "top_consumed_part_value": spare.get("top_consumed_part_value"),
+        "rows_loaded": len(rows),
+        "rows_after_filter": len(filtered_rows),
+        "parts": [
+            {
+                "part_name": item["part_name"],
+                "value": round(item["value"], 2),
+                "quantity": round(item["quantity"], 2),
+                "transactions": item["transactions"],
+            }
+            for item in ranked
+        ],
+        "source": "project transactions spare-parts consumption summary",
+    }
+
+
 def get_work_orders(filters: dict, limit: int | None = None) -> dict:
     """Limited work-order lookup. Never returns the full raw dataset."""
     f = ctx.normalize_filters(filters)
@@ -1254,3 +1478,11 @@ getDataReliabilityIssues = get_data_reliability_issues
 getPMScheduleStatus = get_pm_schedule_status
 getSparePartsSummary = get_spare_parts_summary
 getStageSummary = get_stage_summary
+getVerifiedDowntimeMetrics = get_verified_downtime_metrics
+getVerifiedSparePartsMetrics = get_verified_spare_parts_metrics
+getVerifiedSummaryMetrics = get_verified_summary_metrics
+getTopAssetsByMrCount = get_top_assets_by_mr_count
+getTopFunctionalLocations = get_top_functional_locations
+getOpenMrRecords = get_open_mr_records
+getOverduePmRecords = get_overdue_pm_records
+getTopSparePartsConsumption = get_top_spare_parts_consumption
