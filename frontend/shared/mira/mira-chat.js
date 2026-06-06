@@ -31,6 +31,7 @@
     const state = {
         open: false,
         busy: false,
+        mode: "chat",               // "chat" (Q&A) | "kpi" (KPI Analysis)
         providerStatus: {
             text: "Checking AI mode...",
             tone: "muted",
@@ -152,23 +153,11 @@
 
         const modeBar = buildModeBar();
 
-        const chipsWrap = el("div", "mira-chat-chip-wrap");
-        chipsWrap.id = "mira-chat-chips-wrap";
-        chipsWrap.append(el("div", "mira-chat-chip-title", "Suggested prompts"));
-        const chips = el("div", "mira-chat-chips");
-        PROMPTS.forEach((prompt) => {
-            const chip = el("button", "mira-chat-chip", prompt);
-            chip.type = "button";
-            chip.addEventListener("click", () => send(prompt));
-            chips.append(chip);
-        });
-        chipsWrap.append(chips);
-
-        const kpiPanel = buildKpiPanel();
-
+        // Messages scroll area. The starter panel (suggested prompts / KPI picker)
+        // lives INSIDE this area so the conversation always gets the full height.
         const log = el("div", "mira-chat-log");
         log.id = "mira-chat-log";
-        log.append(welcomeMessage());
+        log.append(welcomeMessage(), buildInlinePanel("chat"));
 
         const form = el("form", "mira-chat-form");
         const textarea = el("textarea", "mira-chat-input");
@@ -188,7 +177,7 @@
 
         const footerNote = el("div", "mira-chat-footer-note", "MIRA uses verified dashboard data only.");
 
-        drawer.append(head, status, modeBar, chipsWrap, kpiPanel, log, form, footerNote);
+        drawer.append(head, status, modeBar, log, form, footerNote);
         return drawer;
     }
 
@@ -210,40 +199,70 @@
         return bar;
     }
 
-    function buildKpiPanel() {
-        const panel = el("div", "mira-chat-kpi-panel");
-        panel.id = "mira-chat-kpi-panel";
-        panel.hidden = true;
-        panel.append(el("div", "mira-chat-chip-title", "Select maintenance areas to analyse"));
-        const grid = el("div", "mira-chat-kpi-grid");
-        KPI_AREAS.forEach((area) => {
-            const item = el("label", "mira-chat-kpi-option");
-            const cb = el("input"); cb.type = "checkbox"; cb.value = area.id;
-            item.append(cb, el("span", null, area.label));
-            grid.append(item);
-        });
-        panel.append(grid);
-        const analyze = el("button", "mira-chat-kpi-analyze", "Analyse selected");
-        analyze.type = "button";
-        analyze.addEventListener("click", analyseKpis);
-        panel.append(analyze);
-        panel.append(el("div", "mira-chat-kpi-note", "Uses the dashboard's selected period and stage. Read-only."));
-        return panel;
+    // Starter panel shown inside the message area: suggested prompts (Chat Q&A)
+    // or the maintenance-area picker (KPI Analysis). Kept in the scroll area so
+    // it never steals height from the conversation.
+    function buildInlinePanel(mode) {
+        const m = mode || state.mode;
+        const wrap = el("div", "mira-chat-inline mira-chat-inline-" + m);
+        wrap.id = "mira-chat-inline";
+        if (m === "kpi") {
+            wrap.append(el("div", "mira-chat-inline-title", "Select maintenance areas to analyse"));
+            const grid = el("div", "mira-chat-kpi-grid");
+            KPI_AREAS.forEach((area) => {
+                const item = el("label", "mira-chat-kpi-option");
+                const cb = el("input"); cb.type = "checkbox"; cb.value = area.id;
+                item.append(cb, el("span", null, area.label));
+                grid.append(item);
+            });
+            wrap.append(grid);
+            const analyze = el("button", "mira-chat-kpi-analyze", "Analyse selected");
+            analyze.type = "button";
+            analyze.addEventListener("click", analyseKpis);
+            wrap.append(analyze);
+            wrap.append(el("div", "mira-chat-kpi-note", "Uses the dashboard's selected period and stage. Read-only."));
+        } else {
+            wrap.append(el("div", "mira-chat-inline-title", "Try asking"));
+            const chips = el("div", "mira-chat-chips");
+            PROMPTS.forEach((prompt) => {
+                const chip = el("button", "mira-chat-chip", prompt);
+                chip.type = "button";
+                chip.addEventListener("click", () => send(prompt));
+                chips.append(chip);
+            });
+            wrap.append(chips);
+        }
+        return wrap;
+    }
+
+    function hasConversation() {
+        const log = document.getElementById("mira-chat-log");
+        return !!(log && log.querySelector(".mira-msg-row-user"));
+    }
+
+    function renderInlinePanel(mode) {
+        const log = document.getElementById("mira-chat-log");
+        if (!log) return;
+        document.getElementById("mira-chat-inline")?.remove();
+        const m = mode || state.mode;
+        // Suggested prompts only while the chat is fresh; the KPI picker stays
+        // available because choosing areas is the whole point of that mode.
+        if (m === "kpi" || !hasConversation()) {
+            log.append(buildInlinePanel(m));
+            log.scrollTop = log.scrollHeight;
+        }
     }
 
     function setMode(mode) {
-        const chips = document.getElementById("mira-chat-chips-wrap");
-        const kpi = document.getElementById("mira-chat-kpi-panel");
-        const isKpi = mode === "kpi";
-        if (chips) chips.hidden = isKpi;
-        if (kpi) kpi.hidden = !isKpi;
+        state.mode = mode;
         document.querySelectorAll(".mira-chat-mode-tab").forEach((tab) => {
             tab.classList.toggle("is-active", tab.dataset.mode === mode);
         });
+        renderInlinePanel(mode);
     }
 
     function analyseKpis() {
-        const selected = Array.from(document.querySelectorAll("#mira-chat-kpi-panel input:checked")).map((cb) => cb.value);
+        const selected = Array.from(document.querySelectorAll("#mira-chat-inline input:checked")).map((cb) => cb.value);
         if (!selected.length) return;
         let question;
         if (selected.length === 1) {
@@ -329,6 +348,7 @@
         if (!log) return;
         log.innerHTML = "";
         log.append(welcomeMessage());
+        renderInlinePanel(state.mode);
     }
 
     function handleGlobalKeydown(event) {
@@ -525,6 +545,8 @@
         state.busy = true;
         document.getElementById("mira-chat-fab")?.classList.add("is-busy");
 
+        // Conversation started: drop the starter panel so it can't reappear.
+        document.getElementById("mira-chat-inline")?.remove();
         appendMessage(buildUserMessage(trimmed));
         appendMessage(buildThinkingMessage());
 

@@ -364,10 +364,26 @@
 .mira-chat-kpi-analyze:hover { filter: brightness(1.04); }
 .mira-chat-kpi-note { margin-top: 9px; font-size: 0.72rem; color: #73839a; }
 
-/* Header / status / chips / mode bar / input footer never scroll — only the log does. */
+/* Inline starter panel (suggested prompts / KPI picker) — lives INSIDE the
+   scroll area so it never steals height from the conversation. */
+.mira-chat-inline {
+    border: 1px dashed #d8e2ee;
+    border-radius: 16px;
+    padding: 12px 14px;
+    background: #f7fafd;
+}
+.mira-chat-inline-title {
+    margin-bottom: 9px;
+    color: #6f7e92;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+/* Header / status / mode bar / input footer never scroll — only the log does. */
 .mira-chat-head,
 .mira-chat-statuses,
-.mira-chat-chip-wrap,
 .mira-chat-mode-bar,
 .mira-chat-form,
 .mira-chat-footer-note {
