@@ -162,6 +162,8 @@
 
     async function loadOverview() {
         const token = ++loadToken;
+        // Expose the selected period/stage so the floating chat can inherit it (Step 11).
+        window.MIRA_DASHBOARD_FILTERS = { year: state.year, month: state.month, stage: state.stage };
         setText("mira-ov-st-period", `${MONTHS[Number(state.month) - 1]} ${state.year}`);
         setText("mira-ov-st-validation", "Validating…");
         setText("mira-ov-st-llm", "Checking…");
@@ -178,7 +180,12 @@
             if (token === loadToken) setText("mira-ov-st-validation", "Backend unavailable");
             return;
         }
-        // 2) ASYNC AI wording (Ollama or rule-based) — does not block the cards.
+        // 2) ASYNC maintenance risk insights (backend-scored).
+        fetch(`${API}/risk`, {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(filtersBody()),
+        }).then((r) => r.json()).then((json) => { if (token === loadToken) renderRisk(json); }).catch(() => {});
+
+        // 3) ASYNC AI wording (Ollama or rule-based) — does not block the cards.
         try {
             const res = await fetch(`${API}/ai-summary`, {
                 method: "POST", headers: { "Content-Type": "application/json" },
@@ -190,6 +197,26 @@
         } catch (err) {
             if (token === loadToken) setText("mira-ov-st-llm", "Rule-based fallback active");
         }
+    }
+
+    function renderRisk(risk) {
+        if (!risk || !Array.isArray(risk.top_assets)) return;
+        const wrap = el("div");
+        wrap.append(el("p", null,
+            `${risk.high_attention_count} High Attention · ${risk.medium_attention_count} Medium Attention `
+            + `of ${risk.assets_assessed} assets assessed for ${risk.period}.`));
+        if (risk.top_assets.length) {
+            const ul = el("ul", "mira-ov-list");
+            risk.top_assets.slice(0, 6).forEach((a) => {
+                ul.append(el("li", null,
+                    `${a.asset_name} — risk ${a.risk_score} (${a.risk_level}, ${a.mr_count} MR)`
+                    + (a.is_placeholder ? " · general area/placeholder" : "")));
+            });
+            wrap.append(ul);
+        }
+        wrap.append(el("p", "mira-ov-muted", risk.note
+            || "Risk is a follow-up signal, not a failure prediction."));
+        setBody("mira-ov-risk", wrap);
     }
 
     function renderVerified(json) {

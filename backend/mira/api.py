@@ -20,6 +20,7 @@ from . import config
 from .core import context as ctx
 from .modules.maintenance import assistant_service
 from .modules.maintenance import chat_service
+from .modules.maintenance import risk_service
 from .privacy import privacy_guard_service as guard
 from .providers import get_provider, get_provider_status, generate_structured_summary
 from .reports import report_draft_service
@@ -100,6 +101,18 @@ def overview():
         "provider_status": status,
         "draft_label": config.DRAFT_LABEL,
     })
+
+
+@mira_bp.route("/risk", methods=["GET", "POST"])
+def risk():
+    """Backend-calculated maintenance risk insights (read-only; not a prediction)."""
+    raw = _read_filters()
+    if request.is_json:
+        body = request.get_json(silent=True) or {}
+        if isinstance(body.get("filters"), dict):
+            raw = {**raw, **{k: v for k, v in body["filters"].items() if k in ctx.FILTER_KEYS}}
+    result = risk_service.get_asset_risk_insights(ctx.normalize_filters(raw))
+    return jsonify(guard._deep_redact(result))
 
 
 @mira_bp.route("/ai-summary", methods=["GET", "POST"])

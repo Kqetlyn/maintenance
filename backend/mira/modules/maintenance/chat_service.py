@@ -47,9 +47,10 @@ _INTENT_RULES = [
     ("top_functional_location_query", ("functional location", "highest workload", "which area",
                                        "which location", "location workload", "area workload",
                                        "worst machine group", "machine group")),
+    ("risk_insight_query", ("risk", "need attention", "needs attention", "machines need attention",
+                            "high risk", "asset risk", "which machines need", "attention list")),
     ("top_asset_query", ("most mr", "most maintenance request", "which asset", "top asset",
-                         "worst asset", "asset with most", "machine with most", "which machine",
-                         "machines need attention", "need attention")),
+                         "worst asset", "asset with most", "machine with most", "which machine")),
     ("open_mr_query", ("open mr", "still open", "outstanding mr", "open work order", "top open",
                        "unresolved", "open maintenance")),
     ("follow_up_query", ("follow up", "follow-up", "followup", "today", "what should",
@@ -350,6 +351,22 @@ def build_context(intent: str, f: dict, question: str) -> dict:
         ]
         out["follow_up"] = _follow_up(mr, pm)
 
+    elif intent == "risk_insight_query":
+        from . import risk_service  # lazy: risk_service imports this module
+        risk = risk_service.get_asset_risk_insights(f)
+        out["context"] = {"risk": risk}
+        out["risk"] = risk
+        out["key_numbers"] = [
+            f"High Attention assets: {risk['high_attention_count']}",
+            f"Medium Attention assets: {risk['medium_attention_count']}",
+            f"Assets assessed: {risk['assets_assessed']}",
+        ]
+        for a in risk["top_assets"][:3]:
+            out["key_numbers"].append(
+                f"{a['asset_name']}: risk {a['risk_score']} ({a['risk_level']}, {a['mr_count']} MR)")
+        out["follow_up"] = ["Review high-attention assets with engineering; risk is a follow-up signal, not a failure prediction."]
+        out["warnings"] = risk.get("data_notes", [])
+
     elif intent == "report_wording_query":
         mr = kpi.get_mr_activity_summary(f)
         pm = kpi.get_verified_pm_metrics(f)["metrics"]
@@ -405,6 +422,16 @@ _CHAT_SYSTEM_PROMPT = (
 
 
 def _rule_based_answer(intent: str, period: str, ctxd: dict, key_numbers: list, theme: dict | None) -> str:
+    risk = ctxd.get("risk") if isinstance(ctxd, dict) else None
+    if risk:
+        top = risk["top_assets"][0] if risk.get("top_assets") else None
+        if top:
+            return (f"For {period}, {risk['high_attention_count']} asset(s) are High Attention and "
+                    f"{risk['medium_attention_count']} Medium Attention. The highest is {top['asset_name']} "
+                    f"(risk score {top['risk_score']}, {top['mr_count']} MR), which may require closer follow-up "
+                    "based on work-order frequency, severity, recurrence and overdue PM. This is a risk signal "
+                    "for engineering review, not a failure prediction.")
+        return f"No assets crossed the risk threshold for {period}."
     if theme and theme.get("top_theme"):
         return (f"The most common issue theme in {period} is {theme['top_theme']}, based on "
                 f"{theme['top_theme_count']} of {theme['rows_loaded']} classified MR descriptions "
@@ -480,4 +507,6 @@ def answer(question: str, base_filters: dict | None) -> dict:
     }
     if built["theme"]:
         result["theme_analysis"] = built["theme"]
+    if built.get("risk"):
+        result["risk_insights"] = built["risk"]
     return result

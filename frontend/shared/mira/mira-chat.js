@@ -155,9 +155,13 @@
         thinking.classList.add("mira-bubble-thinking");
         append(thinking);
         try {
+            // Inherit the dashboard's selected period/stage as the base filter; the
+            // question's own period (if any) overrides it on the backend (Step 11/12).
+            const baseFilters = (window.MIRA_DASHBOARD_FILTERS && typeof window.MIRA_DASHBOARD_FILTERS === "object")
+                ? window.MIRA_DASHBOARD_FILTERS : undefined;
             const res = await fetch(`${API}/chat`, {
                 method: "POST", headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ question }),
+                body: JSON.stringify(baseFilters ? { question, filters: baseFilters } : { question }),
             });
             const json = await res.json();
             thinking.remove();
@@ -203,6 +207,17 @@
             }
             bubble.append(el("p", "mira-ans-caveat", theme.note
                 || "AI-suggested classifications based on MR descriptions; confirm root cause by engineering review."));
+        }
+
+        // Maintenance Risk Insights (backend-scored; not a prediction).
+        // Prefer real machine assets for "which machines need attention".
+        const risk = json.risk_insights;
+        const riskList = (risk && (risk.top_machine_assets || risk.top_assets)) || [];
+        if (risk && riskList.length) {
+            bubble.append(block("Maintenance Risk Insights", riskList.slice(0, 5).map((a) =>
+                `${a.asset_name}: risk ${a.risk_score} (${a.risk_level}, ${a.mr_count} MR)`
+                + (a.is_placeholder ? " · placeholder" : ""))));
+            bubble.append(el("p", "mira-ans-caveat", risk.note || "Risk signal, not a failure prediction."));
         }
 
         // Recommended Follow-Up
