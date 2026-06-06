@@ -59,6 +59,8 @@ def generate_with_ollama(system_prompt: str, user_prompt: str, *,
             {"role": "user", "content": user_prompt},
         ],
         "stream": False,
+        # Low temperature: keep wording faithful to the verified numbers.
+        "options": {"temperature": 0.1},
     }
     if format_json:
         payload["format"] = "json"

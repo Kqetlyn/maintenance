@@ -249,6 +249,7 @@ def build_context(intent: str, f: dict, question: str) -> dict:
         out["key_numbers"] = [
             f"MR Raised: {_fmt(mr['mr_raised'])}", f"Open/In Progress: {_fmt(mr['open_count'])}",
             f"Closed/Confirmed: {_fmt(mr['closed_count'])}", f"Closure Rate: {_fmt(mr['closure_rate_pct'])}%",
+            f"Carry-over Open MR: {_fmt(mr['carry_over_open_mr'])}", f"Total Active Workload: {_fmt(mr['total_active_workload'])}",
             f"Preventive/Corrective: {_fmt(mr['preventive_count'])}/{_fmt(mr['corrective_count'])}",
             f"PM Compliance: {_fmt(pm['pm_compliance_percent'])}%", f"PM Overdue: {_fmt(pm['overdue_pm'])}",
         ]
@@ -430,19 +431,32 @@ def answer(question: str, base_filters: dict | None) -> dict:
     if config.PROVIDER_MODE in ("auto", "ollama") and provider.resolve_model():
         try:
             import json
-            ctx_json = json.dumps({
+            # COMPACT context only — the key_numbers already hold every verified figure.
+            # Sending the full nested dicts bloats the prompt and makes inference very slow.
+            compact = {
                 "question": question, "intent": built["intent"], "period": period,
-                "filters": {k: f.get(k) for k in ("stage", "year", "month", "mainAssetGroup")},
-                "verified_data": built["context"], "key_numbers": built["key_numbers"],
+                "verified_key_numbers": built["key_numbers"],
+                "recommended_follow_up": built["follow_up"],
                 "data_warnings": built["warnings"],
-            }, default=str, ensure_ascii=False, indent=2)
+            }
+            if built["theme"] and built["theme"].get("top_theme"):
+                t = built["theme"]
+                compact["fault_theme"] = {
+                    "top_theme": t["top_theme"], "count": t["top_theme_count"], "total": t["rows_loaded"],
+                    "pct": t["top_theme_pct"], "top_asset": t["top_theme_asset"],
+                    "top_location": t["top_theme_functional_location"], "examples": t["example_descriptions"],
+                }
+            ctx_json = json.dumps(compact, default=str, ensure_ascii=False)
             user_prompt = (
                 f'Answer this question: "{question}"\n\n'
-                "Use ONLY the verified data in the JSON below; never introduce a number not present in it. "
-                "If a value is unavailable, say so. Keep it concise (2-4 sentences).\n\n"
-                f"CONTEXT_JSON:\n{ctx_json}\n"
+                "Use ONLY the verified figures in the JSON below; never introduce a number not present in it. "
+                "If a value is unavailable, say so. Keep it concise (2-4 sentences). For fault themes use "
+                "cautious wording (suggests/indicates) and recommend engineering review.\n\n"
+                f"VERIFIED_CONTEXT_JSON:\n{ctx_json}\n"
             )
-            llm = generate_with_ollama(_CHAT_SYSTEM_PROMPT, user_prompt, model=provider.resolve_model()).strip()
+            llm = generate_with_ollama(
+                _CHAT_SYSTEM_PROMPT, user_prompt, model=provider.resolve_model(), timeout=60,
+            ).strip()
             if llm:
                 answer_text = llm
                 used_llm = True
