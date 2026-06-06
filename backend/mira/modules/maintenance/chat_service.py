@@ -18,6 +18,8 @@ wording. The question period overrides the dashboard filter. Read-only.
 from __future__ import annotations
 
 import calendar
+import json
+import os
 import re
 from collections import Counter
 from datetime import datetime
@@ -26,6 +28,13 @@ from ...core import context as ctx
 from ...services import kpi_query_service as kpi
 from ... import config
 from ...providers import generate_with_ollama, get_provider_status, OllamaMiraProvider
+
+# Local analysis store for AI-suggested MR description theme tags. Lives under the
+# gitignored data/ dir — NEVER written back to source Excel / D365 / SharePoint.
+_TAGS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))),
+    "data", "mira_description_tags.json",
+)
 
 # ── Intent routing (ordered; first match wins, specific first) ──────────────────
 _INTENT_RULES = [
@@ -175,6 +184,48 @@ def classify_theme(text: str) -> str:
     return _UNKNOWN_THEME
 
 
+def _persist_description_tags(classified: list, f: dict) -> int:
+    """Best-effort: store AI-suggested theme tags in a LOCAL analysis file.
+
+    Only the allowed fields are saved (MR/WO, asset id/name, functional location, a
+    short description snippet, suggested theme). Never written to source Excel/D365.
+    """
+    try:
+        os.makedirs(os.path.dirname(_TAGS_PATH), exist_ok=True)
+        store = {}
+        if os.path.exists(_TAGS_PATH):
+            try:
+                with open(_TAGS_PATH, encoding="utf-8") as fh:
+                    store = json.load(fh) or {}
+            except Exception:
+                store = {}
+        period = ctx.month_label(f)
+        now = datetime.now().isoformat(timespec="seconds")
+        for theme, row, desc in classified:
+            mr_wo = str(row.get("work_order_id") or row.get("request_id") or "").strip()
+            asset_id = str(row.get("asset_id") or "").strip()
+            key = f"{mr_wo or asset_id or 'NA'}|{desc[:24]}"
+            if key.strip("|") in ("", "NA"):
+                continue
+            store[key] = {
+                "mr_wo": mr_wo, "asset_id": asset_id,
+                "asset_name": str(row.get("machine_name") or "").strip(),
+                "functional_location": str(row.get("raw_functional_location") or "").strip(),
+                "description_snippet": re.sub(r"\s+", " ", desc)[:120],
+                "suggested_theme": theme, "period": period, "classified_at": now,
+                "source": "MIRA keyword classifier (AI-suggested; confirm by engineering review)",
+            }
+        if len(store) > 5000:  # keep the most recent
+            store = dict(sorted(store.items(), key=lambda kv: kv[1].get("classified_at", ""), reverse=True)[:5000])
+        tmp = _TAGS_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(store, fh, ensure_ascii=False, indent=1)
+        os.replace(tmp, _TAGS_PATH)
+        return len(store)
+    except Exception:
+        return 0  # persistence is best-effort; never break the chat
+
+
 def get_mr_description_theme_summary(filters: dict) -> dict:
     """Keyword-based MR description theme summary for the selected period."""
     f = ctx.normalize_filters(filters)
@@ -186,6 +237,7 @@ def get_mr_description_theme_summary(filters: dict) -> dict:
         theme = classify_theme(desc)
         theme_counts[theme] += 1
         classified.append((theme, row, desc))
+    _persist_description_tags(classified, f)
 
     total_classified = sum(c for t, c in theme_counts.items() if t != _UNKNOWN_THEME)
     top = [(t, c) for t, c in theme_counts.most_common() if t != _UNKNOWN_THEME]
