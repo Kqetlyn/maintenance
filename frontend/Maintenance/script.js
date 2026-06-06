@@ -1,6 +1,6 @@
 document.addEventListener("DOMContentLoaded", () => {
     const urlParams = new URLSearchParams(window.location.search);
-    const initialView = (urlParams.get("view") || "overview").toLowerCase();
+    const initialView = (urlParams.get("view") || "mira_overview").toLowerCase();
     const UTILITY_INSPECTION_OVERRIDES = {
         "UL-TN-01": [{ month: 1, week: "first" }],
         "UL-TN-02": [{ month: 1, week: "first" }],
@@ -95,7 +95,7 @@ document.addEventListener("DOMContentLoaded", () => {
         { value: "custom", label: "Custom Range" },
     ];
     const state = {
-        activeView: ["mira_overview", "overview", "spare_parts", "downtime", "mira"].includes(initialView) ? initialView : "mira_overview",
+        activeView: ["mira_overview", "overview", "spare_parts", "downtime"].includes(initialView) ? initialView : "mira_overview",
         overviewMonth: "",
         overviewCategory: "all",
         overviewStatus: "all",
@@ -345,11 +345,6 @@ document.addEventListener("DOMContentLoaded", () => {
             return;
         }
 
-        if (state.activeView === "mira") {
-            // MIRA is a self-contained assistant panel (shared/mira/mira-panel.js).
-            // Nothing for the dashboard loader to fetch.
-            return;
-        }
 
         if (state.activeView === "analysis") {
             await loadAnalysisView();
