@@ -46,6 +46,11 @@
 .mira-bubble-bot { align-self: flex-start; background: #f1f5f9; color: #0f172a; border-bottom-left-radius: 5px; }
 .mira-bubble-thinking { font-style: italic; color: #64748b; }
 .mira-ans-text { font-weight: 500; }
+.mira-ans-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.mira-ans-pill { font-size: 0.64rem; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: #e0f2fe; color: #0369a1; text-transform: capitalize; }
+.mira-ans-pill-intent { background: #ecfdf5; color: #047857; text-transform: none; }
+.mira-ans-caveat { font-size: 0.72rem; font-style: italic; color: #92400e; margin: 6px 0 0; }
+.mira-ans-warn { color: #b45309; }
 
 .mira-ans-block { margin-top: 8px; }
 .mira-ans-block-title { font-size: 0.68rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.04em; color: #0e7490; margin-bottom: 3px; }

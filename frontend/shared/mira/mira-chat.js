@@ -18,13 +18,15 @@
 
     const CHIPS = [
         "Summarise this month's maintenance performance",
+        "What is the most common fault this month?",
         "Which asset has the most MR?",
         "Which functional location has the highest workload?",
+        "What are the top open MR?",
         "What are the main PM issues?",
+        "Which PM tasks are overdue?",
         "Summarise spare parts consumption",
-        "What should be followed up today?",
+        "Which machines need attention?",
         "Give me a one-line report summary",
-        "Show data used",
     ];
 
     let open = false;
@@ -153,7 +155,7 @@
         thinking.classList.add("mira-bubble-thinking");
         append(thinking);
         try {
-            const res = await fetch(`${API}/query`, {
+            const res = await fetch(`${API}/chat`, {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ question }),
             });
@@ -169,48 +171,59 @@
     }
 
     function renderAnswer(json) {
-        const pres = (json && json.presentation) || {};
+        json = json || {};
         const bubble = el("div", "mira-bubble mira-bubble-bot");
-        // Direct answer
-        bubble.append(el("p", "mira-ans-text", (json && json.answer) || "Data unavailable for the selected filter."));
 
-        // Key Numbers Used (from the verified KPI cards / section metrics)
-        const nums = keyNumbers(pres);
+        // Period chip (so it's obvious the right period was used).
+        if (json.period || json.intent) {
+            const meta = el("div", "mira-ans-meta");
+            if (json.period) meta.append(el("span", "mira-ans-pill", json.period));
+            if (json.intent) meta.append(el("span", "mira-ans-pill mira-ans-pill-intent", json.intent));
+            bubble.append(meta);
+        }
+
+        // Direct answer
+        bubble.append(el("p", "mira-ans-text", json.answer || "Data unavailable for the selected period/filter."));
+
+        // Key Numbers Used
+        const nums = json.key_numbers_used || [];
         if (nums.length) bubble.append(block("Key Numbers Used", nums));
 
+        // AI-Suggested Theme Analysis (fault questions)
+        const theme = json.theme_analysis;
+        if (theme && theme.top_theme) {
+            const t = block("AI-Suggested Theme Analysis", [
+                `Top theme: ${theme.top_theme} (${theme.top_theme_count}/${theme.rows_loaded}, ${theme.top_theme_pct}%)`,
+                `Top asset: ${theme.top_theme_asset || "—"}`,
+                `Top functional location: ${theme.top_theme_functional_location || "—"}`,
+            ]);
+            bubble.append(t);
+            if ((theme.example_descriptions || []).length) {
+                bubble.append(block("Example Descriptions", theme.example_descriptions));
+            }
+            bubble.append(el("p", "mira-ans-caveat", theme.note
+                || "AI-suggested classifications based on MR descriptions; confirm root cause by engineering review."));
+        }
+
         // Recommended Follow-Up
-        const follow = pres.priority_follow_up || [];
+        const follow = json.recommended_follow_up || [];
         if (follow.length) bubble.append(block("Recommended Follow-Up", follow));
 
         // View Data Used (collapsible)
-        const vdu = pres.view_data_used;
+        const vdu = json.view_data_used;
         if (vdu) {
             const det = el("details", "mira-ans-details");
             det.append(el("summary", null, "View Data Used"));
             const body = el("div", "mira-ans-vdu");
-            (vdu.kpi_values_used || []).forEach((r) => body.append(el("div", "mira-ans-vdu-row",
-                typeof r === "string" ? r : `${r.label}: ${r.value}`)));
+            (vdu.filters_applied || []).forEach((s) => body.append(el("div", "mira-ans-vdu-row", s)));
+            (vdu.source_tables || []).slice(0, 3).forEach((s) => body.append(el("div", "mira-ans-vdu-row", `Source: ${s}`)));
+            (vdu.data_warnings || []).forEach((w) => body.append(el("div", "mira-ans-vdu-row mira-ans-warn", `⚠ ${w}`)));
             if (vdu.last_refreshed) body.append(el("div", "mira-ans-vdu-row", `Last refreshed: ${vdu.last_refreshed}`));
-            (vdu.source_tables || []).slice(0, 2).forEach((s) => body.append(el("div", "mira-ans-vdu-row", `Source: ${s}`)));
+            if (json.provider_status) body.append(el("div", "mira-ans-vdu-row", `AI: ${json.provider_status}`));
             det.append(body);
             bubble.append(det);
         }
         append(bubble);
-    }
-
-    function keyNumbers(pres) {
-        const out = [];
-        const cards = pres.kpi_cards || [];
-        cards.forEach((c) => { if (c && c.label && c.value != null) out.push(`${c.label}: ${c.value}`); });
-        if (out.length) return out.slice(0, 8);
-        // fall back to section metrics
-        const sections = pres.sections || {};
-        Object.values(sections).forEach((sec) => {
-            if (sec && Array.isArray(sec.metrics)) {
-                sec.metrics.slice(0, 4).forEach((m) => { if (m.label && m.value != null) out.push(`${m.label}: ${m.value}`); });
-            }
-        });
-        return out.slice(0, 8);
     }
 
     function block(title, items) {

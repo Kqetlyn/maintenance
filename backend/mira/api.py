@@ -19,6 +19,7 @@ from flask import Blueprint, jsonify, request
 from . import config
 from .core import context as ctx
 from .modules.maintenance import assistant_service
+from .modules.maintenance import chat_service
 from .privacy import privacy_guard_service as guard
 from .providers import get_provider, get_provider_status, generate_structured_summary
 from .reports import report_draft_service
@@ -171,6 +172,22 @@ def query():
     limit = body.get("limit")
     result = assistant_service.ask(question, _read_filters(), limit=limit)
     return jsonify(result)
+
+
+@mira_bp.route("/chat", methods=["POST"])
+def chat():
+    """Intelligent read-only Q&A: intent + period extraction -> verified data -> wording.
+
+    The question period (e.g. "April 2026") overrides the dashboard filter, so the
+    answer never falls back to a generic YTD summary when a month was asked for.
+    """
+    body = request.get_json(silent=True) or {}
+    question = body.get("question") or body.get("q") or ""
+    base_filters = _read_filters()
+    if isinstance(body.get("filters"), dict):
+        base_filters = {**base_filters, **{k: v for k, v in body["filters"].items() if k in ctx.FILTER_KEYS}}
+    result = chat_service.answer(question, base_filters)
+    return jsonify(guard._deep_redact(result))
 
 
 @mira_bp.route("/data-quality", methods=["GET", "POST"])
