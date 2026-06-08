@@ -613,6 +613,929 @@ def _run_with_timeout(producer, *args, timeout_seconds: int = _PM_QUERY_TIMEOUT_
         return None, "PM verified detail could not be loaded from the source schedule files right now."
 
 
+def _resolve_kpi_filters(question: str, base_filters: dict | None) -> dict:
+    """KPI card analysis must respect the dashboard filters unless text overrides them."""
+    base = ctx.normalize_filters(base_filters)
+    period = extract_period(question or "")
+    if not period:
+        return base
+    return resolve_filters(question or "", base)
+
+
+def _selected_mr_rows(filters: dict) -> list[dict]:
+    try:
+        return list(kpi._selected_period_work_order_rows(ctx.normalize_filters(filters)))  # type: ignore[attr-defined]
+    except Exception:
+        return list((kpi.get_work_orders(filters, limit=1000) or {}).get("rows") or [])
+
+
+def _filtered_mr_rows(filters: dict) -> list[dict]:
+    try:
+        return list(kpi._filtered_work_order_rows(ctx.normalize_filters(filters)))  # type: ignore[attr-defined]
+    except Exception:
+        return _selected_mr_rows(filters)
+
+
+def _carry_over_mr_rows(filters: dict) -> list[dict]:
+    try:
+        return list(kpi._opening_backlog_rows(ctx.normalize_filters(filters), _filtered_mr_rows(filters)))  # type: ignore[attr-defined]
+    except Exception:
+        activity = kpi.get_mr_activity_summary(filters)
+        return [{} for _ in range(int(activity.get("carry_over_open_mr") or 0))]
+
+
+def _parse_dt(value):
+    if isinstance(value, datetime):
+        return value
+    text = str(value or "").strip()
+    if not text or text == "--":
+        return None
+    normalized = text.replace("Z", "+00:00")
+    for candidate in (normalized, normalized.split(".")[0]):
+        try:
+            return datetime.fromisoformat(candidate)
+        except ValueError:
+            pass
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%d/%m/%Y %H:%M:%S", "%d/%m/%Y %H:%M", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _hours_between(start_value, end_value):
+    start_dt = _parse_dt(start_value)
+    end_dt = _parse_dt(end_value)
+    if not start_dt or not end_dt or end_dt < start_dt:
+        return None
+    return round((end_dt - start_dt).total_seconds() / 3600, 2)
+
+
+def _safe_float(value):
+    try:
+        if value in (None, "", "--"):
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _avg(values):
+    clean = [float(v) for v in values if v is not None]
+    return round(sum(clean) / len(clean), 2) if clean else None
+
+
+def _count_metric(metrics: dict, *keys) -> int:
+    total = 0
+    for key in keys:
+        try:
+            total += int(metrics.get(key) or 0)
+        except (TypeError, ValueError):
+            pass
+    return total
+
+
+def _metric_lines(metrics: dict, *, limit: int = 8) -> list[str]:
+    lines = []
+    for key, value in metrics.items():
+        if isinstance(value, (dict, list)):
+            continue
+        label = str(key).replace("_", " ").title()
+        lines.append(f"{label}: {_fmt(value)}")
+        if len(lines) >= limit:
+            break
+    return lines
+
+
+def _top_counter(rows: list[dict], keys: tuple[str, ...], *, limit: int = 5) -> list[dict]:
+    counts: Counter[str] = Counter()
+    for row in rows:
+        value = ""
+        for key in keys:
+            value = str(row.get(key) or "").strip()
+            if value:
+                break
+        counts[value or "Unknown"] += 1
+    return [{"name": name, "count": int(count)} for name, count in counts.most_common(limit)]
+
+
+def _kpi_context_base(definition: dict, filters: dict, *, record_count: int, rows_after_filter: int | None = None, source: str | None = None) -> dict:
+    return {
+        "kpiId": definition["id"],
+        "label": definition["label"],
+        "category": definition["category"],
+        "dataSource": definition["data_source"],
+        "requiredFields": definition["required_fields"],
+        "analysisFocus": definition["analysis_focus"],
+        "emptyStateMessage": definition["empty_state"],
+        "selectedPeriod": ctx.month_label(filters),
+        "selectedStage": filters.get("stage") or "all",
+        "recordCount": int(record_count or 0),
+        "rowsAfterFilter": int(rows_after_filter if rows_after_filter is not None else record_count or 0),
+        "source": source or definition["data_source"],
+        "metrics": {},
+        "evidence": [],
+        "findings": [],
+        "issueFocusAreas": [],
+        "riskIndicators": [],
+        "followUpActions": [],
+        "dataGaps": [],
+    }
+
+
+def _finish_context(context: dict) -> dict:
+    if not context.get("recordCount") and not context.get("metrics"):
+        context["dataGaps"].append(context.get("emptyStateMessage") or "No valid data is available for this selected KPI.")
+    context["keyNumbers"] = _metric_lines(context.get("metrics") or {}, limit=10)
+    return context
+
+
+def buildMrTrackingContext(filters: dict, definition: dict) -> dict:
+    rows = _selected_mr_rows(filters)
+    activity = kpi.get_mr_activity_summary(filters)
+    open_records = kpi.get_open_mr_records(filters, limit=10)
+    top_assets = kpi.get_top_assets_by_mr_count(filters, limit=5)
+    ack_counts = Counter(str(row.get("acknowledgement_status") or "Unknown").strip() or "Unknown" for row in rows)
+    open_rows = [row for row in rows if str(row.get("status_category") or "").lower() == "open" or str(row.get("request_state") or "").lower().replace(" ", "") in {"new", "inprogress"}]
+    oldest_open_days = None
+    if open_rows:
+        raised_dates = [_parse_dt(row.get("request_created_time") or row.get("start_time")) for row in open_rows]
+        raised_dates = [dt for dt in raised_dates if dt]
+        if raised_dates:
+            oldest_open_days = max((datetime.now(dt.tzinfo) - dt).days for dt in raised_dates)
+
+    context = _kpi_context_base(definition, filters, record_count=len(rows), source=activity.get("source"))
+    context["metrics"] = {
+        "mr_raised": activity.get("mr_raised"),
+        "open_mr": activity.get("open_count"),
+        "in_progress_mr": activity.get("in_progress_count"),
+        "new_mr": activity.get("new_count"),
+        "finished_mr": activity.get("finished_count"),
+        "closed_confirmed_mr": activity.get("closed_count"),
+        "carry_over_open_mr": activity.get("carry_over_open_mr"),
+        "not_acknowledged_mr": ack_counts.get("Not Acknowledged", 0),
+        "acknowledged_in_progress_mr": ack_counts.get("Acknowledged / In Progress", 0),
+        "oldest_open_mr_age_days": oldest_open_days,
+        "top_actual_machine_asset": ((top_assets.get("top_actual_machine_asset") or {}).get("asset_name")),
+    }
+    context["evidence"] = [
+        f"{_fmt(activity.get('mr_raised'))} MR were raised in {ctx.month_label(filters)}.",
+        f"{_fmt(activity.get('open_count'))} are open and {_fmt(activity.get('carry_over_open_mr'))} are carry-over open MR.",
+        f"Acknowledgement split: {', '.join(f'{name} {_fmt(count)}' for name, count in ack_counts.most_common(4)) or 'unavailable'}.",
+    ]
+    context["findings"] = [
+        f"MR tracking shows {_fmt(activity.get('open_count'))} open MR and {_fmt(activity.get('in_progress_count'))} in progress in the selected period.",
+        f"Top actual machine asset by MR count is {_fmt(context['metrics']['top_actual_machine_asset'])}.",
+    ]
+    if context["metrics"]["not_acknowledged_mr"]:
+        context["issueFocusAreas"].append(f"{_fmt(context['metrics']['not_acknowledged_mr'])} MR are not acknowledged.")
+    if activity.get("carry_over_open_mr"):
+        context["issueFocusAreas"].append(f"{_fmt(activity.get('carry_over_open_mr'))} carry-over MR need ownership review.")
+    if oldest_open_days is not None:
+        context["riskIndicators"].append(f"Oldest open MR age is {_fmt(oldest_open_days)} day(s), indicating carry-over follow-up risk.")
+    context["followUpActions"] = [
+        "Review not-acknowledged MR and confirm whether each has a linked WO.",
+        "Prioritise carry-over open MR before new MR volume increases.",
+        "Check the top actual machine asset for repeat workload drivers.",
+    ]
+    if not rows:
+        context["dataGaps"].append(definition["empty_state"])
+    if not any("acknowledgement_status" in row for row in rows):
+        context["dataGaps"].append("Acknowledgement status field is not available in the selected MR rows.")
+    context["sampleRecords"] = open_records.get("records") or []
+    return _finish_context(context)
+
+
+def buildWorkOrderResponseContext(filters: dict, definition: dict) -> dict:
+    rows = _selected_mr_rows(filters)
+    activity = kpi.get_mr_activity_summary(filters)
+    response_hours = []
+    completion_hours = []
+    target_rows = 0
+    target_exceeded = 0
+    for row in rows:
+        response = _hours_between(row.get("request_created_time"), row.get("maintenance_start_time"))
+        if response is not None:
+            response_hours.append(response)
+            target = _safe_float(row.get("response_target_hours") or row.get("ack_target_hours"))
+            if target is not None:
+                target_rows += 1
+                if response > target:
+                    target_exceeded += 1
+        completion = _safe_float(row.get("duration_hours"))
+        if completion is not None:
+            completion_hours.append(completion)
+
+    context = _kpi_context_base(definition, filters, record_count=len(rows), source="downtime work-order rows with request/start/end timestamps")
+    context["metrics"] = {
+        "total_mr": activity.get("mr_raised"),
+        "open_outstanding_mr": activity.get("open_count"),
+        "closed_confirmed_mr": activity.get("closed_count"),
+        "avg_response_hours": _avg(response_hours),
+        "avg_completion_hours": _avg(completion_hours),
+        "response_records_with_valid_dates": len(response_hours),
+        "completion_records_with_valid_ttr": len(completion_hours),
+        "work_orders_exceeding_response_target": target_exceeded if target_rows else None,
+    }
+    context["evidence"] = [
+        f"{_fmt(len(response_hours))} row(s) have valid raised-to-start timing for response analysis.",
+        f"{_fmt(len(completion_hours))} row(s) have valid completion/TTR timing.",
+        f"{_fmt(activity.get('open_count'))} MR remain open or outstanding in the selected period.",
+    ]
+    response_summary = (
+        f"Average response time is {_fmt(context['metrics']['avg_response_hours'])} hours from MR raised to maintenance start."
+        if context["metrics"]["avg_response_hours"] is not None
+        else "Average response time is unavailable because no valid raised-to-start date pairs were found."
+    )
+    completion_summary = (
+        f"Average completion time is {_fmt(context['metrics']['avg_completion_hours'])} hours for valid completed records."
+        if context["metrics"]["avg_completion_hours"] is not None
+        else "Average completion time is unavailable because no valid completion/TTR records were found."
+    )
+    context["findings"] = [
+        response_summary,
+        completion_summary,
+    ]
+    if activity.get("open_count"):
+        context["issueFocusAreas"].append(f"{_fmt(activity.get('open_count'))} open MR remain outstanding.")
+    if target_rows:
+        context["riskIndicators"].append(f"{_fmt(target_exceeded)} work order(s) exceeded configured response target hours.")
+    else:
+        context["dataGaps"].append("Response target hours are not exposed on the selected work-order rows, so target-exceeding count is unavailable.")
+    if not response_hours:
+        context["dataGaps"].append("No valid request-created to actual-start date pairs were found for response-time calculation.")
+    context["followUpActions"] = [
+        "Review open MR with no actual start timestamp.",
+        "Check high response-duration rows for delayed acknowledgement patterns.",
+        "Validate date fields before using response time in management reporting.",
+    ]
+    return _finish_context(context)
+
+
+def buildPreventiveVsCorrectiveContext(filters: dict, definition: dict) -> dict:
+    mix = kpi.get_preventive_corrective_summary(filters)
+    activity = kpi.get_mr_activity_summary(filters)
+    year = int(filters.get("year") or datetime.now().year)
+    end_month = int(filters.get("month") or datetime.now().month)
+    trend = []
+    for month in range(1, max(1, end_month) + 1):
+        mf = dict(filters, year=year, month=month, period_mode="monthly")
+        try:
+            row = kpi.get_preventive_corrective_summary(mf)
+            trend.append({
+                "month": calendar.month_abbr[month],
+                "preventive": row.get("preventive_count"),
+                "corrective": row.get("corrective_count"),
+                "total": row.get("total"),
+            })
+        except Exception:
+            continue
+
+    context = _kpi_context_base(definition, filters, record_count=int(mix.get("total") or 0), source=mix.get("source"))
+    context["metrics"] = {
+        "preventive_mr": mix.get("preventive_count"),
+        "corrective_mr": mix.get("corrective_count"),
+        "preventive_ratio_pct": mix.get("preventive_ratio_pct"),
+        "corrective_ratio_pct": mix.get("corrective_ratio_pct"),
+        "total_classified_mr": mix.get("total"),
+        "classification_review_rows": mix.get("review_count"),
+        "top_actual_machine_asset": activity.get("top_actual_machine_asset_name"),
+    }
+    context["trend"] = trend
+    context["evidence"] = [
+        f"Downtime classifier counted {_fmt(mix.get('preventive_count'))} preventive MR and {_fmt(mix.get('corrective_count'))} corrective MR.",
+        f"Corrective ratio is {_fmt(mix.get('corrective_ratio_pct'))}% for {ctx.month_label(filters)}.",
+    ]
+    context["findings"] = [
+        f"Maintenance mix is {_fmt(mix.get('preventive_count'))} preventive vs {_fmt(mix.get('corrective_count'))} corrective MR.",
+        f"Corrective demand is the larger share at {_fmt(mix.get('corrective_ratio_pct'))}%." if (mix.get("corrective_count") or 0) > (mix.get("preventive_count") or 0) else "Preventive activity is equal to or above corrective MR for the selected period.",
+    ]
+    if (mix.get("corrective_count") or 0) > (mix.get("preventive_count") or 0):
+        context["issueFocusAreas"].append("Corrective workload is higher than preventive workload in the selected period.")
+        context["riskIndicators"].append("A corrective-heavy mix can indicate reactive maintenance pressure if repeated across periods.")
+    if mix.get("review_count"):
+        context["dataGaps"].append(f"{_fmt(mix.get('review_count'))} MR classification row(s) need review in the preventive/corrective classifier.")
+    context["followUpActions"] = [
+        "Review assets or areas generating repeated corrective MR.",
+        "Compare corrective-heavy areas against upcoming PM coverage.",
+        "Validate classifier review rows before sharing the maintenance mix externally.",
+    ]
+    return _finish_context(context)
+
+
+def buildDataReliabilityContext(filters: dict, definition: dict) -> dict:
+    rows = _selected_mr_rows(filters)
+    dq = kpi.get_data_reliability_issues(filters)
+    flag_counts: Counter[str] = Counter()
+    for row in rows:
+        flags = row.get("data_quality_flags") or row.get("data_quality_flag") or []
+        if isinstance(flags, str):
+            flags = [flag.strip() for flag in flags.split(";") if flag.strip()]
+        for flag in flags:
+            flag_counts[str(flag).strip()] += 1
+
+    missing_start = _count_metric(flag_counts, "Missing start date for finished MR")
+    missing_end = _count_metric(flag_counts, "Missing finished date for finished MR")
+    invalid_logic = _count_metric(flag_counts, "Finished date before start date", "Finished date before raised date")
+    context = _kpi_context_base(
+        definition,
+        filters,
+        record_count=int(dq.get("total_work_orders") or len(rows)),
+        rows_after_filter=len(rows),
+        source=dq.get("source"),
+    )
+    context["metrics"] = {
+        "total_work_orders": dq.get("total_work_orders"),
+        "records_requiring_attention": dq.get("requires_attention_count"),
+        "missing_start_date": missing_start,
+        "missing_end_date": missing_end,
+        "invalid_date_logic": invalid_logic,
+        "duplicate_records": dq.get("duplicate_work_order_count"),
+        "missing_asset_id": kpi.get_mr_activity_summary(filters).get("missing_asset_count"),
+        "missing_functional_location": kpi.get_mr_activity_summary(filters).get("missing_functional_location_count"),
+        "unknown_status": kpi.get_mr_activity_summary(filters).get("unknown_status_count"),
+        "mttr_missing_total": dq.get("mttr_missing_total"),
+        "mtbf_missing_total": dq.get("mtbf_missing_total"),
+    }
+    context["affectedKpis"] = ["response time", "completion time", "MTTR", "MTBF", "MR ageing", "open backlog"]
+    top_issues = []
+    for label, count in sorted(flag_counts.items(), key=lambda item: (-item[1], item[0]))[:5]:
+        top_issues.append({"issue": label, "count": int(count), "impact": "May affect KPI accuracy or filtering."})
+    context["topIssues"] = top_issues
+    context["evidence"] = [
+        f"{_fmt(dq.get('requires_attention_count'))} downtime records require attention.",
+        f"MTTR missing total is {_fmt(dq.get('mttr_missing_total'))}; MTBF missing total is {_fmt(dq.get('mtbf_missing_total'))}.",
+    ]
+    context["findings"] = [
+        f"Data reliability issues affect {_fmt(dq.get('requires_attention_count'))} selected records.",
+        f"Top data issue: {_fmt(top_issues[0]['issue'])} ({_fmt(top_issues[0]['count'])})" if top_issues else "No row-level data-quality flags were found in the selected rows.",
+    ]
+    for issue in top_issues[:3]:
+        context["issueFocusAreas"].append(f"{issue['issue']}: {_fmt(issue['count'])} row(s).")
+    if invalid_logic:
+        context["riskIndicators"].append("Invalid date logic may distort response time, completion time, MTTR, and MR ageing.")
+    if not rows:
+        context["dataGaps"].append(definition["empty_state"])
+    if not flag_counts:
+        context["dataGaps"].append("No detailed row-level data-quality flag breakdown is available for the selected rows.")
+    context["followUpActions"] = [
+        "Correct missing start/end dates on finished MR before management reporting.",
+        "Validate missing asset ID and functional location rows with engineering.",
+        "Re-check duplicate and invalid-date records before relying on trend KPIs.",
+    ]
+    return _finish_context(context)
+
+
+def buildYearlyMrMovementContext(filters: dict, definition: dict) -> dict:
+    base_year = int(filters.get("year") or datetime.now().year)
+    years = [base_year - 2, base_year - 1, base_year]
+    trend = []
+    for year in years:
+        yf = dict(filters, year=year, month=None, period_mode="full_year")
+        try:
+            activity = kpi.get_mr_activity_summary(yf)
+            trend.append({
+                "year": year,
+                "mr_raised": activity.get("mr_raised"),
+                "mr_finished": activity.get("closed_count"),
+                "open_mr": activity.get("open_count"),
+                "carry_over_open_mr": activity.get("carry_over_open_mr"),
+                "closure_rate_pct": activity.get("closure_rate_pct"),
+            })
+        except Exception:
+            trend.append({"year": year, "data_gap": "Year could not be loaded."})
+    current = trend[-1] if trend else {}
+    previous = trend[-2] if len(trend) > 1 else {}
+    movement = None
+    if current.get("mr_raised") is not None and previous.get("mr_raised") is not None:
+        movement = int(current.get("mr_raised") or 0) - int(previous.get("mr_raised") or 0)
+
+    context = _kpi_context_base(definition, filters, record_count=sum(int(row.get("mr_raised") or 0) for row in trend), source="downtime work-order rows grouped by year")
+    context["metrics"] = {
+        "selected_year": base_year,
+        "current_year_mr_raised": current.get("mr_raised"),
+        "current_year_mr_finished": current.get("mr_finished"),
+        "current_year_open_mr": current.get("open_mr"),
+        "current_year_carry_over_open_mr": current.get("carry_over_open_mr"),
+        "mr_raised_change_vs_prior_year": movement,
+        "current_year_closure_rate_pct": current.get("closure_rate_pct"),
+    }
+    context["trend"] = trend
+    context["evidence"] = [f"{row.get('year')}: raised {_fmt(row.get('mr_raised'))}, finished {_fmt(row.get('mr_finished'))}, carry-over {_fmt(row.get('carry_over_open_mr'))}." for row in trend]
+    context["findings"] = [
+        f"{base_year} MR raised total is {_fmt(current.get('mr_raised'))}, with {_fmt(current.get('mr_finished'))} finished/closed.",
+        f"MR raised movement vs prior year is {_fmt(movement)}." if movement is not None else "Prior-year movement is unavailable.",
+    ]
+    if current.get("carry_over_open_mr"):
+        context["issueFocusAreas"].append(f"{_fmt(current.get('carry_over_open_mr'))} carry-over MR remain in {base_year}.")
+        context["riskIndicators"].append("Carry-over backlog indicates closure is not fully keeping up with MR creation.")
+    context["followUpActions"] = [
+        "Compare MR raised vs finished by year with the engineering review cadence.",
+        "Review carry-over trend before setting monthly closure targets.",
+        "Check whether recurring assets are driving year-on-year MR growth.",
+    ]
+    return _finish_context(context)
+
+
+def _criticality_text(row: dict) -> str:
+    return " ".join(str(row.get(key) or "") for key in ("criticality", "raw_criticality", "normalized_criticality", "equipment_criticality", "asset_criticality")).lower()
+
+
+def _is_existing_critical_asset(row: dict) -> bool:
+    text = _criticality_text(row)
+    if "non-critical" in text or "non critical" in text or "facility" in text:
+        return False
+    return bool(re.search(r"\bcritical\b", text))
+
+
+def buildCriticalMachineActivityContext(filters: dict, definition: dict) -> dict:
+    rows = _selected_mr_rows(filters)
+    critical_rows = [
+        row for row in rows
+        if _is_existing_critical_asset(row)
+    ]
+    open_critical = [row for row in critical_rows if str(row.get("status_category") or "").lower() == "open" or str(row.get("request_state") or "").lower().replace(" ", "") in {"new", "inprogress"}]
+    repeated = _top_counter(critical_rows, ("asset_display_name", "mapped_asset_name", "machine_name", "asset_name"), limit=5)
+    downtime_hours = round(sum(float(row.get("duration_hours") or 0) for row in critical_rows if _safe_float(row.get("duration_hours")) is not None), 2)
+    context = _kpi_context_base(definition, filters, record_count=len(critical_rows), rows_after_filter=len(critical_rows), source="downtime rows enriched by existing asset criticality list")
+    context["metrics"] = {
+        "critical_machine_mr": len(critical_rows),
+        "active_critical_machine_mr": len(open_critical),
+        "critical_machine_downtime_hours": downtime_hours,
+        "critical_assets_with_repeat_mr": sum(1 for row in repeated if row.get("count", 0) > 1),
+        "top_critical_asset": repeated[0]["name"] if repeated else None,
+        "top_critical_asset_mr_count": repeated[0]["count"] if repeated else None,
+    }
+    context["topCriticalAssets"] = repeated
+    context["evidence"] = [
+        f"{_fmt(len(critical_rows))} selected MR rows are linked to existing critical asset classification.",
+        f"{_fmt(len(open_critical))} critical-machine MR are active/open.",
+    ]
+    context["findings"] = [
+        f"Critical machine activity count is {_fmt(len(critical_rows))} for {ctx.month_label(filters)}.",
+        f"Top critical asset is {_fmt(context['metrics']['top_critical_asset'])} with {_fmt(context['metrics']['top_critical_asset_mr_count'])} MR." if repeated else "No repeated critical-machine asset appears in the selected data.",
+    ]
+    if open_critical:
+        context["issueFocusAreas"].append(f"{_fmt(len(open_critical))} critical-machine MR remain open or in progress.")
+        context["riskIndicators"].append("Open activity on existing critical assets requires follow-up because production impact can be higher.")
+    if not critical_rows and rows:
+        context["dataGaps"].append("No selected MR rows are tagged as critical by the existing asset criticality fields.")
+    if rows and not any(_criticality_text(row).strip() or row.get("is_critical") is not None for row in rows):
+        context["dataGaps"].append("Criticality fields are not available on selected MR rows, so critical machine analysis is limited.")
+    context["followUpActions"] = [
+        "Review open MR linked to existing critical assets.",
+        "Check repeated critical-machine MR for maintenance planning follow-up.",
+        "Validate criticality mapping for rows with missing asset IDs before reporting.",
+    ]
+    return _finish_context(context)
+
+
+def buildPmScheduleContext(filters: dict, definition: dict) -> dict:
+    pm_bundle, pm_warning = _run_with_timeout(kpi.get_verified_pm_metrics, filters)
+    overdue, overdue_warning = (None, None)
+    if pm_bundle:
+        overdue, overdue_warning = _run_with_timeout(kpi.get_overdue_pm_records, filters, limit=8)
+    pm_bundle = pm_bundle or {"metrics": {}, "data_quality": {}}
+    metrics = pm_bundle.get("metrics") or {}
+    scheduled = metrics.get("scheduled_pm")
+    completed = metrics.get("completed_pm")
+    pending = int(scheduled or 0) - int(completed or 0) if scheduled is not None and completed is not None else None
+    context = _kpi_context_base(
+        definition,
+        filters,
+        record_count=int((pm_bundle.get("data_quality") or {}).get("rows_loaded") or scheduled or 0),
+        rows_after_filter=int((pm_bundle.get("data_quality") or {}).get("rows_after_filter") or scheduled or 0),
+        source=(pm_bundle.get("data_quality") or {}).get("source"),
+    )
+    context["metrics"] = {
+        "scheduled_pm": scheduled,
+        "completed_pm_manual_done_only": completed,
+        "pending_pm": pending,
+        "due_this_month": metrics.get("due_this_month"),
+        "overdue_pm": metrics.get("overdue_pm"),
+        "backlog_pm": metrics.get("backlog_pm"),
+        "deferred_pm": metrics.get("deferred_pm"),
+        "pm_compliance_percent": metrics.get("pm_compliance_percent"),
+        "focus_card": definition["label"],
+    }
+    context["evidence"] = [
+        f"{_fmt(scheduled)} PM tasks are scheduled for {ctx.month_label(filters)}.",
+        f"{_fmt(completed)} PM tasks are manually marked Done; auto-done is not counted.",
+        f"{_fmt(metrics.get('overdue_pm'))} PM tasks are overdue and {_fmt(metrics.get('backlog_pm'))} are backlog.",
+    ]
+    compliance_value = metrics.get("pm_compliance_percent")
+    compliance_text = (
+        f"PM compliance is {_fmt(compliance_value)}% based on manual Done only."
+        if compliance_value is not None
+        else "PM compliance is unavailable because verified PM detail did not finish loading."
+    )
+    context["findings"] = [
+        compliance_text,
+        f"Selected focus is {definition['label']}, using PM schedule period KPIs.",
+    ]
+    if metrics.get("overdue_pm"):
+        context["issueFocusAreas"].append(f"{_fmt(metrics.get('overdue_pm'))} overdue PM tasks need follow-up.")
+    if pending:
+        context["issueFocusAreas"].append(f"{_fmt(pending)} PM tasks remain pending in the selected period.")
+    if metrics.get("pm_compliance_percent") is not None and float(metrics.get("pm_compliance_percent") or 0) < 80:
+        context["riskIndicators"].append("PM compliance is below 80%, which may increase reactive workload if unresolved.")
+    context["followUpActions"] = [
+        "Review overdue and backlog PM with the engineering team.",
+        "Confirm completed PM records are manually marked Done.",
+        "Check PM workload by stage, asset category, and functional location.",
+    ]
+    context["sampleRecords"] = (overdue or {}).get("records") or []
+    for warning in ((pm_bundle.get("data_quality") or {}).get("warnings") or []):
+        context["dataGaps"].append(warning)
+    if pm_warning:
+        context["dataGaps"].append(pm_warning)
+    if overdue_warning:
+        context["dataGaps"].append(overdue_warning)
+    return _finish_context(context)
+
+
+def buildDowntimeContext(filters: dict, definition: dict) -> dict:
+    downtime = kpi.get_mr_activity_summary(filters)
+    mttr = kpi.get_mttr(filters)
+    mtbf = kpi.get_mtbf(filters)
+    top_assets = kpi.get_top_assets_by_mr_count(filters, limit=5)
+    top_locations = kpi.get_top_functional_locations(filters, limit=5)
+    context = _kpi_context_base(definition, filters, record_count=int(downtime.get("selected_work_order_rows_count") or downtime.get("mr_raised") or 0), source=downtime.get("source"))
+    context["metrics"] = {
+        "total_mr": downtime.get("mr_raised"),
+        "open_mr": downtime.get("open_count"),
+        "closed_confirmed_mr": downtime.get("closed_count"),
+        "mttr_hours": mttr.get("overall_mttr_hours"),
+        "mtbf_hours": mtbf.get("overall_average_mtbf_hours"),
+        "highest_mttr_machine_group": mttr.get("highest_mttr_machine_group"),
+        "lowest_mtbf_asset": mtbf.get("lowest_mtbf_asset_name"),
+        "top_actual_machine_asset": ((top_assets.get("top_actual_machine_asset") or {}).get("asset_name")),
+        "top_functional_location": ((top_locations.get("top_functional_location") or {}).get("name")),
+        "focus_card": definition["label"],
+    }
+    context["evidence"] = [
+        f"{_fmt(downtime.get('mr_raised'))} MR are in the selected downtime scope.",
+        f"MTTR is {_fmt(mttr.get('overall_mttr_hours'))} h and MTBF is {_fmt(mtbf.get('overall_average_mtbf_hours'))} h.",
+    ]
+    context["findings"] = [
+        f"Downtime focus card is {definition['label']}, using the verified downtime dashboard metrics.",
+        f"Top actual machine asset is {_fmt(context['metrics']['top_actual_machine_asset'])}.",
+    ]
+    if downtime.get("open_count"):
+        context["issueFocusAreas"].append(f"{_fmt(downtime.get('open_count'))} MR remain open in the downtime scope.")
+    if mtbf.get("lowest_mtbf_asset_name"):
+        context["riskIndicators"].append(f"Lowest MTBF asset is {_fmt(mtbf.get('lowest_mtbf_asset_name'))}; this is a repeat-interval indicator, not a severity assignment.")
+    context["followUpActions"] = [
+        "Review assets or functional locations with high MR count.",
+        "Check low-MTBF assets and high-MTTR groups for repeated delays.",
+        "Validate downtime date fields where MTTR/MTBF records are missing.",
+    ]
+    context["dataGaps"] = _downtime_warning_lines(downtime)
+    return _finish_context(context)
+
+
+def buildSparePartsContext(filters: dict, definition: dict) -> dict:
+    spare = kpi.get_verified_spare_parts_metrics(filters)
+    top = kpi.get_top_spare_parts_consumption(filters, limit=5)
+    try:
+        payload = kpi._spare_parts_payload()  # type: ignore[attr-defined]
+    except Exception:
+        payload = {}
+    inventory_summary = ((payload.get("inventory") or {}).get("summary") or {})
+    po_summary = ((payload.get("po_classification") or {}).get("summary") or {})
+    context = _kpi_context_base(
+        definition,
+        filters,
+        record_count=int(spare.get("inventory_rows_loaded") or 0),
+        rows_after_filter=int(spare.get("project_transaction_rows_after_filter") or spare.get("po_rows_after_filter") or 0),
+        source=spare.get("source"),
+    )
+    context["metrics"] = {
+        "current_in_stock_spare_parts": spare.get("current_in_stock_items"),
+        "current_in_stock_value": spare.get("current_in_stock_value"),
+        "drawn_from_store_value": spare.get("drawn_from_store_value"),
+        "non_stock_value": spare.get("non_stock_value"),
+        "services_value": spare.get("services_value"),
+        "low_stock_items": inventory_summary.get("low_stock_items"),
+        "out_of_stock_items": inventory_summary.get("out_of_stock_items"),
+        "reorder_required_items": inventory_summary.get("reorder_required_items"),
+        "critical_equipment_parts_below_minimum": inventory_summary.get("critical_equipment_parts_below_minimum"),
+        "pending_po_items": po_summary.get("spare_part_po_count"),
+        "top_consumed_part": spare.get("top_consumed_part"),
+        "yoy_consumption_pct": spare.get("yoy_consumption_pct"),
+        "focus_card": definition["label"],
+    }
+    context["evidence"] = [
+        f"{_fmt(spare.get('current_in_stock_items'))} in-stock spare part items are recorded.",
+        f"Drawn-from-store value is {_currency(spare.get('drawn_from_store_value'))}; non-stock value is {_currency(spare.get('non_stock_value'))}.",
+        "Services include repair and cleaning." if spare.get("services_value") is not None else "",
+    ]
+    context["findings"] = [
+        f"Spare-parts focus card is {definition['label']}, using the spare-parts dashboard payload.",
+        f"Top consumed part is {_fmt(spare.get('top_consumed_part'))}.",
+    ]
+    if inventory_summary.get("reorder_required_items"):
+        context["issueFocusAreas"].append(f"{_fmt(inventory_summary.get('reorder_required_items'))} stocked items require reorder.")
+    if inventory_summary.get("out_of_stock_items"):
+        context["riskIndicators"].append(f"{_fmt(inventory_summary.get('out_of_stock_items'))} items are out of stock.")
+    if inventory_summary.get("critical_equipment_parts_below_minimum"):
+        context["riskIndicators"].append(f"{_fmt(inventory_summary.get('critical_equipment_parts_below_minimum'))} critical-equipment linked parts are below minimum based on existing inventory criticality.")
+    context["followUpActions"] = [
+        "Review below-minimum and out-of-stock items with stores.",
+        "Check high-consumption parts against open MR and upcoming PM needs.",
+        "Validate manual-review PO classifications before using purchase totals.",
+    ]
+    context["topParts"] = top.get("parts") or []
+    context["dataGaps"] = list(spare.get("data_notes") or [])
+    if not inventory_summary:
+        context["dataGaps"].append("Detailed stock-health summary is unavailable from the spare-parts payload.")
+    return _finish_context(context)
+
+
+_KPI_REGISTRY = {
+    "mr_tracking_acknowledgement": {
+        "id": "mr_tracking_acknowledgement",
+        "label": "MR Tracking & Acknowledgement",
+        "category": "Maintenance Request",
+        "data_source": "Downtime MR/WO rows",
+        "required_fields": ["MR number", "status", "actualStart", "actualEnd", "acknowledgement", "assetId", "machineGroup", "createdDate"],
+        "analysis_focus": ["open MR", "acknowledgement gaps", "oldest open MR", "MR status movement", "follow-up actions"],
+        "empty_state": "No MR tracking records are available for the selected filters.",
+        "builder": buildMrTrackingContext,
+    },
+    "mr_open": {
+        "id": "mr_open", "label": "Open MR", "category": "Maintenance Request", "data_source": "Downtime open MR rows",
+        "required_fields": ["MR number", "status", "createdDate", "assetId", "machineGroup"],
+        "analysis_focus": ["open MR", "carry-over work", "oldest open MR", "follow-up actions"],
+        "empty_state": "No open MR records are available for the selected filters.", "builder": buildMrTrackingContext,
+    },
+    "mr_in_progress": {
+        "id": "mr_in_progress", "label": "In-Progress MR", "category": "Maintenance Request", "data_source": "Downtime MR status rows",
+        "required_fields": ["MR number", "status", "actualStart", "assetId", "machineGroup"],
+        "analysis_focus": ["in-progress MR", "acknowledgement", "completion movement"],
+        "empty_state": "No in-progress MR records are available for the selected filters.", "builder": buildMrTrackingContext,
+    },
+    "wo_response_time": {
+        "id": "wo_response_time", "label": "Work Order Response", "category": "Work Order", "data_source": "Downtime work-order timestamp rows",
+        "required_fields": ["MR number", "WO number", "createdDate", "actualStart", "actualEnd", "status"],
+        "analysis_focus": ["response time", "completion time", "open WO", "delayed WO", "date gaps"],
+        "empty_state": "No work-order response records are available for the selected filters.", "builder": buildWorkOrderResponseContext,
+    },
+    "preventive_corrective_mix": {
+        "id": "preventive_corrective_mix", "label": "Preventive vs Corrective", "category": "Maintenance Mix", "data_source": "Downtime preventive/corrective classifier",
+        "required_fields": ["MR number", "maintenance type", "description", "createdDate", "status"],
+        "analysis_focus": ["maintenance mix", "planned vs reactive work", "corrective trend", "classification review"],
+        "empty_state": "No preventive/corrective MR classification data is available for the selected filters.", "builder": buildPreventiveVsCorrectiveContext,
+    },
+    "data_quality": {
+        "id": "data_quality", "label": "Data Reliability", "category": "Data Quality", "data_source": "Downtime quality flags",
+        "required_fields": ["MR number", "createdDate", "actualStart", "actualEnd", "status", "assetId", "functionalLocation"],
+        "analysis_focus": ["missing dates", "invalid records", "duplicate records", "asset ID gaps", "KPI reliability"],
+        "empty_state": "No data-reliability rows are available for the selected filters.", "builder": buildDataReliabilityContext,
+    },
+    "yearly_mr_movement": {
+        "id": "yearly_mr_movement", "label": "Yearly MR Movement", "category": "Maintenance Request", "data_source": "Downtime all-year MR rows",
+        "required_fields": ["MR number", "createdDate", "status", "actualEnd"],
+        "analysis_focus": ["MR raised by year", "MR finished by year", "carry-over by year", "closure trend"],
+        "empty_state": "No yearly MR movement data is available.", "builder": buildYearlyMrMovementContext,
+    },
+    "critical_machine_activity": {
+        "id": "critical_machine_activity", "label": "Critical Machine Activity", "category": "Critical Assets", "data_source": "Downtime rows enriched from existing asset criticality list",
+        "required_fields": ["assetId", "criticality", "status", "createdDate", "duration"],
+        "analysis_focus": ["critical asset workload", "active critical MR/WO", "repeat activity", "downtime on critical machines"],
+        "empty_state": "No existing critical-machine activity is available for the selected filters.", "builder": buildCriticalMachineActivityContext,
+    },
+}
+
+for _pm_id, _pm_label in {
+    "pm_due_today": "PM Due Today",
+    "pm_completed": "PM Completed",
+    "pm_pending": "PM Pending",
+    "pm_overdue": "PM Overdue",
+    "pm_completion_rate": "PM Completion Rate",
+    "pm_upcoming_7_days": "Upcoming PM Next 7 Days",
+}.items():
+    _KPI_REGISTRY[_pm_id] = {
+        "id": _pm_id,
+        "label": _pm_label,
+        "category": "PM Schedule",
+        "data_source": "PM schedule period KPIs",
+        "required_fields": ["PM task", "plannedDate", "status", "assetId", "stage", "scope"],
+        "analysis_focus": ["due PM", "manual Done completion", "overdue PM", "backlog PM", "compliance"],
+        "empty_state": "No PM schedule tasks are available for the selected filters.",
+        "builder": buildPmScheduleContext,
+    }
+
+for _dt_id, _dt_label in {
+    "downtime_active": "Current Active Downtime",
+    "downtime_incidents": "Downtime Incidents",
+    "downtime_total_hours": "Total Downtime Hours",
+    "downtime_mttr": "MTTR",
+    "downtime_mtbf": "MTBF",
+    "downtime_top_machine_group": "Top Machine Groups",
+    "downtime_repeat_assets": "Repeated Downtime Assets",
+}.items():
+    _KPI_REGISTRY[_dt_id] = {
+        "id": _dt_id,
+        "label": _dt_label,
+        "category": "Downtime",
+        "data_source": "Downtime dashboard verified metrics",
+        "required_fields": ["MR number", "assetId", "machineGroup", "actualStart", "actualEnd", "duration", "status"],
+        "analysis_focus": ["downtime workload", "MTTR", "MTBF", "repeat assets", "open downtime"],
+        "empty_state": "No downtime records are available for the selected filters.",
+        "builder": buildDowntimeContext,
+    }
+
+for _sp_id, _sp_label in {
+    "spare_parts_low_stock": "Items Below Minimum Stock",
+    "spare_parts_consumption": "High-Consumption Parts",
+    "spare_parts_pending_po": "Pending PO / External Purchase",
+    "spare_parts_stockout_risk": "Stock-Out Risk",
+}.items():
+    _KPI_REGISTRY[_sp_id] = {
+        "id": _sp_id,
+        "label": _sp_label,
+        "category": "Spare Parts",
+        "data_source": "Spare-parts inventory, PO, and project transaction payloads",
+        "required_fields": ["partNumber", "stockQty", "minStock", "maxStock", "poDate", "quantity", "value"],
+        "analysis_focus": ["below minimum stock", "consumption", "pending PO", "stock-out risk", "manual review"],
+        "empty_state": "No spare-parts records are available for the selected filters.",
+        "builder": buildSparePartsContext,
+    }
+
+
+def _selected_kpi_definitions(selected_kpis: list[str], selected_kpi_labels: list[str]) -> list[dict]:
+    definitions = []
+    for index, kpi_id in enumerate(selected_kpis):
+        if kpi_id in _KPI_REGISTRY:
+            definitions.append(_KPI_REGISTRY[kpi_id])
+        else:
+            label = selected_kpi_labels[index] if index < len(selected_kpi_labels) else kpi_id
+            definitions.append({
+                "id": kpi_id,
+                "label": label,
+                "category": "Unknown KPI",
+                "data_source": "Unavailable",
+                "required_fields": [],
+                "analysis_focus": ["selected KPI could not be matched to a backend context builder"],
+                "empty_state": f"No backend KPI context builder is registered for {label}.",
+                "builder": None,
+            })
+    return definitions
+
+
+def _build_kpi_contexts(filters: dict, definitions: list[dict]) -> list[dict]:
+    contexts = []
+    for definition in definitions:
+        builder = definition.get("builder")
+        if not builder:
+            context = _kpi_context_base(definition, filters, record_count=0)
+            context["dataGaps"].append(definition["empty_state"])
+            contexts.append(_finish_context(context))
+            continue
+        try:
+            contexts.append(builder(filters, definition))
+        except Exception as exc:
+            context = _kpi_context_base(definition, filters, record_count=0)
+            context["dataGaps"].append(f"{definition['label']} context could not be built: {exc}")
+            contexts.append(_finish_context(context))
+    return contexts
+
+
+def _section_from_kpi_context(context: dict) -> dict:
+    summary = (
+        f"{context['label']} for {context['selectedPeriod']} uses {context['dataSource']} "
+        f"with {_fmt(context.get('recordCount'))} source row(s)."
+    )
+    if context.get("findings"):
+        summary += " " + str(context["findings"][0])
+    return {
+        "kpi_id": context["kpiId"],
+        "title": context["label"],
+        "summary": summary,
+        "key_findings": context.get("findings") or [],
+        "issue_focus_areas": context.get("issueFocusAreas") or [],
+        "risk_indicators": context.get("riskIndicators") or [],
+        "follow_up_actions": context.get("followUpActions") or [],
+        "data_gaps": context.get("dataGaps") or [],
+    }
+
+
+def _fallback_kpi_answer(contexts: list[dict]) -> tuple[str, list[dict]]:
+    sections = [_section_from_kpi_context(context) for context in contexts]
+    if not contexts:
+        return "No KPI cards were selected, so MIRA could not build a KPI-specific analysis.", sections
+    if len(contexts) == 1:
+        section = sections[0]
+        answer = f"KPI Summary: {section['summary']}"
+    else:
+        labels = ", ".join(context["label"] for context in contexts)
+        answer = f"Overall Summary: MIRA analysed {len(contexts)} selected KPI areas for the current dashboard filters: {labels}."
+    return answer, sections
+
+
+def _kpi_prompt(question: str, filters: dict, contexts: list[dict]) -> str:
+    output_format = (
+        "For single KPI selection, use sections: 1. KPI Summary 2. Key Findings 3. Issue Focus Areas "
+        "4. Predictive / Risk Indicators 5. Follow-up Actions 6. Data Gaps."
+        if len(contexts) == 1
+        else "For multiple KPI selections, use sections: 1. Overall Summary 2. Findings by Selected KPI "
+        "3. Cross-KPI Issue Focus 4. Predictive / Risk Indicators 5. Follow-up Actions 6. Data Gaps. "
+        "Include a separate subsection for each selected KPI."
+    )
+    compact = {
+        "question": question,
+        "selected_period": ctx.month_label(filters),
+        "period_mode": filters.get("period_mode"),
+        "stage": filters.get("stage"),
+        "selected_kpi_contexts": contexts,
+    }
+    return (
+        f'Answer this KPI Analysis request: "{question}"\n\n'
+        "You are analysing only the selected KPI area unless multiple KPI cards are selected. "
+        "Do not produce a generic maintenance summary. Use the KPI context provided. "
+        "Focus on the selected KPI's evidence, patterns, risks, and follow-up actions. "
+        "Do not invent values. Do not recommend or assign severity. MIRA is read-only.\n\n"
+        f"{output_format}\n\n"
+        f"VERIFIED_KPI_CONTEXT_JSON:\n{json.dumps(compact, default=str, ensure_ascii=False)}\n"
+    )
+
+
+def _answer_kpi_analysis(question: str, base_filters: dict | None, selected_kpis: list[str], selected_kpi_labels: list[str]) -> dict:
+    filters = _resolve_kpi_filters(question or "", base_filters)
+    definitions = _selected_kpi_definitions(selected_kpis, selected_kpi_labels)
+    contexts = _build_kpi_contexts(filters, definitions)
+    answer_text, sections = _fallback_kpi_answer(contexts)
+
+    provider = OllamaMiraProvider()
+    used_llm = False
+    if config.LOCAL_LLM_ENABLED and config.PROVIDER_MODE in ("auto", "ollama") and provider.resolve_model() and contexts:
+        try:
+            llm = generate_with_ollama(
+                _CHAT_SYSTEM_PROMPT,
+                _kpi_prompt(question or "", filters, contexts),
+                model=provider.resolve_model(),
+                timeout=20,
+            ).strip()
+            if llm:
+                answer_text = llm
+                used_llm = True
+        except Exception:
+            used_llm = False
+
+    key_numbers = []
+    warnings = []
+    for context in contexts:
+        key_numbers.extend([f"{context['label']} - {line}" for line in (context.get("keyNumbers") or [])[:6]])
+        warnings.extend(context.get("dataGaps") or [])
+
+    view_data = _view_data_used(
+        "kpi_analysis",
+        filters,
+        warnings,
+        source_tables=[f"{context['label']}: {context['dataSource']}" for context in contexts],
+        rows_loaded=[_row_metric(context["label"], context.get("recordCount")) for context in contexts],
+        rows_after_filter=[_row_metric(context["label"], context.get("rowsAfterFilter")) for context in contexts],
+        kpi_values_used=key_numbers[:40],
+    )
+    view_data["selected_kpis"] = [context["kpiId"] for context in contexts]
+    view_data["analysis_focus"] = [
+        {"kpi": context["label"], "focus": context.get("analysisFocus") or []}
+        for context in contexts
+    ]
+
+    status = get_provider_status()
+    follow_up = []
+    for context in contexts:
+        for item in context.get("followUpActions") or []:
+            if item not in follow_up:
+                follow_up.append(item)
+
+    return {
+        "ok": True,
+        "intent": "kpi_analysis",
+        "mode": "kpi_analysis",
+        "period": ctx.month_label(filters),
+        "period_used": f"Period used: {ctx.month_label(filters)}",
+        "filters": filters,
+        "answer": answer_text,
+        "key_numbers_used": key_numbers[:24],
+        "insight": [f"Selected KPI focus areas: {', '.join(context['label'] for context in contexts) or 'None'}."],
+        "recommended_follow_up": follow_up[:8],
+        "kpi_analysis_contexts": contexts,
+        "kpi_analysis_sections": sections,
+        "selected_kpis": [context["kpiId"] for context in contexts],
+        "selected_kpi_labels": [context["label"] for context in contexts],
+        "view_data_used": view_data,
+        "provider": "ollama" if used_llm else "rule_based",
+        "provider_status": status["status"],
+        "provider_mode_label": "Ollama connected" if used_llm else "Rule-based fallback",
+        "llm_active": used_llm,
+        "read_only": True,
+    }
+
+
 def build_context(intent: str, filters: dict, question: str) -> dict:
     """Return the verified context bundle that powers one chat response."""
     period = ctx.month_label(filters)
@@ -1168,9 +2091,51 @@ def _read_only_response(question: str, base_filters: dict | None) -> dict:
     }
 
 
-def answer(question: str, base_filters: dict | None) -> dict:
+def _clean_selected_items(items) -> list[str]:
+    if not isinstance(items, list):
+        return []
+    return [str(item).strip() for item in items if str(item).strip()]
+
+
+def _apply_kpi_analysis_context(result: dict, selected_kpis: list[str], selected_kpi_labels: list[str]) -> dict:
+    if not selected_kpis and not selected_kpi_labels:
+        return result
+
+    selected_label_text = ", ".join(selected_kpi_labels or selected_kpis)
+    result["mode"] = "kpi_analysis"
+    result["selected_kpis"] = selected_kpis
+    result["selected_kpi_labels"] = selected_kpi_labels
+    result["intent"] = "kpi_analysis"
+
+    insight = result.get("insight") or []
+    result["insight"] = [f"Selected KPI focus areas: {selected_label_text}."] + insight
+
+    view_data = result.get("view_data_used") or {}
+    view_data["selected_kpis"] = selected_kpis
+    if selected_kpi_labels:
+        values_used = list(view_data.get("kpi_values_used") or [])
+        values_used.extend(f"Selected KPI: {label}" for label in selected_kpi_labels)
+        view_data["kpi_values_used"] = values_used
+    result["view_data_used"] = view_data
+    return result
+
+
+def answer(
+    question: str,
+    base_filters: dict | None,
+    *,
+    mode: str | None = None,
+    selected_kpis=None,
+    selected_kpi_labels=None,
+) -> dict:
+    selected_kpis = _clean_selected_items(selected_kpis)
+    selected_kpi_labels = _clean_selected_items(selected_kpi_labels)
+    if mode == "kpi_analysis" or selected_kpis or selected_kpi_labels:
+        return _answer_kpi_analysis(question or "", base_filters, selected_kpis, selected_kpi_labels)
+
     if _is_read_only_request(question):
-        return _read_only_response(question or "", base_filters)
+        result = _read_only_response(question or "", base_filters)
+        return _apply_kpi_analysis_context(result, selected_kpis, selected_kpi_labels)
 
     intent = classify_intent(question)
     filters = resolve_filters(question or "", base_filters)
@@ -1259,4 +2224,8 @@ def answer(question: str, base_filters: dict | None) -> dict:
         result["theme_analysis"] = built["theme"]
     if built.get("risk"):
         result["risk_insights"] = built["risk"]
+    if mode == "kpi_analysis" or selected_kpis or selected_kpi_labels:
+        result = _apply_kpi_analysis_context(result, selected_kpis, selected_kpi_labels)
+    else:
+        result["mode"] = "chat"
     return result

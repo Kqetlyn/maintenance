@@ -196,7 +196,8 @@ class OllamaMiraProvider(BaseMiraProvider):
 # ── Structured summary (Overview / chat) with rule-based fallback ────────────────
 def generate_structured_summary(metrics: dict, *, question: str | None = None,
                                 filters: dict | None = None,
-                                warnings: list[str] | None = None) -> dict:
+                                warnings: list[str] | None = None,
+                                timeout: int | None = None) -> dict:
     """Return the structured summary dict; use Ollama if available, else rule-based.
 
     Always includes a `provider` field so the UI can show the LLM status.
@@ -210,6 +211,7 @@ def generate_structured_summary(metrics: dict, *, question: str | None = None,
                 _build_user_prompt(question=question, filters=filters,
                                    metrics=metrics, warnings=warnings),
                 model=model,
+                timeout=timeout,
                 format_json=True,
             )
             parsed = _coerce_summary(raw)

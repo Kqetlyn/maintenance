@@ -111,6 +111,11 @@ curl -X POST "http://localhost:5005/api/mira/query" \
      -d '{"question":"What is the MTTR this month?","filters":{"stage":"all","year":2026,"month":6}}'
 ```
 
+Restart the Flask backend after Python API/schema changes. The browser can load
+new JavaScript immediately, but `/api/mira/*` continues serving the old Python
+process until Flask is restarted. Check `/api/mira/health` for the active
+`backend_version`, startup timestamp, provider status, and available MIRA routes.
+
 Provider/limits are env-overridable but default to the safe values (no `.env`
 needed): `MIRA_PROVIDER=mock`, `MIRA_LOCAL_LLM_ENABLED=false`, `MIRA_ROW_CAP_MAX=25`.
 

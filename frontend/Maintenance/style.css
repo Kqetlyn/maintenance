@@ -2376,6 +2376,342 @@ th {
     display: none !important;
 }
 
+.pt-consumption-toolbar {
+    margin-bottom: 16px;
+}
+
+.pt-consumption-toolbar .tbl-filter-select {
+    min-width: 170px;
+}
+
+.pt-consumption-toolbar .tbl-search-input {
+    min-width: 240px;
+}
+
+.pt-consumption-clear-btn {
+    padding: 9px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #ffffff;
+    color: var(--text-dark);
+    font-size: 0.82rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.pt-consumption-summary-grid {
+    margin-bottom: 18px;
+}
+
+.pt-consumption-summary-grid .summary-card-kpi {
+    min-height: 112px;
+    padding: 16px 18px;
+    gap: 10px;
+}
+
+.pt-consumption-summary-grid .summary-card-kpi strong {
+    align-self: stretch;
+    justify-self: stretch;
+    align-items: flex-start;
+    justify-content: flex-end;
+    text-align: left;
+    font-size: 1.55rem;
+    line-height: 1.05;
+}
+
+.pt-consumption-summary-grid .summary-label {
+    font-size: 0.68rem;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    color: #64748b;
+}
+
+.pt-consumption-chart-grid {
+    margin-bottom: 18px;
+}
+
+.pt-consumption-drilldown-card {
+    margin-top: 16px;
+}
+
+.asset-intel-card {
+    display: grid;
+    gap: 18px;
+    margin-bottom: 20px;
+    background:
+        radial-gradient(circle at top left, rgba(14, 165, 233, 0.12), transparent 34%),
+        linear-gradient(135deg, #ffffff 0%, #f8fafc 100%);
+    overflow: hidden;
+}
+
+.asset-intel-head {
+    align-items: flex-start;
+}
+
+.asset-intel-readonly {
+    display: inline-flex;
+    align-items: center;
+    border: 1px solid #bfdbfe;
+    border-radius: 999px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    padding: 6px 10px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.asset-intel-controls {
+    display: grid;
+    grid-template-columns: minmax(260px, 1.6fr) repeat(4, minmax(150px, 1fr));
+    gap: 12px;
+    align-items: end;
+}
+
+.asset-intel-search-field {
+    min-width: 0;
+}
+
+.asset-intel-toggle {
+    min-height: 42px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #ffffff;
+    color: #334155;
+    font-size: 0.78rem;
+    font-weight: 700;
+    line-height: 1.25;
+}
+
+.asset-intel-toggle input {
+    width: 16px;
+    height: 16px;
+    accent-color: #0f766e;
+}
+
+.asset-intel-analyse-btn {
+    min-height: 42px;
+    background: #0f766e;
+    color: #ffffff;
+}
+
+.asset-intel-analyse-btn:disabled {
+    opacity: 0.65;
+    cursor: wait;
+}
+
+.asset-intel-status {
+    margin: 0;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: #f1f5f9;
+    color: #475569;
+    font-size: 0.84rem;
+    font-weight: 700;
+}
+
+.asset-intel-status.is-loading {
+    background: #ecfeff;
+    color: #0e7490;
+}
+
+.asset-intel-status.is-ok {
+    background: #ecfdf5;
+    color: #047857;
+}
+
+.asset-intel-status.is-error {
+    background: #fef2f2;
+    color: #b91c1c;
+}
+
+.asset-intel-selected {
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    border: 1px solid #dbeafe;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.84);
+    padding: 16px;
+}
+
+.asset-intel-eyebrow {
+    display: block;
+    color: #64748b;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+
+.asset-intel-selected h3 {
+    margin: 0 0 4px;
+    color: #0f172a;
+    font-size: 1.1rem;
+}
+
+.asset-intel-selected p {
+    margin: 0;
+    color: #475569;
+    font-size: 0.86rem;
+}
+
+.asset-intel-aliases {
+    display: flex;
+    align-content: flex-start;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-width: 520px;
+}
+
+.asset-intel-aliases span {
+    border-radius: 999px;
+    background: #e0f2fe;
+    color: #075985;
+    padding: 5px 8px;
+    font-size: 0.72rem;
+    font-weight: 800;
+}
+
+.asset-intel-summary-grid {
+    grid-template-columns: repeat(5, minmax(150px, 1fr));
+}
+
+.asset-intel-kpi {
+    min-height: 126px;
+    align-items: stretch;
+}
+
+.asset-intel-kpi strong {
+    align-items: flex-start;
+    justify-content: flex-end;
+    text-align: left;
+    font-size: 1.45rem;
+    line-height: 1.05;
+}
+
+.asset-intel-kpi small {
+    color: #64748b;
+    font-size: 0.74rem;
+    font-weight: 700;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.asset-intel-data-gaps {
+    display: grid;
+    gap: 8px;
+}
+
+.asset-intel-data-gaps span {
+    border-left: 4px solid #0ea5e9;
+    border-radius: 10px;
+    background: #f0f9ff;
+    color: #0f172a;
+    padding: 10px 12px;
+    font-size: 0.84rem;
+    line-height: 1.35;
+}
+
+.asset-intel-supplier-card {
+    background: rgba(255, 255, 255, 0.92);
+}
+
+.asset-intel-panel-grid {
+    display: grid;
+    gap: 16px;
+}
+
+.asset-intel-panel {
+    background: rgba(255, 255, 255, 0.94);
+}
+
+.asset-intel-panel table,
+.asset-intel-supplier-card table {
+    min-width: 980px;
+}
+
+.asset-intel-confidence {
+    min-width: 74px;
+}
+
+.asset-intel-confidence-high {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.asset-intel-confidence-medium {
+    background: #fef3c7;
+    color: #92400e;
+}
+
+.asset-intel-confidence-low {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
+.asset-intel-flag {
+    display: inline-flex;
+    max-width: 260px;
+    border-radius: 999px;
+    padding: 5px 9px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    line-height: 1.2;
+    white-space: normal;
+}
+
+.asset-intel-flag-good {
+    background: #ecfdf5;
+    color: #047857;
+}
+
+.asset-intel-flag-warn {
+    background: #fff7ed;
+    color: #c2410c;
+}
+
+.pt-consumption-row {
+    cursor: pointer;
+}
+
+.pt-consumption-row:hover td {
+    background: #f8fbff;
+}
+
+.pt-consumption-row.is-selected td {
+    background: #eff6ff;
+}
+
+@media (max-width: 720px) {
+    .pt-consumption-toolbar .tbl-filter-select,
+    .pt-consumption-clear-btn {
+        width: 100%;
+    }
+
+    .asset-intel-controls,
+    .asset-intel-summary-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .asset-intel-selected {
+        flex-direction: column;
+    }
+
+    .asset-intel-aliases {
+        justify-content: flex-start;
+        max-width: none;
+    }
+}
+
 /* ── Combined AY + SPT Tabbed Card ─────────────────────────────────── */
 
 .ay-combined-section {

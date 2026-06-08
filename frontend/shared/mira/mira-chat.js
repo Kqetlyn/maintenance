@@ -27,6 +27,35 @@
         "Summarise spare parts consumption",
         "Give me a one-line report summary",
     ];
+    const KPI_REGISTRY = [
+        { id: "pm_due_today", category: "PM Schedule", label: "PM due today", prompt: "Analyse PM due today." },
+        { id: "pm_completed", category: "PM Schedule", label: "PM completed", prompt: "Analyse PM completed." },
+        { id: "pm_pending", category: "PM Schedule", label: "PM pending", prompt: "Analyse PM pending." },
+        { id: "pm_overdue", category: "PM Schedule", label: "PM overdue", prompt: "Which PM tasks are overdue?" },
+        { id: "pm_completion_rate", category: "PM Schedule", label: "PM completion rate", prompt: "Analyse PM completion rate." },
+        { id: "pm_upcoming_7_days", category: "PM Schedule", label: "Upcoming PM next 7 days", prompt: "Analyse upcoming PM for the next 7 days." },
+        { id: "downtime_active", category: "Downtime", label: "Current active downtime", prompt: "Summarise current active downtime." },
+        { id: "downtime_incidents", category: "Downtime", label: "Downtime incidents", prompt: "Summarise downtime incidents." },
+        { id: "downtime_total_hours", category: "Downtime", label: "Total downtime hours", prompt: "Analyse total downtime hours." },
+        { id: "downtime_mttr", category: "Downtime", label: "MTTR", prompt: "Analyse MTTR." },
+        { id: "downtime_mtbf", category: "Downtime", label: "MTBF", prompt: "Analyse MTBF." },
+        { id: "preventive_corrective_mix", category: "Downtime", label: "Preventive vs Corrective", prompt: "Analyse preventive vs corrective MR raised using the Downtime classifier." },
+        { id: "downtime_top_machine_group", category: "Downtime", label: "Top machine groups", prompt: "Which functional location has the highest workload?" },
+        { id: "downtime_repeat_assets", category: "Downtime", label: "Repeated downtime assets", prompt: "Which asset has the most MR?" },
+        { id: "spare_parts_low_stock", category: "Spare Parts", label: "Items below minimum stock", prompt: "Analyse spare parts below minimum stock." },
+        { id: "spare_parts_consumption", category: "Spare Parts", label: "High-consumption parts", prompt: "Summarise spare parts consumption." },
+        { id: "spare_parts_pending_po", category: "Spare Parts", label: "Pending PO / external purchase", prompt: "Analyse pending spare part purchase items." },
+        { id: "spare_parts_stockout_risk", category: "Spare Parts", label: "Stock-out risk", prompt: "Analyse spare parts stock-out risk." },
+        { id: "mr_tracking_acknowledgement", category: "MR / Work Order", label: "MR tracking and acknowledgement", prompt: "Analyse MR tracking and acknowledgement." },
+        { id: "mr_open", category: "MR / Work Order", label: "Open MR", prompt: "Show open MR follow-up." },
+        { id: "mr_in_progress", category: "MR / Work Order", label: "In-progress MR", prompt: "Analyse in-progress MR." },
+        { id: "wo_response_time", category: "MR / Work Order", label: "Work order response", prompt: "Analyse work order response." },
+        { id: "backlog_carry_over", category: "MR / Work Order", label: "Backlog and carry-over", prompt: "Analyse backlog and carry-over." },
+        { id: "yearly_mr_movement", category: "MR / Work Order", label: "Yearly MR movement", prompt: "Analyse yearly MR movement." },
+        { id: "critical_machine_activity", category: "MR / Work Order", label: "Critical asset activity", prompt: "Analyse critical asset activity using the existing criticality list only." },
+        { id: "data_quality", category: "MR / Work Order", label: "Data Reliability", prompt: "Analyse data reliability issues." },
+    ];
+    const KPI_CATEGORIES = ["PM Schedule", "Downtime", "Spare Parts", "MR / Work Order"];
 
     const state = {
         open: false,
@@ -181,13 +210,6 @@
         return drawer;
     }
 
-    const KPI_AREAS = [
-        { id: "pm", label: "PM Schedule", question: "Summarise PM schedule status." },
-        { id: "downtime", label: "Downtime", question: "Summarise downtime and work orders." },
-        { id: "spare", label: "Spare Parts", question: "Summarise spare parts consumption." },
-        { id: "wo", label: "Work Orders / MR", question: "What are the open MR and outstanding work orders?" },
-    ];
-
     function buildModeBar() {
         const bar = el("div", "mira-chat-mode-bar");
         const chatTab = el("button", "mira-chat-mode-tab is-active", "Chat Q&A");
@@ -207,20 +229,31 @@
         const wrap = el("div", "mira-chat-inline mira-chat-inline-" + m);
         wrap.id = "mira-chat-inline";
         if (m === "kpi") {
-            wrap.append(el("div", "mira-chat-inline-title", "Select maintenance areas to analyse"));
-            const grid = el("div", "mira-chat-kpi-grid");
-            KPI_AREAS.forEach((area) => {
-                const item = el("label", "mira-chat-kpi-option");
-                const cb = el("input"); cb.type = "checkbox"; cb.value = area.id;
-                item.append(cb, el("span", null, area.label));
-                grid.append(item);
+            const top = el("div", "mira-chat-kpi-top");
+            top.append(
+                el("div", "mira-chat-inline-title", "KPI Analysis"),
+                el("p", "mira-chat-inline-copy", "Select real dashboard KPI areas for MIRA to analyse using the current period and stage.")
+            );
+            wrap.append(top);
+            KPI_CATEGORIES.forEach((category) => {
+                const group = el("div", "mira-chat-kpi-group");
+                group.append(el("div", "mira-chat-kpi-category", category));
+                const grid = el("div", "mira-chat-kpi-grid");
+                KPI_REGISTRY.filter((item) => item.category === category).forEach((item) => {
+                    const option = el("label", "mira-chat-kpi-option");
+                    const cb = el("input");
+                    cb.type = "checkbox";
+                    cb.value = item.id;
+                    option.append(cb, el("span", "mira-chat-kpi-check"), el("span", "mira-chat-kpi-label", item.label));
+                    grid.append(option);
+                });
+                group.append(grid);
+                wrap.append(group);
             });
-            wrap.append(grid);
             const analyze = el("button", "mira-chat-kpi-analyze", "Analyse selected");
             analyze.type = "button";
             analyze.addEventListener("click", analyseKpis);
             wrap.append(analyze);
-            wrap.append(el("div", "mira-chat-kpi-note", "Uses the dashboard's selected period and stage. Read-only."));
         } else {
             wrap.append(el("div", "mira-chat-inline-title", "Try asking"));
             const chips = el("div", "mira-chat-chips");
@@ -264,15 +297,16 @@
     function analyseKpis() {
         const selected = Array.from(document.querySelectorAll("#mira-chat-inline input:checked")).map((cb) => cb.value);
         if (!selected.length) return;
-        let question;
-        if (selected.length === 1) {
-            question = (KPI_AREAS.find((a) => a.id === selected[0]) || {}).question;
-        } else {
-            const names = selected.map((id) => (KPI_AREAS.find((a) => a.id === id) || {}).label).filter(Boolean).join(", ");
-            question = `Summarise maintenance performance covering ${names}.`;
-        }
+        const picked = selected.map((id) => KPI_REGISTRY.find((item) => item.id === id)).filter(Boolean);
+        const names = picked.map((item) => item.label).join(", ");
+        const prompts = picked.map((item) => item.prompt).filter(Boolean).join(" ");
+        const question = `KPI Analysis: analyse selected dashboard KPIs: ${names}. ${prompts}`;
         setMode("chat");
-        send(question);
+        send(question, {
+            mode: "kpi_analysis",
+            selectedKpis: selected,
+            selectedKpiLabels: picked.map((item) => item.label),
+        });
     }
 
     function welcomeMessage() {
@@ -401,8 +435,13 @@
         header.append(headBadges);
         bubble.append(header);
 
-        bubble.append(sectionTitle("Answer"));
+        const isKpiAnalysis = payload.mode === "kpi_analysis" || Array.isArray(payload.kpi_analysis_sections);
+        bubble.append(sectionTitle(isKpiAnalysis ? (Array.isArray(payload.kpi_analysis_sections) && payload.kpi_analysis_sections.length > 1 ? "Overall Summary" : "KPI Summary") : "Answer"));
         bubble.append(paragraph(payload.answer || "No verified answer was available."));
+
+        if (Array.isArray(payload.kpi_analysis_sections) && payload.kpi_analysis_sections.length) {
+            bubble.append(buildKpiAnalysisSections(payload.kpi_analysis_sections));
+        }
 
         if (Array.isArray(payload.key_numbers_used) && payload.key_numbers_used.length) {
             bubble.append(listSection("Key Numbers Used", payload.key_numbers_used));
@@ -465,6 +504,41 @@
         });
         wrap.append(list);
         return wrap;
+    }
+
+    function buildKpiAnalysisSections(sections) {
+        const wrap = el("div", "mira-kpi-analysis-wrap");
+        wrap.append(sectionTitle(sections.length > 1 ? "Findings By Selected KPI" : "Selected KPI Detail"));
+        sections.forEach((section) => {
+            const card = el("article", "mira-kpi-section-card");
+            card.append(el("div", "mira-kpi-section-title", section.title || "Selected KPI"));
+            if (section.summary) {
+                card.append(paragraph(section.summary));
+            }
+            card.append(compactList("Key Findings", section.key_findings));
+            card.append(compactList("Issue Focus Areas", section.issue_focus_areas));
+            card.append(compactList("Predictive / Risk Indicators", section.risk_indicators));
+            card.append(compactList("Follow-Up Actions", section.follow_up_actions));
+            if (Array.isArray(section.data_gaps) && section.data_gaps.length) {
+                card.append(compactList("Data Gaps", section.data_gaps, "warning"));
+            }
+            wrap.append(card);
+        });
+        return wrap;
+    }
+
+    function compactList(title, items, tone) {
+        const clean = Array.isArray(items) ? items.filter(Boolean) : [];
+        const block = el("div", "mira-kpi-compact-block" + (tone === "warning" ? " is-warning" : ""));
+        block.append(el("div", "mira-kpi-compact-title", title));
+        if (!clean.length) {
+            block.append(el("p", "mira-kpi-empty", "-"));
+            return block;
+        }
+        const list = el("ul", "mira-kpi-compact-list");
+        clean.slice(0, 6).forEach((item) => list.append(el("li", null, String(item))));
+        block.append(list);
+        return block;
     }
 
     function buildDataUsed(viewData) {
@@ -537,9 +611,10 @@
         badgeNode.className = "mira-chat-badge mira-chat-badge-" + (tone || "neutral");
     }
 
-    async function send(question) {
+    async function send(question, options) {
         const trimmed = String(question || "").trim();
         if (!trimmed || state.busy) return;
+        const settings = options && typeof options === "object" ? options : {};
 
         if (!state.open) openDrawer();
         state.busy = true;
@@ -555,7 +630,7 @@
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 cache: "no-store",
-                body: JSON.stringify(getDashboardFilters() ? { question: trimmed, filters: getDashboardFilters() } : { question: trimmed }),
+                body: JSON.stringify(buildChatRequest(trimmed, settings)),
             });
             removeThinking();
             if (!response.ok) {
@@ -588,5 +663,28 @@
 
     function removeThinking() {
         document.getElementById("mira-chat-thinking")?.remove();
+    }
+
+    function buildChatRequest(question, options) {
+        const payload = { question, userQuestion: question };
+        const filters = getDashboardFilters();
+        if (filters) {
+            payload.filters = filters;
+            payload.selectedPeriod = filters.period_mode;
+            payload.selectedYear = filters.year;
+            payload.selectedMonth = filters.month;
+            payload.selectedStage = filters.stage;
+        }
+        if (options.mode) payload.mode = options.mode;
+        if (Array.isArray(options.selectedKpis)) {
+            payload.selected_kpis = options.selectedKpis;
+            payload.selectedKpis = options.selectedKpis;
+            payload.selectedKpiIds = options.selectedKpis;
+        }
+        if (Array.isArray(options.selectedKpiLabels)) {
+            payload.selected_kpi_labels = options.selectedKpiLabels;
+            payload.selectedKpiLabels = options.selectedKpiLabels;
+        }
+        return payload;
     }
 })();

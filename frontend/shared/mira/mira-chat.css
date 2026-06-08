@@ -111,13 +111,13 @@
     right: 24px;
     bottom: 24px;
     z-index: 1199;
-    width: min(560px, calc(100vw - 32px));
+    width: min(480px, calc(100vw - 32px));
     height: min(720px, calc(100vh - 48px));
     display: flex;
     flex-direction: column;
     background: linear-gradient(180deg, #ffffff, #fbfdff);
     border: 1px solid #dce6f0;
-    border-radius: 26px;
+    border-radius: 22px;
     box-shadow: 0 30px 80px rgba(15, 23, 42, 0.2);
     overflow: hidden;
     opacity: 0;
@@ -146,7 +146,7 @@
     align-items: flex-start;
     justify-content: space-between;
     gap: 14px;
-    padding: 18px 20px 14px;
+    padding: 16px 18px 12px;
     background:
         linear-gradient(135deg, rgba(203, 98, 61, 0.06), rgba(100, 217, 212, 0.05)),
         linear-gradient(180deg, #ffffff, #f9fbfd);
@@ -214,7 +214,7 @@
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
-    padding: 0 20px 12px;
+    padding: 0 18px 12px;
     border-bottom: 1px solid #eef3f8;
 }
 
@@ -297,7 +297,7 @@
 .mira-chat-mode-bar {
     display: flex;
     gap: 6px;
-    padding: 10px 20px;
+    padding: 10px 18px;
     background: #fcfdff;
     border-bottom: 1px solid #eef3f8;
 }
@@ -305,7 +305,7 @@
     flex: 1;
     padding: 9px 12px;
     border: 1px solid #dbe4ef;
-    border-radius: 11px;
+    border-radius: 10px;
     background: #fff;
     color: #4b5b6c;
     font-size: 0.8rem;
@@ -315,10 +315,10 @@
 }
 .mira-chat-mode-tab:hover { background: #f4f7fb; }
 .mira-chat-mode-tab.is-active {
-    background: linear-gradient(135deg, #cb623d, #e08a57);
+    background: #243448;
     border-color: transparent;
     color: #fff;
-    box-shadow: 0 6px 14px rgba(203, 98, 61, 0.24);
+    box-shadow: 0 6px 14px rgba(36, 52, 72, 0.18);
 }
 
 /* KPI Analysis panel */
@@ -330,31 +330,63 @@
 .mira-chat-kpi-panel[hidden] { display: none; }
 .mira-chat-kpi-grid {
     display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 8px;
-    margin-bottom: 12px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 7px;
 }
 .mira-chat-kpi-option {
-    display: flex;
+    position: relative;
+    display: grid;
+    grid-template-columns: 18px 1fr;
     align-items: center;
-    gap: 9px;
-    padding: 10px 12px;
+    gap: 8px;
+    min-height: 42px;
+    padding: 8px 10px;
     border: 1px solid #dbe4ef;
-    border-radius: 12px;
+    border-radius: 10px;
     background: #fff;
-    font-size: 0.82rem;
+    font-size: 0.78rem;
     font-weight: 700;
     color: #314255;
     cursor: pointer;
 }
-.mira-chat-kpi-option:hover { background: #f6fafc; border-color: #bccedf; }
-.mira-chat-kpi-option input { width: 16px; height: 16px; accent-color: #cb623d; }
+.mira-chat-kpi-option:hover {
+    background: #f8fbfd;
+    border-color: #bccedf;
+}
+.mira-chat-kpi-option:has(input:checked) {
+    background: #fff7f0;
+    border-color: #e2a17b;
+}
+.mira-chat-kpi-option input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+}
+.mira-chat-kpi-check {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #cbd7e4;
+    border-radius: 5px;
+    background: #fff;
+}
+.mira-chat-kpi-option input:checked + .mira-chat-kpi-check {
+    background: #cb623d;
+    border-color: #cb623d;
+    box-shadow: inset 0 0 0 3px #fff;
+}
+.mira-chat-kpi-label {
+    line-height: 1.25;
+}
+.mira-chat-kpi-option input:checked ~ .mira-chat-kpi-label {
+    color: #9a421f;
+}
 .mira-chat-kpi-analyze {
     width: 100%;
+    margin-top: 12px;
     padding: 11px;
     border: 0;
-    border-radius: 12px;
-    background: linear-gradient(135deg, #0f9b8e, #2bc0b0);
+    border-radius: 10px;
+    background: #0f766e;
     color: #fff;
     font-weight: 800;
     font-size: 0.86rem;
@@ -367,10 +399,10 @@
 /* Inline starter panel (suggested prompts / KPI picker) — lives INSIDE the
    scroll area so it never steals height from the conversation. */
 .mira-chat-inline {
-    border: 1px dashed #d8e2ee;
-    border-radius: 16px;
-    padding: 12px 14px;
-    background: #f7fafd;
+    border: 1px solid #dbe4ef;
+    border-radius: 14px;
+    padding: 12px;
+    background: #fff;
 }
 .mira-chat-inline-title {
     margin-bottom: 9px;
@@ -379,6 +411,28 @@
     font-weight: 800;
     letter-spacing: 0.08em;
     text-transform: uppercase;
+}
+.mira-chat-inline-copy {
+    margin: -4px 0 10px;
+    color: #66778c;
+    font-size: 0.78rem;
+    line-height: 1.4;
+}
+.mira-chat-kpi-top {
+    margin-bottom: 8px;
+}
+.mira-chat-kpi-group {
+    padding-top: 10px;
+}
+.mira-chat-kpi-group + .mira-chat-kpi-group {
+    margin-top: 6px;
+    border-top: 1px solid #eef3f8;
+}
+.mira-chat-kpi-category {
+    margin-bottom: 7px;
+    color: #243448;
+    font-size: 0.78rem;
+    font-weight: 900;
 }
 
 /* Header / status / mode bar / input footer never scroll — only the log does. */
@@ -394,7 +448,7 @@
     flex: 1 1 auto;
     min-height: 0;                /* critical: lets the message area scroll inside the flex column */
     overflow-y: auto;
-    padding: 18px 20px;
+    padding: 16px 18px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -425,8 +479,8 @@
 }
 
 .mira-msg-bubble {
-    max-width: 88%;
-    border-radius: 20px;
+    max-width: 90%;
+    border-radius: 16px;
     box-shadow: 0 14px 26px rgba(15, 23, 42, 0.06);
 }
 
@@ -489,6 +543,7 @@
     color: inherit;
     font-size: 0.86rem;
     line-height: 1.5;
+    white-space: pre-line;
 }
 
 .mira-msg-list {
@@ -504,6 +559,68 @@
 
 .mira-msg-list.is-warning {
     color: #a05b0f;
+}
+
+.mira-kpi-analysis-wrap {
+    margin-top: 12px;
+    display: grid;
+    gap: 10px;
+}
+
+.mira-kpi-section-card {
+    padding: 12px;
+    border: 1px solid #dfe8f2;
+    border-radius: 15px;
+    background: linear-gradient(180deg, #fbfdff 0%, #f6f9fd 100%);
+    box-shadow: 0 8px 22px rgba(38, 65, 96, 0.06);
+}
+
+.mira-kpi-section-title {
+    margin-bottom: 7px;
+    color: #1e3148;
+    font-size: 0.9rem;
+    font-weight: 900;
+    letter-spacing: -0.01em;
+}
+
+.mira-kpi-compact-block {
+    margin-top: 10px;
+    padding-top: 9px;
+    border-top: 1px solid #e7eef6;
+}
+
+.mira-kpi-compact-block.is-warning {
+    border-top-color: #f4d7a7;
+}
+
+.mira-kpi-compact-title {
+    margin-bottom: 5px;
+    color: #708096;
+    font-size: 0.66rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.mira-kpi-compact-list {
+    margin: 0;
+    padding-left: 17px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: #334558;
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.mira-kpi-compact-block.is-warning .mira-kpi-compact-list {
+    color: #9b5b12;
+}
+
+.mira-kpi-empty {
+    margin: 0;
+    color: #94a3b8;
+    font-size: 0.8rem;
 }
 
 .mira-data-used {
@@ -560,7 +677,7 @@
     display: grid;
     grid-template-columns: 1fr auto;
     gap: 10px;
-    padding: 14px 20px 14px;
+    padding: 12px 18px 12px;
     border-top: 1px solid #eef3f8;
     background: #fff;
 }
@@ -570,7 +687,7 @@
     max-height: 140px;
     padding: 12px 14px;
     border: 1px solid #cdd8e3;
-    border-radius: 16px;
+    border-radius: 12px;
     resize: vertical;
     font: inherit;
     font-size: 0.85rem;
@@ -588,7 +705,7 @@
 .mira-chat-send {
     min-width: 88px;
     border: 0;
-    border-radius: 16px;
+    border-radius: 12px;
     background: linear-gradient(135deg, #cb623d, #e08a57);
     color: #fff;
     font-size: 0.84rem;
@@ -667,7 +784,7 @@
         bottom: 84px;
         width: auto;
         max-height: min(82vh, 860px);
-        border-radius: 26px 26px 22px 22px;
+        border-radius: 22px 22px 18px 18px;
     }
 
     .mira-chat-form {
@@ -680,5 +797,9 @@
 
     .mira-msg-bubble {
         max-width: 100%;
+    }
+
+    .mira-chat-kpi-grid {
+        grid-template-columns: 1fr;
     }
 }

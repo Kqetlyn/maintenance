@@ -123,6 +123,9 @@ document.addEventListener("DOMContentLoaded", () => {
         sparePartsData: null,
         spareImportStatus: null,
         spareActivePanel: "external",
+        assetPartsIntelligence: null,
+        assetPartsIntelOptions: null,
+        assetPartsIntelQuery: "",
         sparePartsFilters: {
             period: "all",
             month: "all",
@@ -378,25 +381,6 @@ document.addEventListener("DOMContentLoaded", () => {
             });
         });
 
-        document.getElementById("overview-filter-month")?.addEventListener("change", async (event) => {
-            state.overviewMonth = event.target.value;
-            await loadOverviewView();
-        });
-        document.getElementById("overview-filter-category")?.addEventListener("change", (event) => {
-            state.overviewCategory = event.target.value;
-        });
-        document.getElementById("overview-filter-status")?.addEventListener("change", (event) => {
-            state.overviewStatus = event.target.value;
-        });
-        document.getElementById("overview-filter-sort")?.addEventListener("change", (event) => {
-            state.overviewSort = event.target.value;
-        });
-        document.getElementById("overview-filter-search")?.addEventListener("input", debounce((event) => {
-            state.overviewSearch = event.target.value.trim();
-        }, 250));
-        document.getElementById("apply-overview-filters")?.addEventListener("click", async () => {
-            await loadOverviewView();
-        });
         [
             ["spare-period-filter", "period"],
             ["spare-month-filter", "month"],
@@ -430,6 +414,23 @@ document.addEventListener("DOMContentLoaded", () => {
             spareManualReviewSearchTerm = event.target.value.trim().toLowerCase();
             renderSpareManualReviewTable();
         }, 150));
+        document.getElementById("asset-intel-search")?.addEventListener("input", debounce((event) => {
+            state.assetPartsIntelQuery = event.target.value.trim();
+            const status = document.getElementById("asset-intel-status");
+            if (status && state.assetPartsIntelQuery) {
+                status.textContent = "Ready to analyse. Press Enter or click Analyse Asset.";
+                status.className = "asset-intel-status";
+            }
+        }, 200));
+        document.getElementById("asset-intel-search")?.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                loadAssetPartsIntelligence();
+            }
+        });
+        document.getElementById("asset-intel-analyse")?.addEventListener("click", () => {
+            loadAssetPartsIntelligence();
+        });
         document.querySelectorAll("[data-spare-panel]").forEach((button) => {
             button.addEventListener("click", () => {
                 state.spareActivePanel = button.dataset.sparePanel || "external";
@@ -486,6 +487,7 @@ document.addEventListener("DOMContentLoaded", () => {
             if (note) note.classList.toggle("hidden", spareCurrency === "THB");
             if (state.sparePartsData) renderSparePartsDashboard(state.sparePartsData);
             if (state.ptData) renderPtDashboard(state.ptData);
+            if (state.assetPartsIntelligence) renderAssetPartsIntelligence(state.assetPartsIntelligence);
             if (_epoData) renderEpoSection(_epoData);
             if (ayData) renderAllYearsComparison(ayData);
             renderAllPtPartsTable();
@@ -494,11 +496,6 @@ document.addEventListener("DOMContentLoaded", () => {
             ayMonthlyYear = event.target.value || "all";
             if (ayData) renderAllYearsComparison(ayData);
         });
-        document.getElementById("maintenance-mix-month")?.addEventListener("change", async (event) => {
-            state.maintenanceMixMonth = event.target.value;
-            await loadOverviewMaintenanceMix();
-        });
-
         document.getElementById("month-selector")?.addEventListener("change", async (event) => {
             state.selectedMonth = event.target.value;
             syncMonthInputs();
@@ -2376,185 +2373,6 @@ document.addEventListener("DOMContentLoaded", () => {
         populateSelect("filter-inspection", payload?.inspection_options || []);
     }
 
-    function hydrateOverviewFilterOptions(payload) {
-        populateSelect("overview-filter-month", payload?.filter_options?.months || [], true);
-        populateSelect("overview-filter-category", payload?.filter_options?.categories || [], true);
-        populateSelect("overview-filter-status", payload?.filter_options?.status_options || [], true);
-        populateSelect("overview-filter-sort", payload?.filter_options?.sort_options || [], true);
-        populateSelect("maintenance-mix-month", payload?.maintenance_mix_month_options || [], true);
-    }
-
-    function syncOverviewFilterInputs() {
-        const month = document.getElementById("overview-filter-month");
-        const category = document.getElementById("overview-filter-category");
-        const status = document.getElementById("overview-filter-status");
-        const sort = document.getElementById("overview-filter-sort");
-        const search = document.getElementById("overview-filter-search");
-        const mixMonth = document.getElementById("maintenance-mix-month");
-
-        if (month && state.overviewMonth) month.value = state.overviewMonth;
-        if (category) category.value = state.overviewCategory;
-        if (status) status.value = state.overviewStatus;
-        if (sort) sort.value = state.overviewSort;
-        if (search) search.value = state.overviewSearch;
-        if (mixMonth && state.maintenanceMixMonth) mixMonth.value = state.maintenanceMixMonth;
-    }
-
-    function buildOverviewParams() {
-        const params = new URLSearchParams({
-            category: state.overviewCategory,
-            status: state.overviewStatus,
-            search: state.overviewSearch,
-            sort: state.overviewSort,
-        });
-        if (state.overviewMonth) params.set("month", state.overviewMonth);
-        if (state.maintenanceMixMonth) params.set("mix_month", state.maintenanceMixMonth);
-        if (state.year) params.set("year", String(state.year));
-        return params;
-    }
-
-    async function loadOverviewView() {
-        const monthInput = document.getElementById("overview-filter-month");
-        const categoryInput = document.getElementById("overview-filter-category");
-        const statusInput = document.getElementById("overview-filter-status");
-        const sortInput = document.getElementById("overview-filter-sort");
-        const searchInput = document.getElementById("overview-filter-search");
-
-        if (monthInput?.value) state.overviewMonth = monthInput.value;
-        if (categoryInput?.value) state.overviewCategory = categoryInput.value;
-        if (statusInput?.value) state.overviewStatus = statusInput.value;
-        if (sortInput?.value) state.overviewSort = sortInput.value;
-        if (searchInput) state.overviewSearch = searchInput.value.trim();
-
-        const params = buildOverviewParams();
-        const payload = await fetchJson(`/api/maintenance/overview?${params.toString()}`);
-        state.year = payload?.meta?.year || state.year || new Date().getFullYear();
-        hydrateOverviewFilterOptions(payload);
-        state.overviewMonth = payload?.selected_month?.month_key || state.overviewMonth;
-        state.maintenanceMixMonth = payload?.maintenance_mix?.selected_month?.month_key || state.maintenanceMixMonth;
-        syncOverviewFilterInputs();
-        renderOverviewSummary(payload?.summary || {});
-        renderOverviewMaintenanceMix(payload?.maintenance_mix || {});
-        renderOverviewTable(payload?.rows || []);
-    }
-
-    async function loadOverviewMaintenanceMix() {
-        const params = buildOverviewParams();
-        const payload = await fetchJson(`/api/maintenance/overview?${params.toString()}`);
-        state.year = payload?.meta?.year || state.year || new Date().getFullYear();
-        state.maintenanceMixMonth = payload?.maintenance_mix?.selected_month?.month_key || state.maintenanceMixMonth;
-        hydrateOverviewFilterOptions(payload);
-        syncOverviewFilterInputs();
-        renderOverviewMaintenanceMix(payload?.maintenance_mix || {});
-    }
-
-    function renderOverviewSummary(summary) {
-        setText("overview-scheduled-tasks", formatInteger(summary.scheduled_tasks));
-        setText("overview-completed-tasks", formatInteger(summary.completed_tasks));
-        setText("overview-pending-tasks", formatInteger(summary.pending_tasks));
-        setText("overview-completion-rate", `${formatNumber(summary.completion_rate, 1)}%`);
-        setText("overview-inspection-tasks", formatInteger(summary.tasks_requiring_inspection));
-        setText("overview-follow-up-tasks", formatInteger(summary.tasks_pending_follow_up));
-    }
-
-    function renderOverviewMaintenanceMix(mix) {
-        const preventive = Number(mix.preventive_scheduled_count ?? mix.preventive_scheduled ?? 0);
-        const corrective = Number(mix.corrective_work_order_count ?? mix.corrective_work_orders ?? 0);
-        const variance = Number(mix.variance_count ?? (corrective - preventive));
-        const total = Number(mix.total || (preventive + corrective));
-        const ratio = mix.preventive_to_corrective_ratio;
-        const performanceStatus = mix.performance_status || "Good";
-        const rejectedRows = Number(mix.corrective_source?.rejected_rows || 0);
-        const uncertainRows = Number(mix.corrective_source?.uncertain_rows || 0);
-        const hasData = total > 0;
-        const emptyState = document.getElementById("overview-maintenance-mix-empty");
-        if (emptyState) emptyState.hidden = hasData;
-
-        setText("mix-preventive-ratio", ratio === null || ratio === undefined ? "Ratio --" : `Corrective ${formatNumber(ratio, 1)}% of preventive`);
-        setText("mix-corrective-ratio", `Status ${performanceStatus}`);
-        setText("mix-preventive-count", formatInteger(preventive));
-        setText("mix-corrective-count", formatInteger(corrective));
-        setText("mix-variance-count", `${variance > 0 ? "+" : ""}${formatInteger(variance)}`);
-        setText("mix-performance-status", performanceStatus);
-        setText(
-            "mix-total-note",
-            hasData
-                ? `${formatInteger(total)} maintenance item(s) compared for the selected month; all work order statuses counted except rejected (${formatInteger(rejectedRows)} rejected excluded)`
-                : "No preventive or corrective maintenance records for the selected month"
-        );
-
-        createChart("overview-maintenance-mix-chart", {
-            type: "bar",
-            data: {
-                labels: ["Preventive (Scheduled)", "Corrective (Work Order)"],
-                datasets: [{
-                    label: "Maintenance Count",
-                    data: [preventive, corrective],
-                    backgroundColor: ["#0f766e", "#f59e0b"],
-                    borderRadius: 12,
-                    maxBarThickness: 96,
-                    borderWidth: 0,
-                }],
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        display: false,
-                    },
-                    tooltip: {
-                        enabled: hasData,
-                        callbacks: {
-                            label: (context) => {
-                                const value = Number(context.parsed?.y || 0);
-                                return `${context.label}: ${formatInteger(value)}`;
-                            },
-                        },
-                    },
-                },
-                scales: {
-                    x: {
-                        grid: { display: false },
-                        ticks: { color: "#64748b", font: { family: "Inter", weight: "700" } },
-                    },
-                    y: {
-                        beginAtZero: true,
-                        grid: { color: "rgba(148, 163, 184, 0.16)" },
-                        ticks: { color: "#64748b", precision: 0 },
-                    },
-                },
-            },
-        });
-    }
-
-    function renderOverviewTable(rows) {
-        const body = document.getElementById("overview-table-body");
-        if (!body) return;
-
-        if (!rows.length) {
-            body.innerHTML = '<tr><td colspan="7" class="empty-row">No data available.</td></tr>';
-            return;
-        }
-
-        body.innerHTML = rows.map((row) => `
-            <tr>
-                <td>${escapeHtml(row.date_of_maintenance || "-")}</td>
-                <td>
-                    <div class="table-primary-cell">
-                        <strong>${escapeHtml(translateDisplayText(row.asset_name || "-"))}</strong>
-                        <span class="table-subtext">${escapeHtml(row.machine_type || "-")} | ${escapeHtml(row.asset_code || "-")}</span>
-                    </div>
-                </td>
-                <td>${escapeHtml(row.pm_type || "-")}</td>
-                <td><span class="status-pill ${overviewStatusClass(row.status)}">${escapeHtml(row.status || "-")}</span></td>
-                <td>${escapeHtml(row.person_in_charge || "-")}</td>
-                <td>${escapeHtml(row.additional_inspection || "-")}</td>
-                <td>${escapeHtml(row.follow_up_status || "-")}</td>
-            </tr>
-        `).join("");
-    }
-
     async function loadMaintenanceDashboard() {
         await Promise.all([
             loadSummary(),
@@ -2786,13 +2604,120 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
-    async function loadSparePartsView() {
+    let spareDeferredLoadTimer = null;
+    let spareLazyObserver = null;
+    let spareLazySectionsBound = false;
+    const spareLazyPromises = { project: null, allYears: null, externalPo: null };
+
+    function queueDeferredSparePartsLoads(forceReload = false) {
+        window.clearTimeout(spareDeferredLoadTimer);
+        spareDeferredLoadTimer = window.setTimeout(() => {
+            loadSpareImportHub().catch((error) => console.error("Spare import status deferred load failed:", error));
+            initSparePartsLazySections(forceReload);
+        }, 80);
+    }
+
+    function renderSparePartsLazyPlaceholders() {
+        if (!state.ptData) {
+            const badge = document.getElementById("pt-status-badge");
+            if (badge) {
+                badge.className = "pt-status-badge pt-badge-warn";
+                badge.textContent = "Loads when visible";
+            }
+        }
+        if (!ayData) setText("ay-subtitle", "Financial-year analysis loads when this section is visible.");
+        if (!_epoData) {
+            const badge = document.getElementById("epo-status-badge");
+            if (badge) {
+                badge.textContent = "Loads when visible";
+                badge.style.background = "#fef3c7";
+                badge.style.color = "#92400e";
+            }
+        }
+    }
+
+    function loadSpareLazyDataset(key, loader, isLoaded, label) {
+        if (isLoaded()) return Promise.resolve();
+        if (spareLazyPromises[key]) return spareLazyPromises[key];
+        spareLazyPromises[key] = loader()
+            .catch((error) => console.error(`${label} lazy load failed:`, error))
+            .finally(() => { spareLazyPromises[key] = null; });
+        return spareLazyPromises[key];
+    }
+
+    function initSparePartsLazySections(forceReload = false) {
+        if (forceReload) {
+            if (spareLazyObserver) spareLazyObserver.disconnect();
+            spareLazyObserver = null;
+            spareLazySectionsBound = false;
+            spareLazyPromises.project = null;
+            spareLazyPromises.allYears = null;
+            spareLazyPromises.externalPo = null;
+        }
+        if (spareLazySectionsBound) return;
+        spareLazySectionsBound = true;
+
+        const lazyTargets = [
+            {
+                key: "project",
+                node: document.getElementById("pt-status-badge")?.closest("section") || document.getElementById("pt-status-badge"),
+                load: () => loadSpareLazyDataset("project", loadProjectTransactions, () => Boolean(state.ptData), "Project Transactions"),
+            },
+            {
+                key: "externalPo",
+                node: document.getElementById("epo-section"),
+                load: () => loadSpareLazyDataset("externalPo", loadExternalPo, () => Boolean(_epoData), "External PO"),
+            },
+            {
+                key: "allYears",
+                node: document.getElementById("ay-panel-yearly")?.closest("section") || document.getElementById("ay-panel-yearly"),
+                load: () => loadSpareLazyDataset("allYears", loadAllYearsTransactions, () => Boolean(ayData), "All-years transactions"),
+            },
+        ].filter((target) => target.node);
+
+        const bindLazyControls = (selector, targetKey) => {
+            const target = lazyTargets.find((item) => item.key === targetKey);
+            if (!target) return;
+            document.querySelectorAll(selector).forEach((node) => {
+                const marker = `spareLazyBound${targetKey}`;
+                if (node.dataset?.[marker]) return;
+                node.dataset[marker] = "1";
+                ["pointerdown", "focus", "change"].forEach((eventName) => {
+                    node.addEventListener(eventName, target.load, { passive: true });
+                });
+            });
+        };
+
+        bindLazyControls("#pt-period-filter,#pt-month-filter,#pt-category-filter,#pt-asset-filter,#pt-search,#pt-txn-search,#pt-parts-search,#pt-top-parts-year", "project");
+        bindLazyControls(".epo-tab-btn,.epo-subtab-btn,#epo-search,#epo-sup-search,#epo-filter-type,#epo-filter-group,#epo-filter-status,#epo-filter-vendor,#epo-filter-classification,#epo-filter-delivery,#epo-date-from,#epo-date-to", "externalPo");
+        bindLazyControls(".ay-tab-btn,#spt-part-search,#spt-part-select,#spt-date-mode,#spt-month-select,#spt-start-date,#spt-end-date,#spt-metric,#spt-toggle-txn", "allYears");
+
+        if (!("IntersectionObserver" in window)) return;
+        spareLazyObserver = new IntersectionObserver((entries) => {
+            entries.forEach((entry) => {
+                if (!entry.isIntersecting) return;
+                const target = lazyTargets.find((item) => item.node === entry.target);
+                if (!target) return;
+                target.load();
+                spareLazyObserver.unobserve(entry.target);
+            });
+        }, { rootMargin: "120px 0px", threshold: 0.01 });
+        lazyTargets.forEach((target) => spareLazyObserver.observe(target.node));
+    }
+
+    async function loadSparePartsView(options = {}) {
+        const forceReload = Boolean(options.forceReload);
         mountExternalPurchasesInSparePanel();
-        // Fire all requests in parallel
-        loadSpareImportHub();
-        loadProjectTransactions();
-        loadAllYearsTransactions();
-        loadExternalPo();
+
+        if (!forceReload && state.sparePartsData) {
+            populateSparePartsFilters(state.sparePartsData);
+            populateAssetPartsIntelFilters();
+            renderAssetPartsIntelligence(state.assetPartsIntelligence);
+            renderSparePartsDashboard(state.sparePartsData);
+            renderSparePartsLazyPlaceholders();
+            queueDeferredSparePartsLoads(false);
+            return;
+        }
 
         let payload = {};
         try {
@@ -2803,7 +2728,11 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         state.sparePartsData = payload;
         populateSparePartsFilters(payload);
+        populateAssetPartsIntelFilters();
+        renderAssetPartsIntelligence(state.assetPartsIntelligence);
         renderSparePartsDashboard(payload);
+        renderSparePartsLazyPlaceholders();
+        queueDeferredSparePartsLoads(forceReload);
     }
 
     function createEmptySparePartsPayload(message) {
@@ -2816,6 +2745,213 @@ document.addEventListener("DOMContentLoaded", () => {
             comparison: { summary: {}, notes: [], inventory_purchase_summary_rows: [], top_external_spare_parts_rows: [] },
             meta: { errors: message ? [message] : [] },
         };
+    }
+
+    function assetIntelSelectValue(id) {
+        const value = document.getElementById(id)?.value || "";
+        return value === "all" ? "" : value;
+    }
+
+    function populateAssetPartsIntelFilters(payloadOrOptions = null) {
+        const sourceOptions = payloadOrOptions?.options || payloadOrOptions || state.assetPartsIntelOptions || {};
+        const ptFilters = state.ptData?.consumption_analysis?.filters || {};
+        const poRows = state.sparePartsData?.po_classification?.records || [];
+        const options = {
+            asset_families: sourceOptions.asset_families || ptFilters.asset_families || [],
+            machine_groups: sourceOptions.machine_groups || ptFilters.machine_groups || [],
+            suppliers: sourceOptions.suppliers || uniqueSorted(poRows.map((row) => row?.vendor_name || row?.supplier)),
+        };
+        state.assetPartsIntelOptions = options;
+        populateSpareSelect("asset-intel-family", options.asset_families, "All / detect from search", assetIntelSelectValue("asset-intel-family") || "all");
+        populateSpareSelect("asset-intel-machine-group", options.machine_groups, "All / detect from search", assetIntelSelectValue("asset-intel-machine-group") || "all");
+    }
+
+    function readAssetPartsIntelControls() {
+        return {
+            query: document.getElementById("asset-intel-search")?.value.trim() || "",
+            assetFamily: assetIntelSelectValue("asset-intel-family"),
+            machineGroup: assetIntelSelectValue("asset-intel-machine-group"),
+            dateFrom: document.getElementById("asset-intel-date-from")?.value || "",
+            dateTo: document.getElementById("asset-intel-date-to")?.value || "",
+            includeRelatedMatches: document.getElementById("asset-intel-include-related")?.checked ? "1" : "0",
+            includeLowConfidence: document.getElementById("asset-intel-include-low")?.checked ? "1" : "0",
+        };
+    }
+
+    async function loadAssetPartsIntelligence() {
+        const controls = readAssetPartsIntelControls();
+        const status = document.getElementById("asset-intel-status");
+        const button = document.getElementById("asset-intel-analyse");
+        if (!controls.query && !controls.assetFamily && !controls.machineGroup) {
+            if (status) {
+                status.textContent = "Enter a search term or choose an asset family / machine group first.";
+                status.className = "asset-intel-status is-error";
+            }
+            return;
+        }
+
+        const params = new URLSearchParams();
+        Object.entries(controls).forEach(([key, value]) => {
+            if (value) params.set(key, value);
+        });
+        if (status) {
+            status.textContent = "Analysing related work orders, store transactions, Gen PO lines, and suppliers...";
+            status.className = "asset-intel-status is-loading";
+        }
+        if (button) button.disabled = true;
+        try {
+            const payload = await fetchJson(`/api/maintenance/asset-parts-intelligence?${params.toString()}`);
+            state.assetPartsIntelligence = payload;
+            populateAssetPartsIntelFilters(payload);
+            renderAssetPartsIntelligence(payload);
+            if (status) {
+                const summary = payload?.summary || {};
+                status.textContent = `Analysis complete: ${formatInteger(summary.relatedWorkOrderCount)} WO/MR, ${formatInteger(summary.sparePartTransactionCount)} store rows, ${formatInteger(summary.purchaseLineCount)} PO lines.`;
+                status.className = "asset-intel-status is-ok";
+            }
+        } catch (error) {
+            console.error("Asset Parts Intelligence load failed:", error);
+            if (status) {
+                status.textContent = `Analysis failed: ${error.message}`;
+                status.className = "asset-intel-status is-error";
+            }
+        } finally {
+            if (button) button.disabled = false;
+        }
+    }
+
+    function assetIntelConfidenceBadge(value) {
+        const text = value || "Low";
+        const cls = String(text).toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        return { html: `<span class="status-pill asset-intel-confidence asset-intel-confidence-${escapeHtml(cls)}">${escapeHtml(text)}</span>` };
+    }
+
+    function assetIntelFlagCell(value) {
+        const text = value || "Direct match";
+        const cls = text === "Direct match" ? "good" : "warn";
+        return { html: `<span class="asset-intel-flag asset-intel-flag-${cls}">${escapeHtml(text)}</span>` };
+    }
+
+    function assetIntelStackCell(primary, secondary = "") {
+        const main = primary || "--";
+        const sub = secondary && secondary !== primary ? `<span class="table-subtext">${escapeHtml(secondary)}</span>` : "";
+        return { html: `<div class="table-primary-cell"><strong>${escapeHtml(main)}</strong>${sub}</div>` };
+    }
+
+    function assetIntelFormatQty(value) {
+        if (value === null || value === undefined || Number.isNaN(Number(value))) return "--";
+        return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
+    function renderAssetPartsIntelligence(payload) {
+        const selected = payload?.selectedAsset || {};
+        const summary = payload?.summary || {};
+        const hasPayload = Boolean(payload);
+        const selectedName = selected.assetName && selected.assetName !== "Search required" ? selected.assetName : "No asset selected";
+        setText("asset-intel-selected-name", selectedName);
+        const selectedMetaParts = [];
+        if (selected.assetId) selectedMetaParts.push(`Asset ID: ${selected.assetId}`);
+        if (selected.assetFamily) selectedMetaParts.push(`Family: ${selected.assetFamily}`);
+        if (selected.machineGroup) selectedMetaParts.push(`Machine group: ${selected.machineGroup}`);
+        if (selected.includedAssetCount) selectedMetaParts.push(`${formatInteger(selected.includedAssetCount)} asset(s) in scope`);
+        setText(
+            "asset-intel-selected-meta",
+            selectedMetaParts.length ? selectedMetaParts.join(" | ") : "Results will include direct matches and clearly flagged related matches."
+        );
+
+        const aliasNode = document.getElementById("asset-intel-aliases");
+        if (aliasNode) {
+            const aliases = selected.aliases || [];
+            aliasNode.innerHTML = aliases.length
+                ? aliases.slice(0, 12).map((alias) => `<span>${escapeHtml(alias)}</span>`).join("")
+                : `<span>No aliases loaded yet</span>`;
+        }
+
+        setText("asset-intel-kpi-wo-total", hasPayload ? formatInteger(summary.relatedWorkOrderCount) : "--");
+        setText(
+            "asset-intel-kpi-wo-detail",
+            hasPayload
+                ? `Direct ${formatInteger(summary.directWorkOrderMatches)} | Description ${formatInteger(summary.descriptionWorkOrderMatches)} | Open ${formatInteger(summary.openInProgressWorkOrders)} | Finished ${formatInteger(summary.finishedConfirmedWorkOrders)}`
+                : "Direct -- | Description -- | Open -- | Finished --"
+        );
+        setText("asset-intel-kpi-store-total", hasPayload ? formatInteger(summary.sparePartTransactionCount) : "--");
+        setText(
+            "asset-intel-kpi-store-detail",
+            hasPayload
+                ? `Qty ${assetIntelFormatQty(summary.totalSparePartQuantity)} | Value ${formatSpareCurrencyOrNA(summary.totalSparePartValue)} | Unique ${formatInteger(summary.uniqueSpareParts)} | Top ${summary.topUsedPart || "--"}`
+                : "Qty -- | Value -- | Unique -- | Top --"
+        );
+        setText("asset-intel-kpi-po-total", hasPayload ? formatInteger(summary.purchaseLineCount) : "--");
+        setText(
+            "asset-intel-kpi-po-detail",
+            hasPayload
+                ? `Value ${formatSpareCurrencyOrNA(summary.totalPurchaseValue)} | Unique ${formatInteger(summary.uniquePurchasedParts)} | Latest ${formatShortDate(summary.latestPurchaseDate)}`
+                : "Value -- | Unique -- | Latest --"
+        );
+        setText("asset-intel-kpi-suppliers-total", hasPayload ? formatInteger(summary.supplierCount) : "--");
+        setText(
+            "asset-intel-kpi-suppliers-detail",
+            hasPayload ? `Main ${summary.mainSupplier || "--"} | Latest ${summary.latestSupplierUsed || "--"}` : "Main -- | Latest --"
+        );
+        setText("asset-intel-kpi-quality-confidence", hasPayload ? `${summary.confidence || "Low"} (${summary.confidenceScore || 0}%)` : "--");
+        setText(
+            "asset-intel-kpi-quality-detail",
+            hasPayload
+                ? `Mismatches ${formatInteger(summary.possibleCodingMismatchCount)} | Missing ID ${formatInteger(summary.missingAssetIdRecords)} | Description ${formatInteger(summary.descriptionOnlyRecords)} | PO-only ${formatInteger(summary.poOnlyPartRecords)}`
+                : "Mismatches -- | Missing ID -- | Description -- | PO-only --"
+        );
+
+        const gapsNode = document.getElementById("asset-intel-data-gaps");
+        if (gapsNode) {
+            const gaps = payload?.dataGaps || ["Data confidence notes will appear after analysis."];
+            gapsNode.innerHTML = gaps.map((gap) => `<span>${escapeHtml(gap)}</span>`).join("");
+        }
+
+        renderSpareTable("asset-intel-supplier-body", payload?.supplierSummary || [], 5, (row) => [
+            row.supplier || "--",
+            row.parts_supplied_text || (row.parts_supplied || []).join("; ") || "--",
+            formatSpareCurrencyOrNA(row.total_po_value),
+            formatInteger(row.po_line_count),
+            formatShortDate(row.latest_purchase_date),
+        ], "No suppliers found for this selection.");
+
+        renderSpareTable("asset-intel-wo-body", payload?.relatedWorkOrders || [], 10, (row) => [
+            formatShortDate(row.date),
+            row.mr_number || "--",
+            row.wo_number || "--",
+            row.recorded_asset_id || "--",
+            assetIntelStackCell(row.recorded_asset_name || row.functional_location || "--", row.functional_location || ""),
+            assetIntelStackCell(truncateLabel(row.description || "--", 92), row.original_description && row.original_description !== row.description ? truncateLabel(row.original_description, 92) : ""),
+            spareStatusBadge(row.status || "Unclassified"),
+            row.match_source || "--",
+            assetIntelConfidenceBadge(row.match_confidence),
+            assetIntelFlagCell(row.data_quality_flag),
+        ], "No related WO/MR records found for this selection.");
+
+        renderSpareTable("asset-intel-store-body", payload?.sparePartsUsed || [], 10, (row) => [
+            formatShortDate(row.date),
+            row.item_code || "--",
+            row.part_name || "--",
+            assetIntelFormatQty(row.quantity),
+            formatSpareCurrencyOrNA(row.value),
+            assetIntelStackCell(row.recorded_asset_project || "--", row.resolved_asset_name || row.asset_family || row.machine_group || ""),
+            row.related_wo_mr || "--",
+            row.match_source || "--",
+            assetIntelConfidenceBadge(row.match_confidence),
+            assetIntelFlagCell(row.data_quality_flag),
+        ], "No store consumption found for this selection.");
+
+        renderSpareTable("asset-intel-po-body", payload?.purchaseParts || [], 9, (row) => [
+            formatShortDate(row.po_date),
+            row.po_number || "--",
+            row.supplier || "--",
+            row.part_description || "--",
+            assetIntelFormatQty(row.quantity),
+            formatSpareCurrencyOrNA(row.value),
+            row.related_asset_alias || "--",
+            row.match_source || "--",
+            assetIntelConfidenceBadge(row.match_confidence),
+        ], "No Gen PO purchase history found for this selection.");
     }
 
     async function loadSpareImportHub() {
@@ -2902,14 +3038,18 @@ document.addEventListener("DOMContentLoaded", () => {
                 throw new Error(result.message || `HTTP ${response.status}`);
             }
             if (input) input.value = "";
-            await loadSparePartsView();
-            await loadSpareImportHub();
             const validationText = formatSpareImportValidation(result.validation_summary || {});
             setSpareImportStatus(
                 config.statusId,
                 `${result.message || "Import complete."}${validationText ? ` ${validationText}` : ""}`,
                 "ok"
             );
+            state.sparePartsData = null;
+            state.ptData = null;
+            state.assetPartsIntelligence = null;
+            ayData = null;
+            _epoData = null;
+            await loadSparePartsView({ forceReload: true });
         } catch (error) {
             console.error(`${config.kind} import failed:`, error);
             setSpareImportStatus(config.statusId, `Import failed: ${error.message}`, "error");
@@ -4058,6 +4198,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
         state.ptData = payload;
         populatePtFilters(payload);
+        populateAssetPartsIntelFilters();
         renderPtDashboard(payload);
     }
 
@@ -4639,11 +4780,17 @@ document.addEventListener("DOMContentLoaded", () => {
         // Chart D: By asset top 15 — filtered + converted
         // Prefer all-years by_asset for names (richer data), then fall back to txn-level names
         const assetNameMap = {};
-        (_ptByAssetCache.length ? _ptByAssetCache : (payload?.by_asset || [])).forEach((a) => { if (a.asset_id && a.equipment_name) assetNameMap[a.asset_id] = a.equipment_name; });
-        txns.forEach((r) => { if (r.asset_id && r.equipment_name && !assetNameMap[r.asset_id]) assetNameMap[r.asset_id] = r.equipment_name; });
+        (_ptByAssetCache.length ? _ptByAssetCache : (payload?.by_asset || [])).forEach((a) => {
+            if (a.asset_id && a.equipment_name) assetNameMap[a.asset_id] = a.equipment_name;
+        });
+        txns.forEach((r) => {
+            const assetKey = r.resolved_asset_id || r.asset_id;
+            const assetLabel = r.resolved_asset_name || r.equipment_name;
+            if (assetKey && assetLabel && !assetNameMap[assetKey]) assetNameMap[assetKey] = assetLabel;
+        });
         const byAssetVal = {};
         txns.forEach((r) => {
-            const k = r.asset_id || "Unknown";
+            const k = r.resolved_asset_id || r.asset_id || "Unknown";
             byAssetVal[k] = (byAssetVal[k] || 0) + (r.total_consumption || 0);
         });
         const top15Asset = Object.entries(byAssetVal).sort(([, a], [, b]) => b - a).slice(0, 15);
@@ -4672,17 +4819,114 @@ document.addEventListener("DOMContentLoaded", () => {
     // ── Table filter state ───────────────────────────────────────────────
     const ptTxnFilter = { search: "", category: "", asset: "" };
     const ptPartsFilter = { search: "", category: "" };
-    const ptAssetFilter = { search: "", criticality: "" };
+    const ptConsumptionState = { view: "asset", search: "", focus: "", criticality: "" };
+    const ptConsumptionSelection = { view: "asset", key: "" };
     let ptInsightActiveTab = "part_usage";
     let ptSelectedPartKey = "";
     let ptSelectedPartLabel = "";
     let _ptTxnsCache = [];
     let _ptByAssetCache = [];
 
-    // Called from loadAllYearsTransactions — no by_asset in that payload, nothing to do here
-    function populatePtTableFilters(_payload) { /* by-asset setup happens in renderPtTables */ }
+    const PT_CONSUMPTION_VIEW_META = {
+        asset: {
+            label: "Asset",
+            empty: "No asset rows match the current filters.",
+            title: "Grouped Consumption by Asset",
+            subtitle: "Smart matched spare-part spend per specific asset.",
+            headers: ["Equipment", "Asset ID", "Asset Family", "Machine Group", "Criticality", "Total Value", "Total Qty", "Lines", "Unique Parts", "Top Part", "Match Quality"],
+            cells: (row) => [
+                row.equipment_name || row.label || "--",
+                row.asset_id || "--",
+                row.asset_family || "--",
+                row.machine_group || "--",
+                row.equipment_criticality || row.criticality || "--",
+                ptFmtCurrency(row.total_consumption),
+                formatPtQty(row.total_qty),
+                formatPtCount(row.line_count),
+                formatPtCount(row.unique_parts_count),
+                row.top_part || "--",
+                ptConsumptionMatchCell(row),
+            ],
+        },
+        asset_family: {
+            label: "Asset Family",
+            empty: "No asset-family rows match the current filters.",
+            title: "Grouped Consumption by Asset Family",
+            subtitle: "All related assets rolled up into shared families like Combi Oven or Chiller.",
+            headers: ["Asset Family", "Machine Group", "Assets Included", "Total Value", "Total Qty", "Lines", "Unique Parts", "Top Asset", "Top Part", "Area Matches", "Match Quality"],
+            cells: (row) => [
+                row.asset_family || row.label || "--",
+                row.machine_group || "--",
+                formatPtCount(row.assets_included || row.asset_count),
+                ptFmtCurrency(row.total_consumption),
+                formatPtQty(row.total_qty),
+                formatPtCount(row.line_count),
+                formatPtCount(row.unique_parts_count),
+                row.top_consuming_asset || row.top_asset || "--",
+                row.top_part || "--",
+                formatPtCount(row.general_area_count),
+                ptConsumptionMatchCell(row),
+            ],
+        },
+        machine_group: {
+            label: "Machine Group",
+            empty: "No machine-group rows match the current filters.",
+            title: "Grouped Consumption by Machine Group",
+            subtitle: "Aggregated spare-part spend by the machine group resolved from asset and WO context.",
+            headers: ["Machine Group", "Total Value", "Total Qty", "Lines", "Unique Parts", "Top Asset", "Top Asset Family", "Top Part", "Match Quality"],
+            cells: (row) => [
+                row.machine_group || row.label || "--",
+                ptFmtCurrency(row.total_consumption),
+                formatPtQty(row.total_qty),
+                formatPtCount(row.line_count),
+                formatPtCount(row.unique_parts_count),
+                row.top_consuming_asset || row.top_asset || "--",
+                row.top_asset_family || "--",
+                row.top_part || "--",
+                ptConsumptionMatchCell(row),
+            ],
+        },
+        general_area: {
+            label: "General Area",
+            empty: "No general-area rows match the current filters.",
+            title: "General Area and Uncategorised Usage",
+            subtitle: "Rows coded to broad areas remain visible here even when related assets are inferred elsewhere.",
+            headers: ["General Area", "Total Value", "Total Qty", "Lines", "Unique Parts", "Top Related Asset", "Coding Mismatches", "Match Quality"],
+            cells: (row) => [
+                row.general_area || row.label || "--",
+                ptFmtCurrency(row.total_consumption),
+                formatPtQty(row.total_qty),
+                formatPtCount(row.line_count),
+                formatPtCount(row.unique_parts_count),
+                row.top_related_asset || row.top_consuming_asset || "--",
+                formatPtCount(row.coding_mismatch_count),
+                ptConsumptionMatchCell(row),
+            ],
+        },
+        part: {
+            label: "Part Relationship",
+            empty: "No part-relationship rows match the current filters.",
+            title: "Part-to-Asset Relationship",
+            subtitle: "Parts rolled up with the assets, families, and machine groups consuming them.",
+            headers: ["Part Code", "Part Name", "Assets", "Families", "Machine Groups", "Total Value", "Total Qty", "Lines", "Top Asset", "Match Quality"],
+            cells: (row) => [
+                row.part_code || "--",
+                row.part_name || row.label || "--",
+                formatPtCount(row.asset_count),
+                formatPtCount(row.asset_family_count),
+                formatPtCount(row.machine_group_count),
+                ptFmtCurrency(row.total_consumption),
+                formatPtQty(row.total_qty),
+                formatPtCount(row.line_count),
+                row.top_consuming_asset || row.top_asset || "--",
+                ptConsumptionMatchCell(row),
+            ],
+        },
+    };
 
-    // Called from renderPtTables — populates transaction + parts filters (pt data)
+    // Called from loadAllYearsTransactions — no by-asset setup is needed there
+    function populatePtTableFilters(_payload) { /* handled inside renderPtTables */ }
+
     function _populateTxnFilters(txns) {
         const cats = [...new Set(txns.map((r) => r.item_category).filter(Boolean))].sort();
         const assets = [...new Set(txns.map((r) => r.asset_id).filter(Boolean))].sort();
@@ -4770,6 +5014,14 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     }
 
+    function formatPtCount(value) {
+        return value === null || value === undefined || Number.isNaN(Number(value)) ? "--" : Number(value).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    }
+
+    function formatPtQty(value) {
+        return value === null || value === undefined || Number.isNaN(Number(value)) ? "--" : Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+    }
+
     function ptTransactionCells(r) {
         return [
             formatShortDate(r.project_date),
@@ -4829,62 +5081,433 @@ document.addEventListener("DOMContentLoaded", () => {
         renderSpareTable("pt-transactions-body", rows.slice(0, 300), 9, ptTransactionCells, "No transactions match the current filters.");
     }
 
-    function renderByAssetTable(rows) {
-        _ptByAssetCache = rows;
-        const s = ptAssetFilter.search.toLowerCase();
-        let filtered = rows;
-        if (s) filtered = filtered.filter((r) =>
-            (r.equipment_name || "").toLowerCase().includes(s) ||
-            (r.asset_id || "").toLowerCase().includes(s)
+    function getPtConsumptionAnalysis(payload) {
+        return payload?.consumption_analysis || { groups: {}, records: [], filters: {} };
+    }
+
+    function getPtConsumptionRows(payload, view = ptConsumptionState.view) {
+        const analysis = getPtConsumptionAnalysis(payload);
+        return analysis?.groups?.[view] || [];
+    }
+
+    function getPtConsumptionVisibleRows(payload, options = {}) {
+        const { ignoreFocus = false } = options;
+        let rows = getPtConsumptionRows(payload, ptConsumptionState.view);
+        if (ptConsumptionState.view === "asset" && ptConsumptionState.criticality) {
+            rows = rows.filter((row) => (row.equipment_criticality || row.criticality || "") === ptConsumptionState.criticality);
+        }
+        if (!ignoreFocus && ptConsumptionState.focus) {
+            rows = rows.filter((row) => row.group_key === ptConsumptionState.focus);
+        }
+        if (ptConsumptionState.search) {
+            const term = ptConsumptionState.search;
+            rows = rows.filter((row) => String(row.search_text || row.label || "").toLowerCase().includes(term));
+        }
+        return rows;
+    }
+
+    function getPtConsumptionSelectedRow(payload, visibleRows) {
+        if (!ptConsumptionSelection.key || ptConsumptionSelection.view !== ptConsumptionState.view) return null;
+        return (visibleRows || []).find((row) => row.group_key === ptConsumptionSelection.key) || null;
+    }
+
+    function getPtConsumptionScopedRecords(payload, visibleRows) {
+        const analysis = getPtConsumptionAnalysis(payload);
+        const records = analysis.records || [];
+        const selectedRow = getPtConsumptionSelectedRow(payload, visibleRows);
+        const keys = selectedRow
+            ? new Set([selectedRow.group_key])
+            : new Set((visibleRows || []).map((row) => row.group_key));
+        if (!keys.size) return [];
+        return records.filter((row) => keys.has((row.consumption_keys || {})[ptConsumptionState.view]));
+    }
+
+    function ptConsumptionMatchCell(row) {
+        const summary = `${formatPtCount(row.direct_match_count)} direct / ${formatPtCount(row.related_match_count)} related`;
+        return {
+            html: `${spareStatusBadge(row.match_quality || "Low")}<span class="table-subtext">${escapeHtml(summary)}</span>`,
+        };
+    }
+
+    function ptConsumptionAggregateTop(records, keyFn, labelFn) {
+        const totals = new Map();
+        records.forEach((row) => {
+            const key = keyFn(row);
+            const label = labelFn(row);
+            if (!key || !label) return;
+            const entry = totals.get(key) || { label, value: 0 };
+            entry.value += Number(row.total_consumption || 0);
+            totals.set(key, entry);
+        });
+        return [...totals.values()].sort((a, b) => b.value - a.value);
+    }
+
+    function renderPtConsumptionSummary(payload, visibleRows) {
+        const scopedRecords = getPtConsumptionScopedRecords(payload, visibleRows);
+        const selectedRow = getPtConsumptionSelectedRow(payload, visibleRows);
+        if (!visibleRows.length || !scopedRecords.length) {
+            [
+                "pt-cons-kpi-total-value",
+                "pt-cons-kpi-total-qty",
+                "pt-cons-kpi-lines",
+                "pt-cons-kpi-four-value",
+                "pt-cons-kpi-five-value",
+                "pt-cons-kpi-six-value",
+            ].forEach((id) => setText(id, "--"));
+            setText("pt-cons-kpi-four-label", "Unique Parts");
+            setText("pt-cons-kpi-five-label", "Top Part");
+            setText("pt-cons-kpi-six-label", "Match Notes");
+            setText("pt-consumption-selection-note", visibleRows.length ? "No detailed records match the current selection." : "No grouped rows match the current filters.");
+            return;
+        }
+
+        const totalValue = scopedRecords.reduce((sum, row) => sum + (row.total_consumption || 0), 0);
+        const totalQty = scopedRecords.reduce((sum, row) => sum + (row.quantity_used || 0), 0);
+        const uniqueParts = new Set(scopedRecords.map((row) => row.part_code || row.part_name).filter(Boolean)).size;
+        const uniqueAssets = new Set(scopedRecords.map((row) => row.resolved_asset_id || row.asset_id).filter(Boolean)).size;
+        const uniqueFamilies = new Set(scopedRecords.map((row) => row.asset_family_id || row.asset_family).filter(Boolean)).size;
+        const topPart = (ptConsumptionAggregateTop(scopedRecords, (row) => row.part_code || row.part_name, (row) => row.part_name || row.part_code)[0] || {}).label || "--";
+        const topAsset = (ptConsumptionAggregateTop(scopedRecords, (row) => row.resolved_asset_id || row.asset_id, (row) => row.resolved_asset_name || row.equipment_name || row.asset_id)[0] || {}).label || "--";
+        const topFamily = (ptConsumptionAggregateTop(scopedRecords, (row) => row.asset_family_id || row.asset_family, (row) => row.asset_family)[0] || {}).label || "--";
+        const direct = scopedRecords.filter((row) => row.is_direct_match).length;
+        const related = scopedRecords.filter((row) => row.is_related_match).length;
+        const mismatches = scopedRecords.filter((row) => row.possible_asset_coding_mismatch).length;
+        const generalAreas = scopedRecords.filter((row) => row.general_area).length;
+
+        setText("pt-cons-kpi-total-value", ptFmtCurrency(totalValue));
+        setText("pt-cons-kpi-total-qty", formatPtQty(totalQty));
+        setText("pt-cons-kpi-lines", formatPtCount(scopedRecords.length));
+
+        let cardFourLabel = "Unique Parts";
+        let cardFourValue = formatPtCount(uniqueParts);
+        let cardFiveLabel = "Top Part";
+        let cardFiveValue = topPart;
+        let cardSixLabel = "Match Notes";
+        let cardSixValue = `${formatPtCount(direct)} / ${formatPtCount(related)}`;
+
+        if (ptConsumptionState.view === "asset_family") {
+            cardFourLabel = "Assets Included";
+            cardFourValue = formatPtCount(uniqueAssets);
+            cardFiveLabel = "Top Asset";
+            cardFiveValue = topAsset;
+            cardSixLabel = "Area Matches";
+            cardSixValue = formatPtCount(generalAreas);
+        } else if (ptConsumptionState.view === "machine_group") {
+            cardFourLabel = "Asset Families";
+            cardFourValue = formatPtCount(uniqueFamilies);
+            cardFiveLabel = "Top Asset";
+            cardFiveValue = topAsset;
+            cardSixLabel = "Top Family";
+            cardSixValue = topFamily;
+        } else if (ptConsumptionState.view === "general_area") {
+            cardFourLabel = "Unique Parts";
+            cardFourValue = formatPtCount(uniqueParts);
+            cardFiveLabel = "Top Related Asset";
+            cardFiveValue = topAsset;
+            cardSixLabel = "Coding Mismatches";
+            cardSixValue = formatPtCount(mismatches);
+        } else if (ptConsumptionState.view === "part") {
+            cardFourLabel = "Assets Used By";
+            cardFourValue = formatPtCount(uniqueAssets);
+            cardFiveLabel = "Asset Families";
+            cardFiveValue = formatPtCount(uniqueFamilies);
+            cardSixLabel = "Top Asset";
+            cardSixValue = topAsset;
+        }
+
+        setText("pt-cons-kpi-four-label", cardFourLabel);
+        setText("pt-cons-kpi-four-value", cardFourValue);
+        setText("pt-cons-kpi-five-label", cardFiveLabel);
+        setText("pt-cons-kpi-five-value", cardFiveValue);
+        setText("pt-cons-kpi-six-label", cardSixLabel);
+        setText("pt-cons-kpi-six-value", cardSixValue);
+
+        const scopeLabel = selectedRow
+            ? `${selectedRow.label}: ${scopedRecords.length.toLocaleString()} consumption line${scopedRecords.length === 1 ? "" : "s"}, ${formatPtCount(mismatches)} coding mismatch${mismatches === 1 ? "" : "es"}, and ${formatPtCount(generalAreas)} general-area source line${generalAreas === 1 ? "" : "s"}.`
+            : `${visibleRows.length.toLocaleString()} ${PT_CONSUMPTION_VIEW_META[ptConsumptionState.view].label.toLowerCase()} row${visibleRows.length === 1 ? "" : "s"} match the current filters.`;
+        setText("pt-consumption-selection-note", scopeLabel);
+    }
+
+    function renderPtConsumptionCharts(payload, visibleRows) {
+        const scopedRecords = getPtConsumptionScopedRecords(payload, visibleRows);
+        const view = ptConsumptionState.view;
+
+        setText("pt-cons-chart-top-parts-title", view === "part" ? "Top Assets" : "Top Parts");
+        setText("pt-cons-chart-top-parts-subtitle", view === "part" ? "Assets most associated with the selected part scope." : "Highest-value parts in the current selection.");
+        setText("pt-cons-chart-trend-title", "Monthly Trend");
+        setText("pt-cons-chart-trend-subtitle", "Monthly spare-part usage for the current selection.");
+        setText("pt-cons-chart-entities-title", view === "machine_group" || view === "asset_family" || view === "part" ? "Top Assets" : "Top Related Contributors");
+        setText("pt-cons-chart-split-title", view === "machine_group" ? "Family Split" : "Machine Group Split");
+        setText("pt-cons-chart-split-subtitle", view === "machine_group" ? "Value split by asset family." : "Value split by machine group.");
+
+        if (!scopedRecords.length) {
+            ["pt-consumption-chart-top-parts", "pt-consumption-chart-trend", "pt-consumption-chart-entities", "pt-consumption-chart-split"].forEach((id) => {
+                renderSpareChartEmpty(id, "No data for the current selection.");
+            });
+            return;
+        }
+
+        const topPartRows = view === "part"
+            ? ptConsumptionAggregateTop(scopedRecords, (row) => row.resolved_asset_id || row.asset_id, (row) => row.resolved_asset_name || row.equipment_name || row.asset_id)
+            : ptConsumptionAggregateTop(scopedRecords, (row) => row.part_code || row.part_name, (row) => row.part_name || row.part_code);
+        renderSpareHorizontalBarChart(
+            "pt-consumption-chart-top-parts",
+            topPartRows.slice(0, 10).map((row) => ({ label: row.label, value: Number(ptConvert(row.value).toFixed(state.ptCurrency === "SGD" ? 2 : 0)) })),
+            state.ptCurrency,
+            view === "part" ? "#0f766e" : "#2563eb"
         );
-        if (ptAssetFilter.criticality) filtered = filtered.filter((r) => r.equipment_criticality === ptAssetFilter.criticality);
-        renderSpareTable("pt-by-asset-body", filtered.slice(0, 100), 7, (r) => {
-            const name = r.equipment_name;
-            const id = r.asset_id;
-            const label = name
-                ? { html: `${escapeHtml(name)}<br><span style="font-size:0.78em;color:#94a3b8">${escapeHtml(id || "")}</span>` }
-                : (id || "--");
-            return [
-                label,
-                r.equipment_criticality || "--",
-                ptFmtCurrency(r.total_consumption),
-                r.total_qty !== null ? Number(r.total_qty).toLocaleString(undefined, { maximumFractionDigits: 1 }) : "--",
-                r.line_count ?? "--",
-                r.unique_parts_count ?? "--",
-                r.top_part || "--",
-            ];
-        }, "No asset data.");
+
+        const monthly = new Map();
+        scopedRecords.forEach((row) => {
+            const month = String(row.project_date || "").slice(0, 7);
+            if (!month) return;
+            monthly.set(month, (monthly.get(month) || 0) + Number(row.total_consumption || 0));
+        });
+        const monthlyRows = [...monthly.entries()].sort(([a], [b]) => a.localeCompare(b));
+        if (!monthlyRows.length) {
+            renderSpareChartEmpty("pt-consumption-chart-trend", "No dated records for the current selection.");
+        } else {
+            showSpareChartCanvas("pt-consumption-chart-trend");
+            createChart("pt-consumption-chart-trend", {
+                type: "line",
+                data: {
+                    labels: monthlyRows.map(([month]) => month),
+                    datasets: [{
+                        label: state.ptCurrency,
+                        data: monthlyRows.map(([, value]) => Number(ptConvert(value).toFixed(state.ptCurrency === "SGD" ? 2 : 0))),
+                        borderColor: "#0f766e",
+                        backgroundColor: "rgba(15,118,110,0.12)",
+                        fill: true,
+                        tension: 0.25,
+                        pointRadius: 4,
+                    }],
+                },
+                options: spareChartOptions(state.ptCurrency),
+                _scroll: { axis: "x", count: monthlyRows.length },
+            });
+        }
+
+        const entityRows = ptConsumptionAggregateTop(
+            scopedRecords,
+            (row) => {
+                if (view === "general_area") return row.resolved_asset_id || row.asset_id;
+                if (view === "asset") return row.asset_family_id || row.asset_family;
+                return row.resolved_asset_id || row.asset_id;
+            },
+            (row) => {
+                if (view === "general_area") return row.resolved_asset_name || row.equipment_name || row.asset_id;
+                if (view === "asset") return row.asset_family || "Unresolved Family";
+                return row.resolved_asset_name || row.equipment_name || row.asset_id;
+            }
+        );
+        if (!entityRows.length) {
+            renderSpareChartEmpty("pt-consumption-chart-entities", "No related contributors for the current selection.");
+        } else {
+            renderSpareHorizontalBarChart(
+                "pt-consumption-chart-entities",
+                entityRows.slice(0, 10).map((row) => ({ label: row.label, value: Number(ptConvert(row.value).toFixed(state.ptCurrency === "SGD" ? 2 : 0)) })),
+                state.ptCurrency,
+                "#8b5cf6"
+            );
+        }
+
+        const splitRows = ptConsumptionAggregateTop(
+            scopedRecords,
+            (row) => view === "machine_group" ? (row.asset_family_id || row.asset_family) : (row.machine_group || ""),
+            (row) => view === "machine_group" ? (row.asset_family || "Unresolved Family") : (row.machine_group || "Unclassified")
+        );
+        if (!splitRows.length) {
+            renderSpareChartEmpty("pt-consumption-chart-split", "No split data for the current selection.");
+        } else {
+            renderSparePieChart(
+                "pt-consumption-chart-split",
+                splitRows.slice(0, 8).map((row) => ({ label: row.label, value: Number(ptConvert(row.value).toFixed(state.ptCurrency === "SGD" ? 2 : 0)) })),
+                "No split data for the current selection."
+            );
+        }
+    }
+
+    function renderPtConsumptionTable(payload, visibleRows) {
+        const meta = PT_CONSUMPTION_VIEW_META[ptConsumptionState.view] || PT_CONSUMPTION_VIEW_META.asset;
+        const thead = document.getElementById("pt-consumption-head");
+        if (thead) {
+            thead.innerHTML = `<tr>${meta.headers.map((label) => `<th>${escapeHtml(label)}</th>`).join("")}</tr>`;
+        }
+        setText("pt-consumption-table-title", meta.title);
+        setText("pt-consumption-table-subtitle", meta.subtitle);
+        renderSpareTable(
+            "pt-consumption-body",
+            visibleRows.slice(0, 150),
+            meta.headers.length,
+            meta.cells,
+            meta.empty,
+            (row) => {
+                const isSelected = ptConsumptionSelection.view === ptConsumptionState.view && ptConsumptionSelection.key === row.group_key;
+                return {
+                    className: `pt-consumption-row${isSelected ? " is-selected" : ""}`,
+                    data: {
+                        "group-key": row.group_key,
+                        "view-mode": ptConsumptionState.view,
+                    },
+                };
+            }
+        );
+    }
+
+    function renderPtConsumptionDrilldown(payload, visibleRows) {
+        const selectedRow = getPtConsumptionSelectedRow(payload, visibleRows);
+        const records = getPtConsumptionScopedRecords(payload, visibleRows);
+        const clearBtn = document.getElementById("pt-consumption-clear-drilldown");
+        if (!selectedRow) {
+            if (clearBtn) clearBtn.classList.add("hidden");
+            setText("pt-consumption-drilldown-title", "Usage Drilldown");
+            setText("pt-consumption-drilldown-subtitle", "Select a grouped row above to inspect individual consumption lines.");
+            renderSpareTable("pt-consumption-drilldown-body", [], 12, () => [], "Select a grouped row above to inspect detailed usage lines.");
+            return;
+        }
+        if (clearBtn) clearBtn.classList.remove("hidden");
+        setText("pt-consumption-drilldown-title", selectedRow.label || "Usage Drilldown");
+        setText("pt-consumption-drilldown-subtitle", `${records.length.toLocaleString()} detailed line${records.length === 1 ? "" : "s"} for the selected ${PT_CONSUMPTION_VIEW_META[ptConsumptionState.view].label.toLowerCase()}.`);
+        renderSpareTable("pt-consumption-drilldown-body", records.slice(0, 250), 12, (row) => [
+            formatShortDate(row.project_date),
+            row.resolved_asset_id || row.asset_id || "--",
+            row.resolved_asset_name || row.equipment_name || "--",
+            row.asset_family || "--",
+            row.machine_group || "--",
+            row.part_code || "--",
+            row.part_name || "--",
+            formatPtQty(row.quantity_used),
+            ptFmtCurrencyOrNA(row.total_consumption),
+            row.mr_wo_reference || "--",
+            {
+                html: `${spareStatusBadge(row.match_confidence || "Low")}<span class="table-subtext">${escapeHtml(row.match_source || "--")}</span>`,
+            },
+            (row.data_quality_flags || []).join("; ") || "Valid",
+        ], "No detailed usage lines for the selected row.");
+    }
+
+    function syncPtConsumptionFocusOptions(payload) {
+        const sel = document.getElementById("pt-consumption-focus");
+        if (!sel) return;
+        const rows = getPtConsumptionRows(payload, ptConsumptionState.view);
+        const current = rows.some((row) => row.group_key === ptConsumptionState.focus) ? ptConsumptionState.focus : "";
+        sel.innerHTML = `<option value="">All Rows</option>` + rows.slice(0, 200).map((row) => (
+            `<option value="${escapeHtml(row.group_key)}">${escapeHtml(row.label || row.asset_family || row.machine_group || row.part_name || row.general_area || row.asset_id || row.group_key)}</option>`
+        )).join("");
+        sel.value = current;
+        ptConsumptionState.focus = current;
+    }
+
+    function syncPtConsumptionCriticalities(payload) {
+        const sel = document.getElementById("pt-asset-crit");
+        if (!sel) return;
+        const criticalities = [...new Set((payload?.by_asset || []).map((row) => row.equipment_criticality).filter(Boolean))].sort();
+        _populateSelect("pt-asset-crit", criticalities, "All Criticality");
+        sel.value = criticalities.includes(ptConsumptionState.criticality) ? ptConsumptionState.criticality : "";
+        ptConsumptionState.criticality = sel.value || "";
+        sel.disabled = ptConsumptionState.view !== "asset";
+    }
+
+    function bindPtConsumptionSelection() {
+        const body = document.getElementById("pt-consumption-body");
+        if (body && !body._ptConsumptionBound) {
+            body._ptConsumptionBound = true;
+            body.addEventListener("click", (event) => {
+                const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+                const row = target?.closest("tr[data-group-key]");
+                if (!row || !body.contains(row)) return;
+                const nextKey = row.dataset.groupKey || "";
+                const isSame = ptConsumptionSelection.view === ptConsumptionState.view && ptConsumptionSelection.key === nextKey;
+                ptConsumptionSelection.view = ptConsumptionState.view;
+                ptConsumptionSelection.key = isSame ? "" : nextKey;
+                ptConsumptionState.focus = ptConsumptionSelection.key;
+                const focusSel = document.getElementById("pt-consumption-focus");
+                if (focusSel) focusSel.value = ptConsumptionState.focus;
+                renderPtConsumptionPanel(state.ptData || {});
+            });
+        }
+
+        ["pt-consumption-clear-selection", "pt-consumption-clear-drilldown"].forEach((id) => {
+            const btn = document.getElementById(id);
+            if (!btn || btn._ptConsumptionClearBound) return;
+            btn._ptConsumptionClearBound = true;
+            btn.addEventListener("click", () => {
+                ptConsumptionSelection.view = ptConsumptionState.view;
+                ptConsumptionSelection.key = "";
+                ptConsumptionState.focus = "";
+                const focusSel = document.getElementById("pt-consumption-focus");
+                if (focusSel) focusSel.value = "";
+                renderPtConsumptionPanel(state.ptData || {});
+            });
+        });
+    }
+
+    function bindPtConsumptionControls() {
+        _bindTblFilter("pt-consumption-view", (value) => {
+            ptConsumptionState.view = value || "asset";
+            ptConsumptionState.focus = "";
+            ptConsumptionState.criticality = ptConsumptionState.view === "asset" ? ptConsumptionState.criticality : "";
+            ptConsumptionSelection.view = ptConsumptionState.view;
+            ptConsumptionSelection.key = "";
+            renderPtConsumptionPanel(state.ptData || {});
+        });
+        _bindTblFilter("pt-consumption-focus", (value) => {
+            ptConsumptionState.focus = value || "";
+            ptConsumptionSelection.view = ptConsumptionState.view;
+            ptConsumptionSelection.key = value || "";
+            renderPtConsumptionPanel(state.ptData || {});
+        });
+        _bindTblFilter("pt-asset-search", (value) => {
+            ptConsumptionState.search = String(value || "").trim().toLowerCase();
+            renderPtConsumptionPanel(state.ptData || {});
+        });
+        _bindTblFilter("pt-asset-crit", (value) => {
+            ptConsumptionState.criticality = value || "";
+            renderPtConsumptionPanel(state.ptData || {});
+        });
+    }
+
+    function renderPtConsumptionPanel(payload) {
+        const viewSel = document.getElementById("pt-consumption-view");
+        if (viewSel) viewSel.value = ptConsumptionState.view;
+        const searchInput = document.getElementById("pt-asset-search");
+        if (searchInput) {
+            searchInput.placeholder = "Search asset, family, machine group, part, remarks...";
+            searchInput.setAttribute("aria-label", "Search smart spare-part consumption");
+        }
+        bindPtConsumptionControls();
+        bindPtConsumptionSelection();
+        syncPtConsumptionFocusOptions(payload);
+        syncPtConsumptionCriticalities(payload);
+        const visibleRows = getPtConsumptionVisibleRows(payload);
+        const clearBtn = document.getElementById("pt-consumption-clear-selection");
+        if (clearBtn) clearBtn.classList.toggle("hidden", !(ptConsumptionSelection.key && ptConsumptionSelection.view === ptConsumptionState.view));
+        renderPtConsumptionSummary(payload, visibleRows);
+        renderPtConsumptionCharts(payload, visibleRows);
+        renderPtConsumptionTable(payload, visibleRows);
+        renderPtConsumptionDrilldown(payload, visibleRows);
     }
 
     function renderPtTables(txns, payload) {
-        // Table A: All transactions — populate filters then render via filter function
         _ptTxnsCache = txns;
         _populateTxnFilters(txns);
         renderTxnTable();
 
-        // Table B: All parts — multi-year data with year filter
         renderAllPtPartsTable();
 
-        // Table C: By asset — from project transactions payload (the only source of by_asset)
-        const byAsset = payload?.by_asset || [];
-        const crits = [...new Set(byAsset.map((r) => r.equipment_criticality).filter(Boolean))].sort();
-        _populateSelect("pt-asset-crit", crits, "All Criticality");
-        _bindTblFilter("pt-asset-search", (v) => { ptAssetFilter.search = v; renderByAssetTable(_ptByAssetCache); });
-        _bindTblFilter("pt-asset-crit", (v) => { ptAssetFilter.criticality = v; renderByAssetTable(_ptByAssetCache); });
-        renderByAssetTable(byAsset);
+        _ptByAssetCache = payload?.by_asset || [];
+        renderPtConsumptionPanel(payload);
 
-        // Table D: Manual review (from full payload)
         renderSpareTable("pt-manual-review-body", (payload?.manual_review || []).slice(0, 200), 7, (r) => [
             formatShortDate(r.project_date),
             r.work_order_id || "--",
             r.asset_id || "--",
             r.translated_description || r.original_description || "--",
             spareStatusBadge(r.item_category),
-            r.classification_confidence || "--",
-            r.parse_status || "--",
+            r.match_confidence || r.classification_confidence || "--",
+            (r.data_quality_flags || []).join("; ") || r.parse_status || "--",
         ], "No manual review items.");
 
-        // Table E: Part usage by asset — prefer all-years transactions if already loaded
         if (ayData?.transactions?.length) {
             renderPartAssetTable(_buildPauDataFromTxns(ayData.transactions));
         } else {

@@ -65,48 +65,111 @@ _BACKEND_START = datetime.now()
 import json as _json
 import time as _time
 import threading as _threading
+import gzip as _gzip
+import hashlib as _hashlib
 
-# Route-level response cache: the heavy pages (downtime ~32 MB, pm-schedule
-# ~13 MB) are expensive to BUILD (14-50s) and the dict-level caches are fragile
-# under the threaded dev server. Caching the fully-serialized response bytes by
-# URL for a short window makes repeat loads instant regardless — and the build
-# happens at most once per window (warmed at startup). Mutations clear it.
-_ROUTE_CACHE = {}              # key -> (monotonic_ts, json_bytes)
-_ROUTE_CACHE_TTL = 180.0
-_ROUTE_CACHE_LOCK = _threading.Lock()
-
-
+# Disk-backed gzip response cache for the heavy pages (downtime ~32 MB,
+# pm-schedule ~13 MB, spare-parts). Building these takes 10-100s and serving them
+# uncompressed is slow. We build once, store the GZIPPED bytes on disk, and serve
+# them directly — so loads are instant, and the cache survives restarts and any
+# in-memory churn (which previously defeated the cache). A background thread
+# refreshes the default payloads so a cold build never lands on a user request.
+_CACHE_DIR = os.path.join(DATA_DIR, "_dashboard_cache")
+try:
+    os.makedirs(_CACHE_DIR, exist_ok=True)
+except Exception:
+    pass
+_CACHE_TTL = 600.0
 _BUILD_LOCKS = {}
 _BUILD_LOCKS_GUARD = _threading.Lock()
+_REFRESH_TARGETS = []          # [(key, builder)] rebuilt periodically in the background
 
 
-def _cached_json(key, builder):
-    now = _time.monotonic()
-    hit = _ROUTE_CACHE.get(key)
-    if hit is not None and (now - hit[0]) < _ROUTE_CACHE_TTL:
-        return app.response_class(hit[1], mimetype="application/json")
-    # Single-flight: only ONE thread builds a given key; concurrent requests wait
-    # and reuse the result. Without this, the browser firing several requests at
-    # once each started its own ~50-97s build (GIL contention), so nothing ever
-    # cached — a death spiral that kept every load slow.
+def _cache_path(key):
+    return os.path.join(_CACHE_DIR, _hashlib.md5(repr(key).encode("utf-8")).hexdigest() + ".json.gz")
+
+
+def _cache_fresh(path, ttl):
+    try:
+        return os.path.exists(path) and (_time.time() - os.path.getmtime(path)) < ttl
+    except OSError:
+        return False
+
+
+def _write_cache(key, builder):
+    gz = _gzip.compress(_json.dumps(builder(), default=str).encode("utf-8"), 5)
+    path = _cache_path(key)
+    try:
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(gz)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+    return gz
+
+
+def _gzip_resp(gz, accepts_gzip):
+    if accepts_gzip:
+        resp = app.response_class(gz, mimetype="application/json")
+        resp.headers["Content-Encoding"] = "gzip"
+        resp.headers["Content-Length"] = str(len(gz))
+        resp.headers["Vary"] = "Accept-Encoding"
+        return resp
+    return app.response_class(_gzip.decompress(gz), mimetype="application/json")
+
+
+def _cached_json(key, builder, ttl=_CACHE_TTL):
+    accepts = "gzip" in request.headers.get("Accept-Encoding", "").lower()
+    path = _cache_path(key)
+    if _cache_fresh(path, ttl):
+        try:
+            with open(path, "rb") as fh:
+                return _gzip_resp(fh.read(), accepts)
+        except OSError:
+            pass
+    # Single-flight: one build per key; concurrent requests wait and reuse it.
     with _BUILD_LOCKS_GUARD:
         lock = _BUILD_LOCKS.setdefault(key, _threading.Lock())
     with lock:
-        now = _time.monotonic()
-        hit = _ROUTE_CACHE.get(key)
-        if hit is not None and (now - hit[0]) < _ROUTE_CACHE_TTL:
-            return app.response_class(hit[1], mimetype="application/json")
-        body = _json.dumps(builder(), default=str)
-        with _ROUTE_CACHE_LOCK:
-            _ROUTE_CACHE[key] = (now, body)
-    return app.response_class(body, mimetype="application/json")
+        if _cache_fresh(path, ttl):
+            try:
+                with open(path, "rb") as fh:
+                    return _gzip_resp(fh.read(), accepts)
+            except OSError:
+                pass
+        gz = _write_cache(key, builder)
+    return _gzip_resp(gz, accepts)
+
+
+def _register_refresh(key, builder):
+    _REFRESH_TARGETS.append((key, builder))
+
+
+def _background_refresher():
+    """Rebuild the default heavy payloads on disk on a schedule (and once now), so
+    user requests always hit a warm cache instead of a cold build."""
+    def loop():
+        while True:
+            for key, builder in list(_REFRESH_TARGETS):
+                try:
+                    _write_cache(key, builder)
+                except Exception:
+                    pass
+            _time.sleep(max(60.0, _CACHE_TTL * 0.5))
+    _threading.Thread(target=loop, name="cache-refresher", daemon=True).start()
 
 
 def _invalidate_route_cache():
-    """Drop cached responses + payload dict caches so the next request rebuilds
-    fresh after an edit/upload."""
-    with _ROUTE_CACHE_LOCK:
-        _ROUTE_CACHE.clear()
+    """Delete cached files + payload dict caches so the next request rebuilds."""
+    try:
+        for fn in os.listdir(_CACHE_DIR):
+            try:
+                os.remove(os.path.join(_CACHE_DIR, fn))
+            except OSError:
+                pass
+    except Exception:
+        pass
     for mod, attr in (("pm_schedule_service", "_PM_PAGE_PAYLOAD_CACHE"), ("downtime_service", "_DOWNTIME_CACHE")):
         try:
             import importlib
@@ -115,10 +178,10 @@ def _invalidate_route_cache():
             pass
 
 
-# Endpoints that actually change dashboard data — a successful POST to any of
-# these invalidates the response cache so the next load reflects the change.
+# A successful POST to any of these (edit/upload) invalidates the cache so the
+# next load reflects the change.
 _MUTATION_PREFIXES = (
-    "/api/maintenance/pm-schedule/",   # update / plan / delete
+    "/api/maintenance/pm-schedule/",
     "/api/downtime/import",
     "/api/maintenance/import",
 )
@@ -132,9 +195,6 @@ def _clear_cache_after_mutation(response):
     except Exception:
         pass
     return response
-
-
-import gzip as _gzip
 
 
 @app.after_request
@@ -342,10 +402,13 @@ def asset_list_api():
 def downtime_data():
     period = request.args.get("period")
     month = request.args.get("month")
+    start = request.args.get("start")
+    end = request.args.get("end")
+    stage = request.args.get("stage")
     work_orders_only = str(request.args.get("work_orders_only", "")).strip().lower() in {"1", "true", "yes", "on"}
     return _cached_json(
-        ("downtime", request.full_path),
-        lambda: build_downtime_payload(period, month, request.args.get("start"), request.args.get("end"), work_orders_only=work_orders_only, stage=request.args.get("stage")),
+        ("downtime", period, month, start, end, work_orders_only, stage),
+        lambda: build_downtime_payload(period, month, start, end, work_orders_only=work_orders_only, stage=stage),
     )
 
 
@@ -395,13 +458,12 @@ def page_sync(page_key):
 @app.route("/api/maintenance/pm-schedule")
 def maintenance_pm_schedule():
     """Unified Preventive Maintenance schedule tracking (Stage 1 + Stage 2)."""
+    stage = request.args.get("stage", "all")
+    year = request.args.get("year", type=int)
+    month = request.args.get("month")
     return _cached_json(
-        ("pm-schedule", request.full_path),
-        lambda: build_pm_schedule_payload(
-            stage=request.args.get("stage", "all"),
-            year=request.args.get("year", type=int),
-            month=request.args.get("month"),
-        ),
+        ("pm-schedule", stage, year, month),
+        lambda: build_pm_schedule_payload(stage=stage, year=year, month=month),
     )
 
 
@@ -470,7 +532,7 @@ def maintenance_pm_schedule_delete():
 
 @app.route("/api/maintenance/spare_parts")
 def maintenance_spare_parts():
-    return jsonify(build_spare_parts_payload())
+    return _cached_json(("spare-parts",), build_spare_parts_payload)
 
 
 @app.route("/api/maintenance/project_transactions")
@@ -568,19 +630,13 @@ def _free_port(port):
         pass
 
 
-def _prewarm_caches():
-    """Warm the route response cache in the background so the first real request
-    isn't a cold ~40s build. Hits the routes via the test client so the cached
-    response bytes are populated. Best-effort; never raises, never blocks startup."""
-    def _warm():
-        try:
-            with app.test_client() as client:
-                client.get("/api/downtime")
-                client.get("/api/maintenance/pm-schedule")
-        except Exception:
-            pass
-
-    _threading.Thread(target=_warm, name="cache-prewarm", daemon=True).start()
+def _start_cache_warming():
+    """Register the default heavy payloads and start the background refresher so
+    user requests always hit a warm disk cache instead of a cold build."""
+    _register_refresh(("downtime", None, None, None, None, False, None), build_downtime_payload)
+    _register_refresh(("pm-schedule", "all", None, None), lambda: build_pm_schedule_payload(stage="all", year=None, month=None))
+    _register_refresh(("spare-parts",), build_spare_parts_payload)
+    _background_refresher()
 
 
 if __name__ == "__main__":
@@ -592,7 +648,7 @@ if __name__ == "__main__":
     # Warm caches only in the process that actually serves (the reloader child,
     # or the single process when debug is off).
     if os.environ.get("WERKZEUG_RUN_MAIN") or not debug:
-        _prewarm_caches()
+        _start_cache_warming()
 
     # Prefer the production WSGI server (waitress) when available and not in
     # debug — the Flask dev server is single-process and very slow at serving the

@@ -7,14 +7,19 @@
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link
+        rel="preload"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap"
+        as="style"
+        onload="this.onload=null;this.rel='stylesheet'"
+    >
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet"></noscript>
 
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/Maintenance/style.css?v=20260604-mr-search-1">
-    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260607-mira-ov-5">
-    <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-8">
+    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260608-mira-ov-9">
+    <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body data-sync-page="maintenance">
     <div id="navbar"></div>
@@ -504,6 +509,132 @@
                         </article>
                     </section>
                 </div>
+            </section>
+
+            <section class="card-shell asset-intel-card" id="asset-parts-intelligence-card">
+                <div class="section-head asset-intel-head">
+                    <div>
+                        <h2>Asset Parts Intelligence</h2>
+                        <p class="section-subtitle">View related work orders, spare parts, and suppliers for selected assets or machine groups.</p>
+                    </div>
+                    <span class="asset-intel-readonly">Read-only analysis</span>
+                </div>
+
+                <div class="asset-intel-controls">
+                    <label class="control-field asset-intel-search-field">
+                        <span>Search asset / machine group / part / supplier</span>
+                        <input type="search" id="asset-intel-search" placeholder="e.g. Dicing Machine, Robot Coupe CL50, Combi Oven, Refrigeration…" autocomplete="off">
+                    </label>
+                    <label class="control-field">
+                        <span>Asset family</span>
+                        <select id="asset-intel-family"><option value="">All / detect from search</option></select>
+                    </label>
+                    <label class="control-field">
+                        <span>Machine group</span>
+                        <select id="asset-intel-machine-group"><option value="">All / detect from search</option></select>
+                    </label>
+                    <label class="control-field">
+                        <span>Date from</span>
+                        <input type="date" id="asset-intel-date-from">
+                    </label>
+                    <label class="control-field">
+                        <span>Date to</span>
+                        <input type="date" id="asset-intel-date-to">
+                    </label>
+                    <label class="asset-intel-toggle">
+                        <input type="checkbox" id="asset-intel-include-related" checked>
+                        <span>Include related description matches</span>
+                    </label>
+                    <label class="asset-intel-toggle">
+                        <input type="checkbox" id="asset-intel-include-low">
+                        <span>Include possible low-confidence matches</span>
+                    </label>
+                    <button type="button" class="toggle-btn asset-intel-analyse-btn" id="asset-intel-analyse">Analyse Asset</button>
+                </div>
+                <p class="asset-intel-status" id="asset-intel-status">Search for an asset, family, machine group, part, or supplier to begin.</p>
+
+                <article class="asset-intel-selected">
+                    <div>
+                        <span class="asset-intel-eyebrow">Selected scope</span>
+                        <h3 id="asset-intel-selected-name">No asset selected</h3>
+                        <p id="asset-intel-selected-meta">Results will include direct matches and clearly flagged related matches.</p>
+                    </div>
+                    <div class="asset-intel-aliases" id="asset-intel-aliases"></div>
+                </article>
+
+                <section class="summary-grid spare-summary-grid asset-intel-summary-grid">
+                    <article class="summary-card summary-card-kpi summary-card-blue asset-intel-kpi">
+                        <span class="summary-label">Related WO/MR</span>
+                        <strong id="asset-intel-kpi-wo-total">--</strong>
+                        <small id="asset-intel-kpi-wo-detail">Direct -- | Description -- | Open -- | Finished --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-green asset-intel-kpi">
+                        <span class="summary-label">Spare Parts Used</span>
+                        <strong id="asset-intel-kpi-store-total">--</strong>
+                        <small id="asset-intel-kpi-store-detail">Qty -- | Value -- | Unique -- | Top --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-amber asset-intel-kpi">
+                        <span class="summary-label">Purchased Parts</span>
+                        <strong id="asset-intel-kpi-po-total">--</strong>
+                        <small id="asset-intel-kpi-po-detail">Value -- | Unique -- | Latest --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-blue asset-intel-kpi">
+                        <span class="summary-label">Suppliers</span>
+                        <strong id="asset-intel-kpi-suppliers-total">--</strong>
+                        <small id="asset-intel-kpi-suppliers-detail">Main -- | Latest --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-purple asset-intel-kpi">
+                        <span class="summary-label">Data Quality</span>
+                        <strong id="asset-intel-kpi-quality-confidence">--</strong>
+                        <small id="asset-intel-kpi-quality-detail">Mismatches -- | Missing ID -- | Description -- | PO-only --</small>
+                    </article>
+                </section>
+
+                <div class="asset-intel-data-gaps" id="asset-intel-data-gaps">
+                    <span>Data confidence notes will appear after analysis.</span>
+                </div>
+
+                <article class="spare-panel-table asset-intel-supplier-card">
+                    <div class="spare-panel-head"><h3>Supplier Summary</h3><p>Suppliers linked to the selected asset, family, machine group, part, or search term.</p></div>
+                    <div class="table-wrap spare-table-wrap">
+                        <table>
+                            <thead><tr><th>Supplier name</th><th>Parts supplied</th><th>Total PO value</th><th>PO lines</th><th>Latest purchase date</th></tr></thead>
+                            <tbody id="asset-intel-supplier-body"><tr><td colspan="5" class="empty-row">Analyse an asset to view supplier relationships.</td></tr></tbody>
+                        </table>
+                    </div>
+                </article>
+
+                <section class="asset-intel-panel-grid">
+                    <article class="spare-panel-table asset-intel-panel">
+                        <div class="spare-panel-head"><h3>Related WO/MR</h3><p>Direct and description-based maintenance records with confidence and coding flags.</p></div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>Date</th><th>MR number</th><th>WO number</th><th>Recorded asset ID</th><th>Recorded asset name / area</th><th>Description</th><th>Status</th><th>Match source</th><th>Match confidence</th><th>Data quality flag</th></tr></thead>
+                                <tbody id="asset-intel-wo-body"><tr><td colspan="10" class="empty-row">Analyse an asset to view related WO/MR records.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </article>
+
+                    <article class="spare-panel-table asset-intel-panel">
+                        <div class="spare-panel-head"><h3>Spare Parts Used</h3><p>Actual store issue / project transaction records linked by asset, WO/MR, or description.</p></div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>Date</th><th>Item code</th><th>Part name</th><th>Quantity</th><th>Value</th><th>Recorded asset / project</th><th>Related WO/MR</th><th>Match source</th><th>Match confidence</th><th>Data quality flag</th></tr></thead>
+                                <tbody id="asset-intel-store-body"><tr><td colspan="10" class="empty-row">Analyse an asset to view store consumption.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </article>
+
+                    <article class="spare-panel-table asset-intel-panel">
+                        <div class="spare-panel-head"><h3>Suppliers / Purchase History</h3><p>Gen PO spare-part purchases and services found through asset references, aliases, descriptions, and suppliers.</p></div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>PO date</th><th>PO number</th><th>Supplier</th><th>Part / item description</th><th>Quantity</th><th>Value</th><th>Related asset / alias matched</th><th>Match source</th><th>Match confidence</th></tr></thead>
+                                <tbody id="asset-intel-po-body"><tr><td colspan="9" class="empty-row">Analyse an asset to view purchase history.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </article>
+                </section>
             </section>
 
             <section class="spare-view-selector" aria-label="Spare parts detail views">
@@ -996,17 +1127,74 @@
                     </div>
 
                     <div class="pt-insight-panel" id="pt-insight-panel-consumption" role="tabpanel" aria-labelledby="pt-insight-tab-consumption" hidden>
-                        <div class="section-head"><div><h2>Consumption by Asset</h2><p class="section-subtitle">Aggregated spare part spend per asset.</p></div></div>
-                        <div class="tbl-filter-bar">
+                        <div class="section-head"><div><h2>Consumption by Asset</h2><p class="section-subtitle">Smart spare-part consumption by asset, asset family, machine group, general area, or part relationship.</p></div></div>
+                        <div class="tbl-filter-bar pt-consumption-toolbar">
+                            <select id="pt-consumption-view" class="tbl-filter-select" aria-label="Consumption view mode">
+                                <option value="asset">By Asset</option>
+                                <option value="asset_family">By Asset Family</option>
+                                <option value="machine_group">By Machine Group</option>
+                                <option value="general_area">By General Area</option>
+                                <option value="part">Part Relationship</option>
+                            </select>
+                            <select id="pt-consumption-focus" class="tbl-filter-select" aria-label="Consumption focus">
+                                <option value="">All Rows</option>
+                            </select>
                             <input type="search" id="pt-asset-search" class="tbl-search-input" placeholder="Search equipment or asset code…">
                             <select id="pt-asset-crit" class="tbl-filter-select"><option value="">All Criticality</option></select>
+                            <button type="button" class="pt-consumption-clear-btn hidden" id="pt-consumption-clear-selection">Clear selection</button>
+                        </div>
+                        <section class="summary-grid spare-summary-grid pt-consumption-summary-grid">
+                            <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Total Value</span><strong id="pt-cons-kpi-total-value">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Total Qty</span><strong id="pt-cons-kpi-total-qty">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">Lines</span><strong id="pt-cons-kpi-lines">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label" id="pt-cons-kpi-four-label">Unique Parts</span><strong id="pt-cons-kpi-four-value">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label" id="pt-cons-kpi-five-label">Top Part</span><strong id="pt-cons-kpi-five-value">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label" id="pt-cons-kpi-six-label">Match Notes</span><strong id="pt-cons-kpi-six-value">--</strong></article>
+                        </section>
+                        <p id="pt-consumption-selection-note" class="spare-management-summary">Awaiting data.</p>
+                        <section class="spare-panel-chart-grid pt-consumption-chart-grid">
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-top-parts-title">Top Parts</h3><p id="pt-cons-chart-top-parts-subtitle">Highest-value parts in the current selection.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-top-parts"></canvas></div>
+                            </article>
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-trend-title">Monthly Trend</h3><p id="pt-cons-chart-trend-subtitle">Monthly spare-part usage for the current selection.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-trend"></canvas></div>
+                            </article>
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-entities-title">Top Contributors</h3><p id="pt-cons-chart-entities-subtitle">Top related contributors within the current selection.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-entities"></canvas></div>
+                            </article>
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-split-title">Value Split</h3><p id="pt-cons-chart-split-subtitle">Value split by family or machine group.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-split"></canvas></div>
+                            </article>
+                        </section>
+                        <div class="spare-panel-head">
+                            <h3 id="pt-consumption-table-title">Grouped Consumption</h3>
+                            <p id="pt-consumption-table-subtitle">Click a row to drill into detailed usage lines.</p>
                         </div>
                         <div class="table-wrap spare-table-wrap">
                             <table>
-                                <thead><tr><th>Equipment</th><th>Criticality</th><th>Total (THB)</th><th>Total Qty</th><th>Lines</th><th>Unique Parts</th><th>Top Part</th></tr></thead>
-                                <tbody id="pt-by-asset-body"><tr><td colspan="7" class="empty-row">Awaiting data.</td></tr></tbody>
+                                <thead id="pt-consumption-head"><tr><th>Equipment</th><th>Asset ID</th><th>Asset Family</th><th>Machine Group</th><th>Criticality</th><th>Total Value</th><th>Total Qty</th><th>Lines</th><th>Unique Parts</th><th>Top Part</th><th>Match Quality</th></tr></thead>
+                                <tbody id="pt-consumption-body"><tr><td colspan="11" class="empty-row">Awaiting data.</td></tr></tbody>
                             </table>
                         </div>
+                        <article class="spare-panel-table pt-consumption-drilldown-card">
+                            <div class="spare-panel-head spare-panel-head-search">
+                                <div>
+                                    <h3 id="pt-consumption-drilldown-title">Usage Drilldown</h3>
+                                    <p id="pt-consumption-drilldown-subtitle">Select a grouped row above to inspect individual consumption lines.</p>
+                                </div>
+                                <button type="button" class="pt-consumption-clear-btn hidden" id="pt-consumption-clear-drilldown">Clear drilldown</button>
+                            </div>
+                            <div class="table-wrap spare-table-wrap">
+                                <table>
+                                    <thead><tr><th>Date</th><th>Asset ID</th><th>Equipment</th><th>Asset Family</th><th>Machine Group</th><th>Part Code</th><th>Part Name</th><th>Qty</th><th>Value</th><th>MR / WO Ref</th><th>Match Source</th><th>Data Quality</th></tr></thead>
+                                    <tbody id="pt-consumption-drilldown-body"><tr><td colspan="12" class="empty-row">Select a grouped row above to inspect detailed usage lines.</td></tr></tbody>
+                                </table>
+                            </div>
+                        </article>
                     </div>
 
                     <div class="pt-insight-panel" id="pt-insight-panel-data_quality" role="tabpanel" aria-labelledby="pt-insight-tab-data_quality" hidden>
@@ -1473,10 +1661,11 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/Maintenance/script.js?v=20260607-mira-overview-5" defer></script>
+    <script src="/shared/mira/mira-overview.js?v=20260608-mira-fast-5" defer></script>
+    <script src="/Maintenance/script.js?v=20260608-mira-fast-1" defer></script>
     <script src="/Maintenance/pm-schedule.js?v=20260605-pm-header-filters-11" defer></script>
-    <script src="/shared/mira/mira-overview.js?v=20260607-mira-ov-5" defer></script>
-    <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-8" defer></script>
+    <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->
     <div id="pau-modal" class="pau-modal-overlay" hidden>

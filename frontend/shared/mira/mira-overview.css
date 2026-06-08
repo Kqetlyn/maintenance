@@ -1,87 +1,582 @@
-/* MIRA Daily Maintenance Overview — SATS dashboard style (white/grey rounded
-   cards, orange/teal MIRA accents). Maintenance KPIs only. */
-.mira-ov-shell { display: flex; flex-direction: column; gap: 18px; }
-
-/* Header */
-.mira-ov-header {
-    display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex-wrap: wrap;
-    background: linear-gradient(135deg, #fff7f1 0%, #f1fbfa 100%);
-    border: 1px solid #ecdfd4; border-radius: 18px; padding: 18px 20px;
+/* MIRA Overview - Figma AI Summary Dashboard inspired layout. */
+.mira-overview-root {
+    --mira-bg: #f6f8fb;
+    --mira-card: #ffffff;
+    --mira-text: #111827;
+    --mira-muted: #687386;
+    --mira-border: rgba(15, 23, 42, 0.10);
+    --mira-soft-border: #e5eaf1;
+    --mira-blue: #2563eb;
+    --mira-purple: #7c3aed;
+    --mira-orange: #ea580c;
+    --mira-teal: #0f9b8e;
+    --mira-green: #16a34a;
+    --mira-red: #dc2626;
+    --mira-yellow: #d97706;
 }
-.mira-ov-brand { display: flex; align-items: center; gap: 14px; }
-.mira-ov-logo { width: 56px; height: 56px; border-radius: 16px; background: #fff; display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 8px rgba(203,98,61,0.12); flex: 0 0 auto; }
-.mira-ov-eyebrow { font-size: 0.7rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; color: #cb623d; }
-.mira-ov-title { margin: 3px 0 0; font-size: 1.5rem; font-weight: 800; color: #18273a; line-height: 1.15; }
-.mira-ov-subtitle { margin: 4px 0 0; font-size: 0.86rem; color: #5d6b7d; }
-.mira-ov-header-right { display: flex; flex-direction: column; align-items: flex-end; gap: 10px; }
-.mira-ov-meta { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
-.mira-ov-meta-item { font-size: 0.72rem; font-weight: 600; color: #516072; background: #fff; border: 1px solid #e6ddd4; border-radius: 999px; padding: 4px 10px; }
-.mira-ov-chip { font-size: 0.7rem; font-weight: 800; border-radius: 999px; padding: 4px 10px; }
-.mira-ov-chip-good { background: #e7f8f4; color: #0f766e; border: 1px solid #bfece6; }
-.mira-ov-chip-muted { background: #eef1f5; color: #5b6b7d; border: 1px solid #dde4ec; }
-.mira-ov-header-actions { display: flex; gap: 8px; }
-.mira-ov-btn { border-radius: 11px; padding: 9px 16px; font-weight: 800; font-size: 0.82rem; cursor: pointer; border: 1px solid transparent; }
-.mira-ov-btn-primary { background: linear-gradient(135deg, #cb623d, #e08a57); color: #fff; box-shadow: 0 6px 16px rgba(203,98,61,0.26); }
-.mira-ov-btn-primary:hover { filter: brightness(1.04); }
-.mira-ov-btn-ghost { background: #fff; color: #334255; border-color: #dbe4ef; }
-.mira-ov-btn-ghost:hover { background: #f4f7fb; }
 
-/* Controls */
-.mira-ov-controls { display: flex; gap: 12px; flex-wrap: wrap; }
-.mira-ov-field { display: flex; flex-direction: column; gap: 3px; font-size: 0.66rem; font-weight: 800; color: #6b7a8c; text-transform: uppercase; letter-spacing: 0.04em; }
-.mira-ov-select { padding: 8px 11px; border: 1px solid #cbd5e1; border-radius: 10px; font: inherit; font-weight: 600; background: #fff; min-width: 140px; }
-.mira-ov-select:disabled { background: #f3f5f8; color: #9aa7b5; }
+.mira-ov-shell {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    min-height: calc(100vh - 120px);
+    padding: 20px;
+    border-radius: 24px;
+    background:
+        radial-gradient(circle at 0 0, rgba(37, 99, 235, 0.10), transparent 34%),
+        radial-gradient(circle at 100% 0, rgba(124, 58, 237, 0.10), transparent 32%),
+        linear-gradient(135deg, #f8fafc 0%, #eef2f7 100%);
+}
 
-/* Body */
-.mira-ov-body { display: flex; flex-direction: column; gap: 16px; }
+.mira-ov-header {
+    display: flex;
+    justify-content: flex-end;
+}
 
-/* Overall status card */
-.mira-ov-status-card { background: #fff; border: 1px solid #e7ecf2; border-radius: 18px; padding: 18px 20px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }
-.mira-ov-status-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.mira-ov-status-label { font-size: 0.95rem; font-weight: 800; color: #18273a; }
-.mira-ov-status-badge { font-size: 0.82rem; font-weight: 800; padding: 5px 14px; border-radius: 999px; background: #eef1f5; color: #516072; }
-.mira-ov-status-good { background: #e7f8f4; color: #0f766e; }
-.mira-ov-status-watch { background: #fff4e6; color: #b45309; }
-.mira-ov-status-critical { background: #fdeaea; color: #c0392b; }
-.mira-ov-status-period { font-size: 0.74rem; color: #8595a6; margin-top: 2px; }
-.mira-ov-exec { margin-top: 10px; }
-.mira-ov-exec-text { margin: 0; font-size: 0.94rem; line-height: 1.55; color: #2c3a4d; font-weight: 500; }
-.mira-ov-status-split { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 14px; }
-.mira-ov-mini-label { font-size: 0.66rem; font-weight: 800; text-transform: uppercase; letter-spacing: 0.05em; color: #8a98a8; margin-bottom: 6px; }
-.mira-ov-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
-.mira-ov-list li { font-size: 0.85rem; color: #334255; line-height: 1.4; }
+.mira-ov-header-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+.mira-ov-chip,
+.mira-ov-mini-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    border-radius: 999px;
+    border: 1px solid var(--mira-border);
+    background: rgba(255, 255, 255, 0.78);
+    color: #475569;
+    font-size: 0.74rem;
+    font-weight: 750;
+    padding: 6px 10px;
+    backdrop-filter: blur(10px);
+}
+
+.mira-ov-chip-good {
+    border-color: rgba(22, 163, 74, 0.20);
+    background: rgba(22, 163, 74, 0.10);
+    color: #15803d;
+}
+
+.mira-ov-chip-muted {
+    border-color: rgba(100, 116, 139, 0.18);
+    background: rgba(241, 245, 249, 0.92);
+    color: #64748b;
+}
+
+.mira-ov-btn {
+    border: 1px solid var(--mira-border);
+    border-radius: 11px;
+    padding: 9px 14px;
+    font-size: 0.84rem;
+    font-weight: 750;
+    cursor: pointer;
+    transition: transform 160ms ease, box-shadow 160ms ease, background 160ms ease;
+}
+
+.mira-ov-btn:hover {
+    transform: translateY(-1px);
+}
+
+.mira-ov-btn-primary {
+    color: #ffffff;
+    border-color: transparent;
+    background: linear-gradient(135deg, var(--mira-blue), var(--mira-purple));
+    box-shadow: 0 12px 24px rgba(37, 99, 235, 0.22);
+}
+
+.mira-ov-btn-ghost {
+    color: #334155;
+    background: rgba(255, 255, 255, 0.88);
+}
+
+.mira-ov-controls {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 14px;
+    border: 1px solid var(--mira-border);
+    border-radius: 18px;
+    background: rgba(255, 255, 255, 0.74);
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+}
+
+.mira-ov-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    color: #94a3b8;
+    font-size: 0.68rem;
+    font-weight: 850;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.mira-ov-select {
+    min-width: 145px;
+    padding: 9px 12px;
+    border: 1px solid #d7dee8;
+    border-radius: 12px;
+    background: #ffffff;
+    color: #0f172a;
+    font: inherit;
+    font-size: 0.88rem;
+    font-weight: 700;
+}
+
+.mira-ov-body {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+}
+
+.mira-ov-status-card,
+.mira-ov-tabs-shell,
+.mira-ov-detail-card,
+.mira-ov-rec-card,
+.mira-ov-data-card {
+    border: 1px solid var(--mira-border);
+    border-radius: 20px;
+    background: var(--mira-card);
+    box-shadow: 0 18px 48px rgba(15, 23, 42, 0.07);
+}
+
+.mira-ov-status-card {
+    padding: 20px;
+    border-width: 2px;
+}
+
+.mira-ov-status-top,
+.mira-ov-detail-head,
+.mira-ov-kpi-head,
+.mira-ov-prediction-top,
+.mira-ov-category-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.mira-ov-status-label {
+    color: var(--mira-text);
+    font-size: 1.05rem;
+    font-weight: 800;
+}
+
+.mira-ov-status-badge {
+    border-radius: 999px;
+    padding: 7px 13px;
+    border: 1px solid var(--mira-border);
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 0.78rem;
+    font-weight: 850;
+    text-transform: uppercase;
+}
+
+.mira-ov-status-good { background: rgba(22, 163, 74, 0.10); color: #15803d; border-color: rgba(22, 163, 74, 0.22); }
+.mira-ov-status-watch { background: rgba(217, 119, 6, 0.10); color: #b45309; border-color: rgba(217, 119, 6, 0.22); }
+.mira-ov-status-critical { background: rgba(220, 38, 38, 0.10); color: #b91c1c; border-color: rgba(220, 38, 38, 0.22); }
+
+.mira-ov-status-period,
+.mira-ov-footnote,
+.mira-ov-chip-note {
+    color: #8794a6;
+    font-size: 0.74rem;
+}
+
+.mira-ov-exec {
+    margin-top: 14px;
+    padding: 15px 16px;
+    border: 1px solid #dbeafe;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #eff6ff, #f5f3ff);
+}
+
+.mira-ov-exec-text {
+    margin: 0;
+    color: #253044;
+    font-size: 0.97rem;
+    line-height: 1.55;
+    font-weight: 550;
+}
+
+.mira-ov-status-split {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    margin-top: 15px;
+}
+
+.mira-ov-highlights,
+.mira-ov-actions-today,
+.mira-ov-rec-block,
+.mira-ov-soft-card {
+    border: 1px solid #e8eef6;
+    border-radius: 14px;
+    background: #f8fafc;
+    padding: 13px 14px;
+}
+
+.mira-ov-mini-label {
+    margin-bottom: 8px;
+    color: #77849a;
+    font-size: 0.68rem;
+    font-weight: 850;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+}
+
+.mira-ov-list {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    margin: 0;
+    padding-left: 18px;
+}
+
+.mira-ov-list li,
+.mira-ov-muted-copy,
+.mira-ov-section-summary {
+    color: #334155;
+    font-size: 0.86rem;
+    line-height: 1.45;
+}
+
+.mira-ov-muted {
+    color: #94a3b8;
+    font-style: italic;
+}
+
 .mira-ov-warn { color: #b45309; }
-.mira-ov-muted { color: #98a4b2; font-style: italic; }
 
-/* KPI cards */
-.mira-ov-kpi-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
-.mira-ov-kpi-card { background: #fff; border: 1px solid #e7ecf2; border-radius: 16px; padding: 16px 16px 14px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); border-top: 3px solid #cbd5e1; }
-.mira-ov-accent-teal { border-top-color: #0f9b8e; }
-.mira-ov-accent-orange { border-top-color: #cb623d; }
-.mira-ov-accent-blue { border-top-color: #2563eb; }
-.mira-ov-kpi-title { font-size: 0.92rem; font-weight: 800; color: #18273a; margin-bottom: 10px; }
-.mira-ov-chip-grid { display: flex; flex-direction: column; gap: 7px; }
-.mira-ov-kpi-chip { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 3px 10px; padding: 8px 10px; border-radius: 9px; background: #f8fafc; border: 1px solid #eef2f7; border-left: 3px solid #cbd5e1; }
-.mira-ov-chip-label { font-size: 0.74rem; font-weight: 600; color: #475569; }
-.mira-ov-chip-value { font-size: 0.96rem; font-weight: 800; color: #18273a; text-align: right; }
-.mira-ov-chip-note { grid-column: 1 / -1; font-size: 0.67rem; color: #94a3b8; }
-.mira-tone-good { border-left-color: #16a34a; }
-.mira-tone-watch { border-left-color: #d97706; }
-.mira-tone-critical { border-left-color: #dc2626; }
+.mira-ov-tabs-shell {
+    padding: 14px;
+}
+
+.mira-ov-tabs {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    gap: 8px;
+    padding: 6px;
+    border-radius: 16px;
+    background: #eef2f7;
+}
+
+.mira-ov-tab {
+    min-height: 40px;
+    border: 0;
+    border-radius: 12px;
+    background: transparent;
+    color: #64748b;
+    font-size: 0.82rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.mira-ov-tab.active {
+    background: #ffffff;
+    color: #0f172a;
+    box-shadow: 0 8px 22px rgba(15, 23, 42, 0.09);
+}
+
+.mira-ov-tab-content {
+    padding-top: 16px;
+}
+
+.mira-ov-panel {
+    display: none;
+}
+
+.mira-ov-panel.active {
+    display: block;
+}
+
+.mira-ov-kpi-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.mira-ov-kpi-card {
+    position: relative;
+    overflow: hidden;
+    min-height: 260px;
+    padding: 16px;
+    border: 2px solid var(--mira-soft-border);
+    border-radius: 18px;
+    background: #ffffff;
+    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.05);
+    transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.mira-ov-kpi-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 18px 42px rgba(15, 23, 42, 0.10);
+}
+
+.mira-ov-accent-teal { border-top-color: var(--mira-teal); }
+.mira-ov-accent-orange { border-top-color: var(--mira-orange); }
+.mira-ov-accent-blue { border-top-color: var(--mira-blue); }
+.mira-ov-accent-purple { border-top-color: var(--mira-purple); }
+
+.mira-ov-kpi-title,
+.mira-ov-detail-title {
+    margin: 0;
+    color: var(--mira-text);
+    font-size: 1rem;
+    font-weight: 850;
+}
+
+.mira-ov-detail-title {
+    font-size: 1.15rem;
+}
+
+.mira-ov-detail-subtitle {
+    margin: 3px 0 0;
+    color: var(--mira-muted);
+    font-size: 0.86rem;
+}
+
+.mira-ov-card-icon,
+.mira-ov-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    color: #ffffff;
+    background: linear-gradient(135deg, var(--mira-blue), var(--mira-purple));
+    font-size: 0.76rem;
+    font-weight: 900;
+    letter-spacing: 0.04em;
+    box-shadow: 0 10px 20px rgba(37, 99, 235, 0.18);
+}
+
+.mira-ov-icon {
+    width: 46px;
+    height: 46px;
+}
+
+.mira-ov-icon-orange { background: linear-gradient(135deg, var(--mira-orange), var(--mira-red)); }
+.mira-ov-icon-purple { background: linear-gradient(135deg, var(--mira-purple), var(--mira-blue)); }
+
+.mira-ov-chip-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-top: 12px;
+}
+
+.mira-ov-kpi-chip {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 3px 10px;
+    align-items: start;
+    padding: 9px 10px;
+    border: 1px solid #edf1f7;
+    border-left: 3px solid #cbd5e1;
+    border-radius: 11px;
+    background: #f8fafc;
+}
+
+.mira-ov-chip-label {
+    color: #65748a;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.mira-ov-chip-value {
+    color: #111827;
+    font-size: 0.96rem;
+    font-weight: 900;
+    text-align: right;
+}
+
+.mira-ov-chip-note {
+    grid-column: 1 / -1;
+}
+
+.mira-tone-good { border-left-color: var(--mira-green); }
+.mira-tone-watch { border-left-color: var(--mira-yellow); }
+.mira-tone-critical { border-left-color: var(--mira-red); }
 .mira-tone-neutral { border-left-color: #cbd5e1; }
 
-/* Recommendations */
-.mira-ov-rec-card, .mira-ov-data-card { background: #fff; border: 1px solid #e7ecf2; border-radius: 16px; padding: 16px 18px; box-shadow: 0 1px 2px rgba(15,23,42,0.04); }
-.mira-ov-rec-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
-.mira-ov-rec-block { background: #f8fafc; border: 1px solid #eef2f7; border-radius: 12px; padding: 12px 14px; }
+.mira-ov-section-summary {
+    margin: 12px 0 0;
+}
 
-/* View data used */
-.mira-ov-details summary { cursor: pointer; list-style: revert; }
-.mira-ov-data-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 10px; }
-.mira-ov-data-block { background: #f8fafc; border: 1px solid #eef2f7; border-radius: 10px; padding: 10px 12px; }
+.mira-ov-footnote {
+    margin: 8px 0 0;
+}
 
-@media (max-width: 960px) {
-    .mira-ov-kpi-grid, .mira-ov-data-grid { grid-template-columns: 1fr; }
-    .mira-ov-rec-grid, .mira-ov-status-split { grid-template-columns: 1fr; }
-    .mira-ov-header-right { align-items: flex-start; }
+.mira-ov-rec-card {
+    margin-top: 14px;
+    padding: 16px;
+    border-color: #bfdbfe;
+    background: linear-gradient(135deg, #eff6ff, #f5f3ff);
+}
+
+.mira-ov-rec-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.mira-ov-detail-card,
+.mira-ov-ai-hero {
+    padding: 18px;
+}
+
+.mira-ov-detail-head,
+.mira-ov-ai-hero {
+    justify-content: flex-start;
+}
+
+.mira-ov-detail-body {
+    margin-top: 16px;
+}
+
+.mira-ov-ai-hero {
+    display: flex;
+    align-items: center;
+    gap: 13px;
+    margin-bottom: 14px;
+    border: 2px solid #ddd6fe;
+    border-radius: 18px;
+}
+
+.mira-ov-ai-hero-purple {
+    background: linear-gradient(135deg, #f5f3ff, #eff6ff);
+}
+
+.mira-ov-ai-hero-orange {
+    border-color: #fed7aa;
+    background: linear-gradient(135deg, #fff7ed, #fef2f2);
+}
+
+.mira-ov-ai-grid,
+.mira-ov-issue-layout,
+.mira-ov-prediction-list,
+.mira-ov-issue-list,
+.mira-ov-category-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.mira-ov-forecast-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+}
+
+.mira-ov-forecast-card,
+.mira-ov-prediction-card,
+.mira-ov-issue-card {
+    border: 2px solid #e5eaf1;
+    border-radius: 15px;
+    background: #ffffff;
+    padding: 14px;
+    transition: box-shadow 160ms ease, border-color 160ms ease;
+}
+
+.mira-ov-forecast-card:hover,
+.mira-ov-prediction-card:hover,
+.mira-ov-issue-card:hover {
+    border-color: #cbd5e1;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.mira-ov-forecast-value {
+    display: block;
+    margin-top: 6px;
+    color: #111827;
+    font-size: 1.65rem;
+    font-weight: 900;
+}
+
+.impact-high { border-color: rgba(220, 38, 38, 0.26); }
+.impact-medium { border-color: rgba(217, 119, 6, 0.24); }
+.impact-low { border-color: rgba(22, 163, 74, 0.22); }
+
+.mira-ov-category-row {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+.mira-ov-category-top span {
+    color: var(--mira-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.mira-ov-progress {
+    height: 10px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: #e2e8f0;
+}
+
+.mira-ov-progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: linear-gradient(90deg, var(--mira-orange), var(--mira-red));
+}
+
+.mira-ov-area-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin: 8px 0;
+}
+
+.mira-ov-ai-notes {
+    margin-top: 10px;
+}
+
+.mira-ov-data-card {
+    padding: 16px;
+}
+
+.mira-ov-details summary {
+    cursor: pointer;
+}
+
+.mira-ov-data-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.mira-ov-data-block {
+    padding: 12px;
+    border: 1px solid #e8eef6;
+    border-radius: 13px;
+    background: #f8fafc;
+}
+
+@media (max-width: 1180px) {
+    .mira-ov-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .mira-ov-tabs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+    .mira-ov-shell { padding: 14px; border-radius: 18px; }
+    .mira-ov-header-actions { justify-content: flex-start; }
+    .mira-ov-controls,
+    .mira-ov-status-split,
+    .mira-ov-rec-grid,
+    .mira-ov-kpi-grid,
+    .mira-ov-data-grid,
+    .mira-ov-forecast-grid { grid-template-columns: 1fr; }
+    .mira-ov-tabs { grid-template-columns: 1fr 1fr; }
+    .mira-ov-select { min-width: 100%; }
 }
