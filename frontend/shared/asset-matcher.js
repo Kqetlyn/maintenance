@@ -95,7 +95,16 @@
         return true;
     }
 
-    // ── record context (normalise once per record) ───────────────────────────
+    // ── record context (normalise once per record; cached without mutating) ──
+    var _ctxCache = (typeof WeakMap === "function") ? new WeakMap() : null;
+
+    function cachedContext(record) {
+        if (!_ctxCache) return recordContext(record);
+        var c = _ctxCache.get(record);
+        if (!c) { c = recordContext(record); _ctxCache.set(record, c); }
+        return c;
+    }
+
     function recordContext(record) {
         return {
             assetIdNorm: normalizeText(record.asset_id || record.assetId || ""),
@@ -158,8 +167,7 @@
         var includeLow = !!options.includeRelated;
         var out = [];
         for (var i = 0; i < records.length; i++) {
-            var ctx = records[i].__matchCtx || (records[i].__matchCtx = recordContext(records[i]));
-            var m = matchContext(ctx, profile);
+            var m = matchContext(cachedContext(records[i]), profile);
             if (!m) continue;
             if (m.confidence === CONF.LOW && !includeLow) continue;
             out.push(Object.assign({}, records[i], { smartMatch: m }));
@@ -208,7 +216,7 @@
         }
         var seen = {}, out = [];
         for (var r = 0; r < records.length; r++) {
-            var ctx = records[r].__matchCtx || (records[r].__matchCtx = recordContext(records[r]));
+            var ctx = cachedContext(records[r]);
             for (var t = 0; t < targets.length; t++) {
                 var m = matchContext(ctx, targets[t]);
                 if (m && (m.confidence !== CONF.LOW || options.includeRelated)) {

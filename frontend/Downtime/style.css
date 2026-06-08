@@ -2736,6 +2736,52 @@ tr:hover td {
     margin-bottom: 16px;
 }
 
+/* ── Smart asset matching (Match column + toggle + helper) ─────────────────── */
+.machine-detail-helper {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    margin: -10px 0 16px;
+    line-height: 1.4;
+}
+.smart-match-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.78rem;
+    font-weight: 600;
+    color: var(--text-muted);
+    cursor: pointer;
+    white-space: nowrap;
+}
+.smart-match-toggle input { cursor: pointer; }
+.match-cell { white-space: normal; line-height: 1.5; }
+.match-source {
+    display: inline-block;
+    font-size: 0.68rem;
+    font-weight: 700;
+    color: #334255;
+}
+.match-conf {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    font-size: 0.64rem;
+    font-weight: 800;
+    border: 1px solid transparent;
+}
+.match-conf-high { background: #e7f8f4; color: #0f766e; border-color: #bfece6; }
+.match-conf-medium { background: #fff4e6; color: #b45309; border-color: #f5d2aa; }
+.match-conf-low { background: #eef1f5; color: #5b6b7d; border-color: #dde4ec; }
+.match-flag {
+    display: block;
+    margin-top: 3px;
+    font-size: 0.64rem;
+    font-weight: 700;
+    color: #c0392b;
+}
+.match-na { color: #b6c0cc; }
+
 .asset-unit-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));

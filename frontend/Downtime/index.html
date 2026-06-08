@@ -10,7 +10,7 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260604-data-review-edit-1">
+    <link rel="stylesheet" href="style.css?v=20260608-smart-match-1">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1583,10 +1583,14 @@
                                     <button type="button" class="toggle-btn active" data-history-mode="selected">Selected Asset</button>
                                     <button type="button" class="toggle-btn" data-history-mode="all">All Assets</button>
                                 </div>
+                                <label class="inline-label smart-match-toggle" title="Also include low-confidence related matches (fuzzy / broad keyword) detected from descriptions and functional locations.">
+                                    <input type="checkbox" id="include-related-matches"> Include possible related matches
+                                </label>
                                 <button type="button" class="export-btn" id="machine-history-export-btn" title="Export WO/MR history and asset summary to Excel">Export XLSX</button>
                             </div>
                             <div class="machine-detail-title" id="machine-explorer-title">WO/MR History for Selected Asset</div>
                             <div class="machine-detail-meta" id="machine-explorer-meta">Select an asset from the list above.</div>
+                            <div class="machine-detail-helper" id="machine-explorer-helper">Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location.</div>
                             <div class="kpi-grid machine-explorer-kpi-grid">
                                 <div class="kpi-card highlight-blue"><div class="kpi-label">Total WO/MR</div><div class="kpi-value mini" id="machine-kpi-total">--</div></div>
                                 <div class="kpi-card highlight-amber"><div class="kpi-label">Open WO/MR</div><div class="kpi-value mini" id="machine-kpi-open">--</div></div>
@@ -1604,6 +1608,7 @@
                                         <tr>
                                             <th>Maintenance Request</th>
                                             <th>Work Order</th>
+                                            <th>Match</th>
                                             <th>Status</th>
                                             <th>Service Level</th>
                                             <th>Type</th>
@@ -1620,7 +1625,7 @@
                                         </tr>
                                     </thead>
                                     <tbody id="machine-history-body">
-                                        <tr><td colspan="15" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
+                                        <tr><td colspan="16" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
                                     </tbody>
                                 </table>
                             </div>
