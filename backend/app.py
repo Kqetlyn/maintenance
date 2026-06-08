@@ -76,14 +76,29 @@ _ROUTE_CACHE_TTL = 180.0
 _ROUTE_CACHE_LOCK = _threading.Lock()
 
 
+_BUILD_LOCKS = {}
+_BUILD_LOCKS_GUARD = _threading.Lock()
+
+
 def _cached_json(key, builder):
     now = _time.monotonic()
     hit = _ROUTE_CACHE.get(key)
     if hit is not None and (now - hit[0]) < _ROUTE_CACHE_TTL:
         return app.response_class(hit[1], mimetype="application/json")
-    body = _json.dumps(builder(), default=str)
-    with _ROUTE_CACHE_LOCK:
-        _ROUTE_CACHE[key] = (now, body)
+    # Single-flight: only ONE thread builds a given key; concurrent requests wait
+    # and reuse the result. Without this, the browser firing several requests at
+    # once each started its own ~50-97s build (GIL contention), so nothing ever
+    # cached — a death spiral that kept every load slow.
+    with _BUILD_LOCKS_GUARD:
+        lock = _BUILD_LOCKS.setdefault(key, _threading.Lock())
+    with lock:
+        now = _time.monotonic()
+        hit = _ROUTE_CACHE.get(key)
+        if hit is not None and (now - hit[0]) < _ROUTE_CACHE_TTL:
+            return app.response_class(hit[1], mimetype="application/json")
+        body = _json.dumps(builder(), default=str)
+        with _ROUTE_CACHE_LOCK:
+            _ROUTE_CACHE[key] = (now, body)
     return app.response_class(body, mimetype="application/json")
 
 
@@ -578,5 +593,18 @@ if __name__ == "__main__":
     # or the single process when debug is off).
     if os.environ.get("WERKZEUG_RUN_MAIN") or not debug:
         _prewarm_caches()
+
+    # Prefer the production WSGI server (waitress) when available and not in
+    # debug — the Flask dev server is single-process and very slow at serving the
+    # large dashboard payloads. `pip install waitress` upgrades automatically.
+    if not debug and os.environ.get("USE_WAITRESS", "1").lower() not in {"0", "false", "no"}:
+        try:
+            from waitress import serve
+            print(f"Maintenance server (waitress) on http://localhost:{port}")
+            serve(app, host="0.0.0.0", port=port, threads=8)
+            raise SystemExit(0)
+        except ImportError:
+            print("waitress not installed — using the Flask dev server. For production run: pip install waitress")
+
     print(f"Maintenance standalone server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
