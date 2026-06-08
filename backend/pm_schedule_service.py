@@ -72,6 +72,35 @@ MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
 STAGE_VALUES = ("Stage 1", "Stage 2")
 EQUIPMENT_GROUPS = {"Production Equipment"}
 _PM_METRICS_PAYLOAD_CACHE = {}
+# Full PM-page payload cache (the heavy ~13 MB payload). Keyed by request params +
+# a signature of every data file it reads, so it is rebuilt only when the data
+# actually changes (source workbooks, the D365 feed, the master, or the
+# override/planner JSON stores) — not on every request.
+_PM_PAGE_PAYLOAD_CACHE = {}
+
+
+def _pm_page_source_signature():
+    """Cheap, stable signature = direct mtimes of every file the page reads.
+    Avoids get_pm_schedule_source_status() in the hot path (it can be slow), and
+    uses real file mtimes (not a volatile last_modified field) so identical
+    requests always produce the same cache key."""
+    paths = []
+    try:
+        for entry in get_pm_schedule_source_status().values():
+            if entry.get("path"):
+                paths.append(str(entry["path"]))
+    except Exception:
+        pass
+    paths.append(str(pm_feed.default_master_path(DATA_DIR)))
+    paths += [str(f["path"]) for f in pm_feed.default_feeds(DATA_DIR)]
+    paths += [str(DATA_DIR / "pm_schedule_updates.json"), str(DATA_DIR / "pm_planner_tasks.json")]
+    sig = []
+    for p in sorted(set(paths)):
+        try:
+            sig.append((p, round(Path(p).stat().st_mtime, 2)))
+        except OSError:
+            sig.append((p, None))
+    return tuple(sig)
 
 # Forward-looking window (in days) used for "Due Soon".
 DUE_SOON_WINDOW_DAYS = 30
@@ -812,6 +841,18 @@ def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=No
     if sel_month is not None and not (1 <= sel_month <= 12):
         sel_month = None
 
+    # Serve a cached payload (keyed by request params + date). Data mutations
+    # (edits/uploads) explicitly clear this cache via the API layer, so the key
+    # deliberately excludes volatile file mtimes — the build itself touches some
+    # of those files, which made every request a cache miss (and a ~97s rebuild).
+    page_cache_key = (
+        today.isoformat(), stage_filter, sel_year, sel_month,
+        str(period_mode or ("monthly" if sel_month else "ytd")), str(start), str(end),
+    )
+    cached_page = _PM_PAGE_PAYLOAD_CACHE.get(page_cache_key)
+    if cached_page is not None:
+        return cached_page
+
     # Period window for the period-scoped KPIs (default YTD when no month/mode).
     win_start, win_end = _pm_resolve_window(sel_year, sel_month, period_mode, today, start, end)
     # For the legacy single-month _kpis/charts and the meta label, keep a month value.
@@ -864,7 +905,7 @@ def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=No
     )
     schedule = _schedule_section(tasks)
 
-    return {
+    payload = {
         "meta": {
             "stageFilter": stage_filter,
             "year": sel_year,
@@ -888,6 +929,10 @@ def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=No
         "equipment": equipment,
         "utility": utility,
     }
+    if len(_PM_PAGE_PAYLOAD_CACHE) > 64:
+        _PM_PAGE_PAYLOAD_CACHE.clear()
+    _PM_PAGE_PAYLOAD_CACHE[page_cache_key] = payload
+    return payload
 
 
 def build_pm_schedule_metrics_payload(stage="all", year=None, month=None, period_mode=None, start=None, end=None):

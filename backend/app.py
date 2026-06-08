@@ -59,10 +59,141 @@ ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
+APP_VERSION = "2026-06-08-stabilise-1"
+_BACKEND_START = datetime.now()
+
+import json as _json
+import time as _time
+import threading as _threading
+
+# Route-level response cache: the heavy pages (downtime ~32 MB, pm-schedule
+# ~13 MB) are expensive to BUILD (14-50s) and the dict-level caches are fragile
+# under the threaded dev server. Caching the fully-serialized response bytes by
+# URL for a short window makes repeat loads instant regardless — and the build
+# happens at most once per window (warmed at startup). Mutations clear it.
+_ROUTE_CACHE = {}              # key -> (monotonic_ts, json_bytes)
+_ROUTE_CACHE_TTL = 180.0
+_ROUTE_CACHE_LOCK = _threading.Lock()
+
+
+def _cached_json(key, builder):
+    now = _time.monotonic()
+    hit = _ROUTE_CACHE.get(key)
+    if hit is not None and (now - hit[0]) < _ROUTE_CACHE_TTL:
+        return app.response_class(hit[1], mimetype="application/json")
+    body = _json.dumps(builder(), default=str)
+    with _ROUTE_CACHE_LOCK:
+        _ROUTE_CACHE[key] = (now, body)
+    return app.response_class(body, mimetype="application/json")
+
+
+def _invalidate_route_cache():
+    """Drop cached responses + payload dict caches so the next request rebuilds
+    fresh after an edit/upload."""
+    with _ROUTE_CACHE_LOCK:
+        _ROUTE_CACHE.clear()
+    for mod, attr in (("pm_schedule_service", "_PM_PAGE_PAYLOAD_CACHE"), ("downtime_service", "_DOWNTIME_CACHE")):
+        try:
+            import importlib
+            getattr(importlib.import_module(mod), attr).clear()
+        except Exception:
+            pass
+
+
+# Endpoints that actually change dashboard data — a successful POST to any of
+# these invalidates the response cache so the next load reflects the change.
+_MUTATION_PREFIXES = (
+    "/api/maintenance/pm-schedule/",   # update / plan / delete
+    "/api/downtime/import",
+    "/api/maintenance/import",
+)
+
+
+@app.after_request
+def _clear_cache_after_mutation(response):
+    try:
+        if request.method == "POST" and any(request.path.startswith(p) for p in _MUTATION_PREFIXES):
+            _invalidate_route_cache()
+    except Exception:
+        pass
+    return response
+
+
+import gzip as _gzip
+
+
+@app.after_request
+def _gzip_large_responses(response):
+    """Gzip large responses. The dashboard payloads are 13-32 MB and the dev
+    server transmits uncompressed bytes at <1 MB/s, which was the real cause of
+    slow page loads (the build/cache were already fast). Gzip shrinks them ~10-15x
+    so they transfer in ~1s. Browsers decompress transparently."""
+    try:
+        if (
+            response.status_code != 200
+            or response.direct_passthrough
+            or "Content-Encoding" in response.headers
+            or "gzip" not in request.headers.get("Accept-Encoding", "").lower()
+        ):
+            return response
+        data = response.get_data()
+        if len(data) < 2048:
+            return response
+        compressed = _gzip.compress(data, 5)
+        response.set_data(compressed)
+        response.headers["Content-Encoding"] = "gzip"
+        response.headers["Content-Length"] = str(len(compressed))
+        response.headers["Vary"] = "Accept-Encoding"
+    except Exception:
+        pass
+    return response
+
+
 if mira_bp is not None:
     app.register_blueprint(mira_bp)
 else:
     print(f"MIRA routes unavailable: {mira_import_error}")
+
+
+@app.route("/api/health")
+def api_health():
+    """Lightweight liveness/readiness probe — never triggers a heavy load."""
+    import downtime_service as _dt
+    import pm_schedule_service as _pm
+
+    def _has(*names):
+        for n in names:
+            parts = n if isinstance(n, tuple) else (n,)
+            if os.path.exists(os.path.join(DATA_DIR, *parts)):
+                return True
+        return False
+
+    ollama_enabled = (
+        os.environ.get("LLM_PROVIDER", "").lower() == "ollama"
+        or os.environ.get("OLLAMA_ENABLED", "").lower() in {"1", "true", "yes"}
+    )
+    return jsonify({
+        "status": "ok",
+        "version": APP_VERSION,
+        "startTime": _BACKEND_START.isoformat(),
+        "uptimeSeconds": round((datetime.now() - _BACKEND_START).total_seconds()),
+        "data": {
+            "mrDataLoaded": bool(getattr(_dt, "_WO_LOAD_CACHE", {}).get("payload")),
+            "sparePartsDataLoaded": _has("spare_parts_master.xlsx"),
+            "pmDataLoaded": bool(getattr(_pm, "_PM_PAGE_PAYLOAD_CACHE", None)) or _has("equipment_maintenance_schedule_source.xlsx"),
+            "assetMasterPresent": _has(("master", "Asset_Master.xlsx")),
+        },
+        "caches": {
+            "downtimeWarm": bool(getattr(_dt, "_DOWNTIME_CACHE", None)),
+            "pmPageWarm": bool(getattr(_pm, "_PM_PAGE_PAYLOAD_CACHE", None)),
+            "assetProfilesCached": _ASSET_PROFILE_CACHE.get("profiles") is not None,
+        },
+        "ollama": {
+            "enabled": ollama_enabled,
+            "baseUrl": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
+            "model": os.environ.get("OLLAMA_MODEL", "qwen2.5:7b"),
+        },
+    })
 
 
 @app.after_request
@@ -197,7 +328,10 @@ def downtime_data():
     period = request.args.get("period")
     month = request.args.get("month")
     work_orders_only = str(request.args.get("work_orders_only", "")).strip().lower() in {"1", "true", "yes", "on"}
-    return jsonify(build_downtime_payload(period, month, request.args.get("start"), request.args.get("end"), work_orders_only=work_orders_only, stage=request.args.get("stage")))
+    return _cached_json(
+        ("downtime", request.full_path),
+        lambda: build_downtime_payload(period, month, request.args.get("start"), request.args.get("end"), work_orders_only=work_orders_only, stage=request.args.get("stage")),
+    )
 
 
 @app.route("/api/downtime/import-work-orders", methods=["GET", "POST"])
@@ -246,12 +380,13 @@ def page_sync(page_key):
 @app.route("/api/maintenance/pm-schedule")
 def maintenance_pm_schedule():
     """Unified Preventive Maintenance schedule tracking (Stage 1 + Stage 2)."""
-    return jsonify(
-        build_pm_schedule_payload(
+    return _cached_json(
+        ("pm-schedule", request.full_path),
+        lambda: build_pm_schedule_payload(
             stage=request.args.get("stage", "all"),
             year=request.args.get("year", type=int),
             month=request.args.get("month"),
-        )
+        ),
     )
 
 
@@ -418,11 +553,30 @@ def _free_port(port):
         pass
 
 
+def _prewarm_caches():
+    """Warm the route response cache in the background so the first real request
+    isn't a cold ~40s build. Hits the routes via the test client so the cached
+    response bytes are populated. Best-effort; never raises, never blocks startup."""
+    def _warm():
+        try:
+            with app.test_client() as client:
+                client.get("/api/downtime")
+                client.get("/api/maintenance/pm-schedule")
+        except Exception:
+            pass
+
+    _threading.Thread(target=_warm, name="cache-prewarm", daemon=True).start()
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5005))
     debug = os.environ.get("FLASK_DEBUG", "0") not in {"0", "false", "no"}
     # Only the first (parent) run frees the port; the reloader child must not.
     if not os.environ.get("WERKZEUG_RUN_MAIN"):
         _free_port(port)
+    # Warm caches only in the process that actually serves (the reloader child,
+    # or the single process when debug is off).
+    if os.environ.get("WERKZEUG_RUN_MAIN") or not debug:
+        _prewarm_caches()
     print(f"Maintenance standalone server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=debug)

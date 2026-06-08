@@ -906,12 +906,17 @@ def _bg_translation_worker():
             completed += 1
 
         if completed > 0 and completed % _BG_TRANSLATE_CLEAR_EVERY == 0:
+            # Persist progress, but do NOT clear the payload cache mid-backlog —
+            # that wiped the cache between requests and forced a ~46s rebuild every
+            # time. Translations are applied once the queue fully drains (below).
             _save_translation_cache()
-            _DOWNTIME_CACHE.clear()
 
     _save_translation_cache()
-    if completed > 0:
-        _DOWNTIME_CACHE.clear()
+    # NOTE: deliberately do NOT clear the payload cache here. Clearing it forced a
+    # ~46s rebuild on the next request and, while a backlog drained, kept the
+    # dashboard slow. New translations persist to disk and are picked up on the
+    # next genuine cache miss (data upload / refresh / restart). Stability and
+    # speed are prioritised over surfacing translations mid-session.
 
 
 def _queue_background_translation(text: str) -> None:
