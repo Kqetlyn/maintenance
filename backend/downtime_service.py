@@ -6,6 +6,7 @@ from glob import glob
 from datetime import datetime, timedelta
 
 import pandas as pd
+import openpyxl
 
 try:
     from deep_translator import GoogleTranslator as _GoogleTranslator
@@ -39,6 +40,60 @@ PRIMARY_WORK_ORDER_DOWNTIME_FILE = os.path.join(DATA_DIR, "data downtime.csv")
 FALLBACK_WORK_ORDER_DOWNTIME_FILE = os.path.abspath(os.path.join(os.path.expanduser("~"), "Downloads", "data downtime.csv"))
 WORK_ORDER_IMPORT_DIR = os.path.join(DATA_DIR, "work_order_imports")
 WORK_ORDER_IMPORT_EXTENSIONS = {".csv", ".xlsx", ".xls"}
+ASSET_MASTER_FILENAME = "Asset_Master.xlsx"
+ASSET_MASTER_RELATIVE_PATH = os.path.join("master", ASSET_MASTER_FILENAME)
+SLA_TARGETS_SHEET = "SLA_Targets"
+STAGE_FILTER_OPTIONS = ["Stage 1", "Stage 2", "Unmapped", "Missing Asset ID", "Needs Stage Review"]
+
+DEFAULT_SLA_TARGETS = [
+    {
+        "key": "S1",
+        "label": "S1 Critical",
+        "short_label": "S1",
+        "fallback_severity": "Critical",
+        "response_target_hours": 1,
+        "completion_target_hours": None,
+        "rank": 1,
+    },
+    {
+        "key": "S2",
+        "label": "S2 High",
+        "short_label": "S2",
+        "fallback_severity": "High",
+        "response_target_hours": 4,
+        "completion_target_hours": 72,
+        "rank": 2,
+    },
+    {
+        "key": "S3",
+        "label": "S3 Medium",
+        "short_label": "S3",
+        "fallback_severity": "Medium",
+        "response_target_hours": 48,
+        "completion_target_hours": 504,
+        "rank": 3,
+    },
+    {
+        "key": "S4",
+        "label": "S4 Low",
+        "short_label": "S4",
+        "fallback_severity": "Low",
+        "response_target_hours": None,
+        "completion_target_hours": 1080,
+        "rank": 4,
+    },
+]
+
+SLA_TARGET_HEADER_ALIASES = {
+    "key": {"key", "severitykey", "servicelevel", "servicelevelkey", "severity"},
+    "label": {"label", "severitylabel", "servicelevellabel", "displaylabel"},
+    "short_label": {"shortlabel", "short", "badge", "code"},
+    "fallback_severity": {"fallbackseverity", "severityname", "prioritylabel", "mappedseverity"},
+    "response_target_hours": {"responsetargethours", "responsehours", "responsehrs", "acktargethours"},
+    "completion_target_hours": {"completiontargethours", "completionhours", "completionhrs", "closetargethours"},
+    "rank": {"rank", "sort", "sortorder", "order"},
+    "active": {"active", "enabled", "include"},
+}
 
 WORK_ORDER_COLUMN_ALIASES = {
     "Request State": ["Request State", "Status", "WO Status", "Work Order Status", "Request Status", "Current lifecycle state", "Current lifecycle state2", "Current lifecycle state3", "Lifecycle State", "request_state"],
@@ -90,6 +145,51 @@ def normalize_period(value):
     return "ytd"
 
 
+def normalize_stage_filter(value):
+    cleaned = str(value or "").strip()
+    key = re.sub(r"[^a-z0-9]+", "", cleaned.lower())
+    if not key or key in {"all", "allstages"}:
+        return ""
+    if key in {"stage1", "st1", "s1"}:
+        return "Stage 1"
+    if key in {"stage2", "st2", "s2"}:
+        return "Stage 2"
+    if key in {"unmapped"}:
+        return "Unmapped"
+    if key in {"missingassetid", "missingasset", "missingid"}:
+        return "Missing Asset ID"
+    if key in {"needsstagereview", "stagereview", "review", "keywordmatched"}:
+        return "Needs Stage Review"
+    return cleaned if cleaned in STAGE_FILTER_OPTIONS else ""
+
+
+def get_asset_master_path(data_dir=DATA_DIR):
+    preferred = os.path.join(data_dir, ASSET_MASTER_RELATIVE_PATH)
+    fallback = os.path.join(data_dir, ASSET_MASTER_FILENAME)
+    if os.path.exists(preferred) or not os.path.exists(fallback):
+        return preferred
+    return fallback
+
+
+def get_work_order_stage_scope(row):
+    status = str(row.get("mappingStatus") or row.get("mapping_status") or "").strip()
+    stage = str(row.get("mappedStage") or row.get("mapped_stage") or "").strip()
+    if status in {"Unmapped", "Missing Asset ID"}:
+        return status
+    if stage in {"Stage 1", "Stage 2", "Needs Stage Review"}:
+        return stage
+    if status in {"Needs Stage Review", "Keyword Matched"}:
+        return "Needs Stage Review"
+    return stage or status or "Unmapped"
+
+
+def filter_work_orders_by_stage(records, stage_filter):
+    normalized_stage = normalize_stage_filter(stage_filter)
+    if not normalized_stage:
+        return list(records or [])
+    return [row for row in records or [] if get_work_order_stage_scope(row) == normalized_stage]
+
+
 def get_period_days(period):
     return {"7d": 7, "30d": 30, "90d": 90, "last12": 365}.get(period, 30)
 
@@ -124,6 +224,159 @@ def normalize_month_filter(value):
     if pd.isna(parsed):
         return None
     return parsed.strftime("%Y-%m")
+
+
+def normalize_config_header(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def clean_config_text(value, fallback=""):
+    if value is None or pd.isna(value):
+        return fallback
+    text = re.sub(r"\s+", " ", str(value).strip())
+    return text or fallback
+
+
+def parse_optional_hours(value):
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value) if float(value) % 1 else int(value)
+    text = str(value).strip().lower()
+    if not text or text in {"-", "--", "n/a", "na", "none", "null", "blank", "no target"}:
+        return None
+    match = re.search(r"-?\d+(?:\.\d+)?", text.replace(",", ""))
+    if not match:
+        return None
+    amount = float(match.group(0))
+    if "day" in text or re.search(r"\bd\b", text):
+        amount *= 24
+    elif "min" in text:
+        amount /= 60
+    return amount if amount % 1 else int(amount)
+
+
+def parse_config_rank(value, fallback):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return fallback
+
+
+def parse_config_active(value):
+    if value is None or pd.isna(value):
+        return True
+    return str(value).strip().lower() not in {"0", "false", "no", "n", "inactive", "disabled"}
+
+
+def get_sla_header_key(raw_header):
+    normalized = normalize_config_header(raw_header)
+    for key, aliases in SLA_TARGET_HEADER_ALIASES.items():
+        if normalized in aliases:
+            return key
+    return None
+
+
+def copy_default_sla_targets():
+    return [dict(target) for target in DEFAULT_SLA_TARGETS]
+
+
+def load_sla_target_config(data_dir=DATA_DIR):
+    path = get_asset_master_path(data_dir)
+    defaults = copy_default_sla_targets()
+    fallback = {
+        "available": False,
+        "source": f"{ASSET_MASTER_RELATIVE_PATH}:{SLA_TARGETS_SHEET}",
+        "message": f"Using built-in default SLA targets. Add or edit the '{SLA_TARGETS_SHEET}' sheet in {ASSET_MASTER_FILENAME} to change them.",
+        "targets": defaults,
+        "instructions": "Edit Response Target Hours and Completion Target Hours. Leave a target cell blank for no target; set Active to FALSE to remove both targets for that severity.",
+    }
+    if not os.path.exists(path):
+        fallback["message"] = f"{ASSET_MASTER_RELATIVE_PATH} not found; using built-in default SLA targets."
+        return fallback
+
+    try:
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    except Exception as exc:
+        fallback["message"] = f"Could not read {ASSET_MASTER_FILENAME}; using built-in default SLA targets. {exc}"
+        return fallback
+
+    try:
+        if SLA_TARGETS_SHEET not in wb.sheetnames:
+            return fallback
+
+        ws = wb[SLA_TARGETS_SHEET]
+        rows = list(ws.iter_rows(values_only=True))
+    finally:
+        try:
+            wb.close()
+        except Exception:
+            pass
+    if not rows:
+        fallback["message"] = f"'{SLA_TARGETS_SHEET}' is empty; using built-in default SLA targets."
+        return fallback
+
+    header_row_index = None
+    header_map = {}
+    for index, row in enumerate(rows[:10]):
+        mapped = {get_sla_header_key(cell): offset for offset, cell in enumerate(row) if get_sla_header_key(cell)}
+        if "key" in mapped:
+            header_row_index = index
+            header_map = mapped
+            break
+
+    if header_row_index is None:
+        fallback["message"] = f"'{SLA_TARGETS_SHEET}' has no Severity Key/Service Level column; using built-in default SLA targets."
+        return fallback
+
+    defaults_by_key = {target["key"]: dict(target) for target in defaults}
+    loaded_by_key = {}
+    for row in rows[header_row_index + 1:]:
+        key = clean_config_text(row[header_map["key"]] if header_map.get("key", -1) < len(row) else "").upper()
+        if not key or key.startswith("#"):
+            continue
+        base = defaults_by_key.get(key, {
+            "key": key,
+            "label": key,
+            "short_label": key,
+            "fallback_severity": key,
+            "response_target_hours": None,
+            "completion_target_hours": None,
+            "rank": 99,
+        })
+        target = dict(base)
+        is_active = "active" not in header_map or parse_config_active(row[header_map["active"]] if header_map["active"] < len(row) else None)
+        if "label" in header_map:
+            target["label"] = clean_config_text(row[header_map["label"]] if header_map["label"] < len(row) else None, target["label"])
+        if "short_label" in header_map:
+            target["short_label"] = clean_config_text(row[header_map["short_label"]] if header_map["short_label"] < len(row) else None, target["short_label"])
+        if "fallback_severity" in header_map:
+            target["fallback_severity"] = clean_config_text(row[header_map["fallback_severity"]] if header_map["fallback_severity"] < len(row) else None, target["fallback_severity"])
+        if not is_active:
+            target["response_target_hours"] = None
+            target["completion_target_hours"] = None
+        elif "response_target_hours" in header_map:
+            target["response_target_hours"] = parse_optional_hours(row[header_map["response_target_hours"]] if header_map["response_target_hours"] < len(row) else None)
+        if is_active and "completion_target_hours" in header_map:
+            target["completion_target_hours"] = parse_optional_hours(row[header_map["completion_target_hours"]] if header_map["completion_target_hours"] < len(row) else None)
+        if "rank" in header_map:
+            target["rank"] = parse_config_rank(row[header_map["rank"]] if header_map["rank"] < len(row) else None, target["rank"])
+        loaded_by_key[key] = target
+
+    if not loaded_by_key:
+        fallback["message"] = f"'{SLA_TARGETS_SHEET}' contains no readable SLA target rows; using built-in default SLA targets."
+        return fallback
+
+    for key, target in defaults_by_key.items():
+        loaded_by_key.setdefault(key, target)
+
+    return {
+        "available": True,
+        "source": f"{ASSET_MASTER_RELATIVE_PATH}:{SLA_TARGETS_SHEET}",
+        "message": f"SLA targets loaded from {ASSET_MASTER_FILENAME} sheet '{SLA_TARGETS_SHEET}'.",
+        "targets": sorted(loaded_by_key.values(), key=lambda target: (target.get("rank", 99), target.get("key", ""))),
+        "instructions": "Edit Response Target Hours and Completion Target Hours. Leave a target cell blank for no target; set Active to FALSE to remove both targets for that severity.",
+    }
 
 
 def format_month_label(month_key):
@@ -296,13 +549,13 @@ def get_work_order_import_status():
     }
 
 
-def build_mtbf_work_order_history_payload():
+def build_mtbf_work_order_history_payload(stage=None):
     payload = load_work_order_downtime()
     records = []
     years = set()
     months = set()
 
-    for row in payload.get("records") or []:
+    for row in filter_work_orders_by_stage(payload.get("records") or [], stage):
         start_time = row.get("actual_start_time") or row.get("maintenance_start_time") or row.get("start_time")
         end_time = row.get("actual_end_time") or row.get("maintenance_end_time") or row.get("end_time")
         start_dt = parse_iso_datetime(start_time)
@@ -653,12 +906,17 @@ def _bg_translation_worker():
             completed += 1
 
         if completed > 0 and completed % _BG_TRANSLATE_CLEAR_EVERY == 0:
+            # Persist progress, but do NOT clear the payload cache mid-backlog —
+            # that wiped the cache between requests and forced a ~46s rebuild every
+            # time. Translations are applied once the queue fully drains (below).
             _save_translation_cache()
-            _DOWNTIME_CACHE.clear()
 
     _save_translation_cache()
-    if completed > 0:
-        _DOWNTIME_CACHE.clear()
+    # NOTE: deliberately do NOT clear the payload cache here. Clearing it forced a
+    # ~46s rebuild on the next request and, while a backlog drained, kept the
+    # dashboard slow. New translations persist to disk and are picked up on the
+    # next genuine cache miss (data upload / refresh / restart). Stability and
+    # speed are prioritised over surfacing translations mid-session.
 
 
 def _queue_background_translation(text: str) -> None:
@@ -880,7 +1138,12 @@ def format_hours(hours):
 
 def load_work_order_downtime():
     sources = get_work_order_source_paths()
-    sig = tuple((p, get_path_signature(p)) for p in sources)
+    # Asset mapping edits must invalidate the enriched work-order cache too,
+    # otherwise criticality/group changes can stay stale until a restart.
+    sig = (
+        ("asset_master", get_path_signature(get_asset_master_path(DATA_DIR))),
+        *tuple((p, get_path_signature(p)) for p in sources),
+    )
     if _WO_LOAD_CACHE["sig"] == sig and _WO_LOAD_CACHE["payload"] is not None:
         return _WO_LOAD_CACHE["payload"]
 
@@ -1155,28 +1418,31 @@ def build_trend_series(events, start_dt, end_dt):
     return {"labels": labels, "downtime_hours": hours, "event_counts": counts}
 
 
-def build_cache_signature(period, month_filter=None, start_filter=None, end_filter=None, work_orders_only=False):
-    signatures = [DOWNTIME_CACHE_VERSION, period, month_filter, start_filter, end_filter]
-    signatures.append(get_path_signature(os.path.join(DATA_DIR, "AssetList_Edit.xlsx")))
+def build_cache_signature(period, month_filter=None, start_filter=None, end_filter=None, work_orders_only=False, stage_filter=None):
+    signatures = [DOWNTIME_CACHE_VERSION, period, month_filter, start_filter, end_filter, normalize_stage_filter(stage_filter)]
+    signatures.append(get_path_signature(get_asset_master_path(DATA_DIR)))
     for source_path in get_work_order_source_paths():
         signatures.append((source_path, get_path_signature(source_path)))
     return tuple(signatures)
 
 
-def build_downtime_payload(period=None, month=None, start=None, end=None, work_orders_only=False):
+def build_downtime_payload(period=None, month=None, start=None, end=None, work_orders_only=False, stage=None):
     normalized_period = normalize_period(period)
     normalized_month = normalize_month_filter(month)
+    normalized_stage = normalize_stage_filter(stage)
     custom_start = normalize_date_filter(start)
     custom_end = normalize_date_filter(end)
     custom_start_key = custom_start.strftime("%Y-%m-%d") if custom_start else None
     custom_end_key = custom_end.strftime("%Y-%m-%d") if custom_end else None
-    cache_signature = build_cache_signature(normalized_period, normalized_month, custom_start_key, custom_end_key)
+    cache_signature = build_cache_signature(normalized_period, normalized_month, custom_start_key, custom_end_key, work_orders_only, normalized_stage)
     cached = _DOWNTIME_CACHE.get(cache_signature)
     if cached is not None:
         return cached
 
     work_order_payload = load_work_order_downtime()
-    work_order_events = list(work_order_payload["records"])
+    sla_target_config = load_sla_target_config(DATA_DIR)
+    all_work_order_events = list(work_order_payload["records"])
+    work_order_events = filter_work_orders_by_stage(all_work_order_events, normalized_stage)
     latest_timestamps = []
     if work_order_payload.get("last_synced"):
         latest_timestamps.append(pd.Timestamp(work_order_payload["last_synced"]))
@@ -1192,6 +1458,8 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
                 "reference_end": None,
                 "last_synced": None,
                 "work_order_available": work_order_payload["available"],
+                "stage_filter": normalized_stage,
+                "stage_label": normalized_stage or "All Stages",
             },
             "summary": {
                 "total_hours": None,
@@ -1216,9 +1484,12 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
             "area_breakdown": [],
             "asset_breakdown": [],
             "events": [],
-            "filters": {"systems": [], "areas": [], "sources": ["Work Order"]},
+            "filters": {"systems": [], "areas": [], "sources": ["Work Order"], "stages": STAGE_FILTER_OPTIONS},
             "months": [],
             "work_order_source": work_order_payload,
+            "config": {
+                "sla_targets": sla_target_config,
+            },
             "operating_windows": [],
             "management": {
                 "summary": {
@@ -1356,6 +1627,7 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
         "systems": sorted({event["system"] for event in selected_events}),
         "areas": sorted({event["area"] for event in selected_events}),
         "sources": ["Work Order"] if work_order_payload["available"] else [],
+        "stages": STAGE_FILTER_OPTIONS,
     }
 
     payload = {
@@ -1372,6 +1644,8 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
             "last_synced": max(latest_timestamps).isoformat(),
             "work_order_available": work_order_payload["available"],
             "work_orders_only": True,
+            "stage_filter": normalized_stage,
+            "stage_label": normalized_stage or "All Stages",
             "all_years_warning": (
                 "All Years view is for long-term reliability analysis."
                 if normalized_period == "all_years"
@@ -1402,6 +1676,9 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
         "filters": filters,
         "months": [{"value": value, "label": format_month_label(value)} for value in month_options],
         "work_order_source": work_order_payload,
+        "config": {
+            "sla_targets": sla_target_config,
+        },
         "operating_windows": [],
         "management": management_payload,
     }

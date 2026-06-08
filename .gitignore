@@ -11,5 +11,8 @@ data/argos_translate/
 data/*.xlsx
 data/*.csv
 data/*.json
+data/*.zip
 data/work_order_imports/
+data/project_transactions_imports/
 data/_upload_tmp/
+data/_dashboard_cache/

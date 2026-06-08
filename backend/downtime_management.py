@@ -144,6 +144,7 @@ def _build_fallback_mapping(asset_id, machine_name, location, job_trade, descrip
     display_name = _clean_text(machine_name) or _clean_text(asset_id) or "Unmapped Asset"
     normalized_location = _clean_text(location, "Unassigned")
     criticality = _infer_criticality(asset_id, machine_name, location, job_trade, description)
+    mapping_status = "Unmapped" if _normalize_asset_id(asset_id) else "Missing Asset ID"
     return {
         "asset_id": _normalize_asset_id(asset_id) or _clean_text(asset_id),
         "machine_group": display_name,
@@ -152,6 +153,13 @@ def _build_fallback_mapping(asset_id, machine_name, location, job_trade, descrip
         "asset_display_name": display_name,
         "location": normalized_location,
         "building": normalized_location,
+        "mappedStage": mapping_status,
+        "mappedAssetName": display_name,
+        "mappedMainAssetGroup": display_name,
+        "mappedSubAssetGroup": "",
+        "mappedLocation": normalized_location,
+        "mappedSystemArea": "",
+        "mappingStatus": mapping_status,
         "criticality": criticality,
         "raw_criticality": "",
         "criticality_rank": CRITICALITY_RANK.get(criticality, CRITICALITY_RANK["Unmapped"]),
@@ -186,8 +194,10 @@ def enrich_work_order_records(records, data_dir):
         }
         classified = classify_work_order(search_record, mapping)
 
-        mapped_from_asset_list = classified.get("mapping_source") == "AssetList_Edit.xlsx"
+        mapped_from_asset_list = classified.get("mapping_source") == "Asset_Master.xlsx"
         machine_group = classified["machine_group"]
+        mapping_status = classified.get("mappingStatus") or classified.get("mapping_status") or ("Mapped" if mapped_from_asset_list else "Unmapped")
+        mapped_stage = classified.get("mappedStage") or classified.get("mapped_stage") or mapping_status
 
         merged = {
             **row,
@@ -198,13 +208,28 @@ def enrich_work_order_records(records, data_dir):
             "asset_display_name": classified.get("asset_display_name") or machine_name or classified["machine_name_display"],
             "location": classified["location"],
             "building": classified["building"],
+            "mappedStage": mapped_stage,
+            "mappedAssetName": classified.get("mappedAssetName") or classified.get("mapped_asset_name") or classified.get("asset_display_name") or machine_name,
+            "mappedMainAssetGroup": classified.get("mappedMainAssetGroup") or classified.get("mapped_main_asset_group") or machine_group,
+            "mappedSubAssetGroup": classified.get("mappedSubAssetGroup") or classified.get("mapped_sub_asset_group") or "",
+            "mappedLocation": classified.get("mappedLocation") or classified.get("mapped_location") or classified.get("location") or "",
+            "mappedSystemArea": classified.get("mappedSystemArea") or classified.get("mapped_system_area") or "",
+            "mappingStatus": mapping_status,
+            "mapped_stage": mapped_stage,
+            "mapped_asset_name": classified.get("mappedAssetName") or classified.get("mapped_asset_name") or classified.get("asset_display_name") or machine_name,
+            "mapped_main_asset_group": classified.get("mappedMainAssetGroup") or classified.get("mapped_main_asset_group") or machine_group,
+            "mapped_sub_asset_group": classified.get("mappedSubAssetGroup") or classified.get("mapped_sub_asset_group") or "",
+            "mapped_location": classified.get("mappedLocation") or classified.get("mapped_location") or classified.get("location") or "",
+            "mapped_system_area": classified.get("mappedSystemArea") or classified.get("mapped_system_area") or "",
+            "mapping_status": mapping_status,
             "criticality": classified["criticality"],
             "raw_criticality": classified.get("raw_criticality", ""),
             "normalized_criticality": _normalize_display_criticality(classified["criticality"]),
             "criticality_rank": CRITICALITY_RANK.get(classified["criticality"], CRITICALITY_RANK["Unmapped"]),
             "mapping_source": classified["mapping_source"],
             "classification_source": classified["classification_source"],
-            "has_assetlist_classification": bool(classified.get("has_assetlist_classification") and _clean_text(classified.get("raw_criticality"))),
+            "has_assetlist_classification": bool(classified.get("has_assetlist_classification")),
+            "has_asset_master_mapping": bool(classified.get("has_asset_master_mapping") or mapping_status == "Mapped"),
             "group_asset_ids": classified.get("group_asset_ids", []),
             "refrigeration_group_match": machine_group == REFRIGERATION_GROUP,
             "ttr_hours": round(float(row.get("duration_hours") or 0), 3) if row.get("duration_hours") is not None else None,
@@ -879,7 +904,8 @@ def build_management_downtime_payload(records, status_events, period_start, peri
         classification_source = row.get("classification_source") or row.get("mapping_source") or ""
         has_assetlist_classification = row.get("has_assetlist_classification")
         if has_assetlist_classification is None:
-            has_assetlist_classification = classification_source in {"AssetList.xlsx", "AssetList_Edit.xlsx"} and bool(_clean_text(raw_criticality))
+            has_assetlist_classification = classification_source == "Asset_Master.xlsx"
+        mapping_status = row.get("mappingStatus") or row.get("mapping_status") or ("Mapped" if has_assetlist_classification else "Unmapped")
         prepared = {
             **row,
             "raw_criticality": raw_criticality,
@@ -887,6 +913,16 @@ def build_management_downtime_payload(records, status_events, period_start, peri
             "normalized_criticality": _normalize_display_criticality(row.get("criticality")),
             "classification_source": classification_source,
             "has_assetlist_classification": bool(has_assetlist_classification),
+            "has_asset_master_mapping": bool(row.get("has_asset_master_mapping") or mapping_status == "Mapped"),
+            "mappingStatus": mapping_status,
+            "mapping_status": mapping_status,
+            "mappedStage": row.get("mappedStage") or row.get("mapped_stage") or mapping_status,
+            "mapped_stage": row.get("mappedStage") or row.get("mapped_stage") or mapping_status,
+            "mappedAssetName": row.get("mappedAssetName") or row.get("mapped_asset_name") or row.get("asset_display_name") or row.get("machine_name_display"),
+            "mappedMainAssetGroup": row.get("mappedMainAssetGroup") or row.get("mapped_main_asset_group") or row.get("machine_group"),
+            "mappedSubAssetGroup": row.get("mappedSubAssetGroup") or row.get("mapped_sub_asset_group") or "",
+            "mappedLocation": row.get("mappedLocation") or row.get("mapped_location") or row.get("location") or row.get("building"),
+            "mappedSystemArea": row.get("mappedSystemArea") or row.get("mapped_system_area") or "",
         }
         prepared["criticality_rank"] = CRITICALITY_RANK.get(prepared["criticality"], CRITICALITY_RANK["Unmapped"])
         if pd.notna(ttr_hours) and float(ttr_hours) > 0:

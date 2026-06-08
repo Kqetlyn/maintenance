@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import os
 import re
@@ -10,11 +12,18 @@ from pathlib import Path
 
 import pandas as pd
 
+from asset_resolver import (
+    build_all_asset_profiles,
+    build_asset_profile,
+    match_record_to_asset_profiles,
+    normalize_text as normalize_asset_text,
+)
 from downtime_management import load_grouped_machine_mapping
 from maintenance_service import MONTH_LABELS, build_equipment_dataset, clean_text
 
 
 DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+ASSET_MASTER_PATH = DEFAULT_DATA_DIR / "master" / "Asset_Master.xlsx"
 D365_SPARE_PARTS_PATH = Path(
     os.environ.get(
         "SPARE_PARTS_D365_PATH",
@@ -173,7 +182,7 @@ FUTURE_SOURCE_SPECS = {
         "env": "SPARE_PARTS_EQUIPMENT_MASTER_PATH",
         "label": "Equipment Master",
         "missing": "Equipment master not uploaded",
-        "fallback": lambda: DEFAULT_DATA_DIR / "AssetList_Edit.xlsx",
+        "fallback": lambda: ASSET_MASTER_PATH,
     },
 }
 FLEXIBLE_COLUMN_ALIASES = {
@@ -187,7 +196,7 @@ FLEXIBLE_COLUMN_ALIASES = {
     "department": ["Department", "Cost Centre", "Cost Center"],
     "description": ["Item Description", "Description", "Item Name", "Product Name", "Product name", "Search name", "Spare Part Name"],
     "equipment_name": ["Equipment", "Machine", "Asset", "Asset ID", "AssetID", "Linked Equipment", "Equipment Name", "Machine Name", "Asset Name", "PD Machine"],
-    "equipment_type": ["Equipment Type", "Machine Type", "Equipment Group", "Machine Group"],
+    "equipment_type": ["Equipment Type", "Machine Type", "Equipment Group", "Machine Group", "Main Asset Group", "Sub Asset Group"],
     "gl_account": ["GL Account", "Procurement Category"],
     "goods_received_date": ["Goods Received Date", "Received Date", "GR Date"],
     "grn_status": ["GRN Status", "PR PO GRN Status"],
@@ -207,7 +216,7 @@ FLEXIBLE_COLUMN_ALIASES = {
     "pd_machine": ["PD Machine", "Machine", "Asset", "Equipment"],
     "po_date": ["PO Date", "Purchase Date", "Order Date", "Date Gen PO", "DMY Create(EN) CPP", "DMY Create PR"],
     "po_number": ["PO Number", "PO No.", "PO No", "Purchase Order"],
-    "production_line": ["Production Line", "Line", "Area"],
+    "production_line": ["Production Line", "Line", "Area", "System/Area", "System Area", "Stage"],
     "quantity": ["Qty", "Quantity", "Quantity Ordered", "Quantity Used", "Qty'", "Quantity Drawn", "Quantity Received"],
     "quantity_drawn": ["Quantity Drawn", "Quantity Used", "Qty Used", "Qty Drawn", "Issued Quantity"],
     "quantity_ordered": ["Quantity Ordered", "Qty Ordered", "Qty'", "Qty", "Quantity"],
@@ -224,6 +233,8 @@ FLEXIBLE_COLUMN_ALIASES = {
     "work_order_id": ["Work Order ID", "WO ID", "WorkOrderID", "PR No.", "Request ID"],
 }
 _SPARE_PARTS_CACHE: dict[tuple, dict] = {}
+_SPARE_PERSISTENT_CACHE_VERSION = 1
+_SPARE_PERSISTENT_CACHE_DIR = DEFAULT_DATA_DIR / "_dashboard_cache" / "spare_parts"
 
 
 def _file_signature(path: Path | None):
@@ -234,6 +245,73 @@ def _file_signature(path: Path | None):
     except OSError:
         return None
     return (str(path), stat.st_mtime_ns, stat.st_size)
+
+
+def _persistent_cache_key(signature) -> str:
+    raw = json.dumps(signature, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _persistent_cache_path(name: str, signature) -> Path:
+    safe_name = re.sub(r"[^a-z0-9_-]+", "_", str(name or "payload").lower()).strip("_") or "payload"
+    return _SPARE_PERSISTENT_CACHE_DIR / f"{safe_name}_{_persistent_cache_key(signature)}.json"
+
+
+def _read_persistent_payload_cache(name: str, signature):
+    path = _persistent_cache_path(name, signature)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            wrapper = json.load(fh)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if wrapper.get("version") != _SPARE_PERSISTENT_CACHE_VERSION:
+        return None
+    if wrapper.get("key") != _persistent_cache_key(signature):
+        return None
+    payload = wrapper.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def _write_persistent_payload_cache(name: str, signature, payload: dict) -> None:
+    try:
+        _SPARE_PERSISTENT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _persistent_cache_path(name, signature)
+        temp_path = path.with_suffix(".tmp")
+        with open(temp_path, "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": _SPARE_PERSISTENT_CACHE_VERSION,
+                    "key": _persistent_cache_key(signature),
+                    "generated_at": datetime.now().isoformat(timespec="seconds"),
+                    "payload": payload,
+                },
+                fh,
+                default=str,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        temp_path.replace(path)
+    except (TypeError, OSError, ValueError):
+        # Disk cache is an optimization only; never fail an API response because of it.
+        pass
+
+
+def _clear_persistent_payload_cache() -> None:
+    try:
+        if not _SPARE_PERSISTENT_CACHE_DIR.exists():
+            return
+        for path in _SPARE_PERSISTENT_CACHE_DIR.glob("*.json"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        for path in _SPARE_PERSISTENT_CACHE_DIR.glob("*.tmp"):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+    except OSError:
+        pass
 
 
 def _dedupe_existing_paths(paths):
@@ -1000,7 +1078,7 @@ def _review_reasons_for_po(row):
     if not clean_text(row.get("code")):
         reasons.append("Item code missing")
     if not clean_text(row.get("clean_description")) or len(str(row.get("clean_description") or "").split()) < 2:
-        reasons.append("Description unclear")
+        reasons.append("Description too short to classify")
     if row.get("translation_status") == "Translation failed":
         reasons.append("Translation failed")
     if row.get("confidence") in {"Low", "Manual Review"}:
@@ -1713,6 +1791,9 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "total_items": len(inventory_records),
                 "total_current_quantity": round(sum(float(value) for value in current_quantities), 3) if current_quantities else None,
                 "total_inventory_value": inventory_value,
+                # Current in-stock = unique items with on-hand quantity > 0, and their value.
+                "in_stock_items": sum(1 for row in inventory_records if float(row.get("current_quantity") or 0) > 0),
+                "in_stock_value": round(sum(float(row.get("stock_value") or 0) for row in inventory_records if float(row.get("current_quantity") or 0) > 0 and row.get("stock_value") is not None), 2) or None,
                 "low_stock_items": sum(1 for row in inventory_records if row.get("stock_status_group") == "Low Stock"),
                 "out_of_stock_items": sum(1 for row in inventory_records if row.get("stock_status_group") == "Out of Stock"),
                 "overstock_items": sum(1 for row in inventory_records if row.get("stock_status_group") == "Overstock"),
@@ -1739,6 +1820,7 @@ def _build_structured_spare_parts_payload(paths, source_status):
             "summary": {
                 "internal_drawn_quantity": round(sum(float(row.get("quantity_drawn") or 0) for row in movement_records), 3) if movement_records else None,
                 "internal_drawn_value": round(internal_drawn_value, 2) if movement_records else None,
+                "internal_drawn_count": len(movement_records),
                 "external_bought_quantity": round(sum(float(row.get("quantity_ordered") or 0) for row in external_spare_records), 3) if external_spare_records else None,
                 "external_bought_value": external_value,
                 "total_spare_part_consumption_value": round(total_consumption_value, 2) if total_consumption_value else None,
@@ -1786,6 +1868,7 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "spare_part_po_count": len(external_spare_records),
                 "stocked_spare_part_po_count": len(stocked_spare_records),
                 "non_stock_spare_part_po_count": len(non_stock_spare_records),
+                "non_spare_part_po_count": len(non_spare_service_records),
                 "exact_item_code_matches": exact_code_matches,
                 "description_matches": description_matches,
                 "translation_failed_items": translation_failed,
@@ -1800,6 +1883,14 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "current_inventory_value": inventory_value,
                 "current_stocked_spare_part_items": len(inventory_records),
                 "current_stock_quantity": round(sum(float(value) for value in current_quantities), 3) if current_quantities else None,
+                # Row 1 KPIs: current in-stock parts (on-hand qty > 0) and their value.
+                "in_stock_items": sum(1 for row in inventory_records if float(row.get("current_quantity") or 0) > 0),
+                "in_stock_value": round(sum(float(row.get("stock_value") or 0) for row in inventory_records if float(row.get("current_quantity") or 0) > 0 and row.get("stock_value") is not None), 2) or None,
+                # Row 2 KPIs: consumption split (drawn from store / non-stock / services) value + count.
+                "internal_drawn_value": round(internal_drawn_value, 2) if movement_records else None,
+                "internal_drawn_count": len(movement_records),
+                "non_stock_spare_part_po_count": len(non_stock_spare_records),
+                "non_spare_part_po_count": len(non_spare_service_records),
                 "external_po_spare_part_value": external_value,
                 "stocked_spare_part_po_value": stocked_po_value,
                 "non_stock_spare_part_po_value": non_stock_po_value,
@@ -1831,6 +1922,11 @@ def build_spare_parts_payload():
     cached = _SPARE_PARTS_CACHE.get(cache_signature)
     if cached:
         return cached
+    persistent_cached = _read_persistent_payload_cache("spare_parts_payload", cache_signature)
+    if persistent_cached is not None:
+        _SPARE_PARTS_CACHE.clear()
+        _SPARE_PARTS_CACHE[cache_signature] = persistent_cached
+        return persistent_cached
 
     structured_payload = _build_structured_spare_parts_payload(future_paths, future_source_status)
     inventory_records = structured_payload.get("inventory", {}).get("records", [])
@@ -1939,6 +2035,7 @@ def build_spare_parts_payload():
     }
     _SPARE_PARTS_CACHE.clear()
     _SPARE_PARTS_CACHE[cache_signature] = payload
+    _write_persistent_payload_cache("spare_parts_payload", cache_signature, payload)
     return payload
 
     records = []
@@ -2190,13 +2287,41 @@ SPARE_IMPORT_CANONICAL_FILES = {
 _AY_CACHE: dict = {"result": None, "mtime": None}
 _PT_CACHE: dict = {"result": None, "mtime": None}
 _ASSET_LIST_CACHE: dict = {"result": None, "sig": None}
+_PT_ASSET_CATALOG_CACHE: dict = {"result": None, "sig": None}
 
 _THAI_RE = re.compile(r"[฀-๿]")
 _ASSET_ID_RE = re.compile(r"[A-Z]{2,}[A-Z0-9]*-\d+")
+_PT_PART_CODE_RE = re.compile(r"\b[A-Z][A-Z0-9-]{2,}\b")
+
+_PT_GENERAL_AREA_TOKENS = {
+    "production",
+    "low",
+    "high",
+    "risk",
+    "area",
+    "kitchen",
+    "facility",
+    "general",
+    "utilities",
+    "utility",
+    "packaging",
+    "packing",
+    "process",
+    "line",
+    "warehouse",
+    "store",
+    "uncategorised",
+    "uncategorized",
+    "unknown",
+    "review",
+    "support",
+    "work",
+    "shop",
+}
 
 
 def _load_asset_list_lookup() -> dict[str, dict]:
-    """Return {asset_id: {name, criticality, location}} from AssetList_Edit.xlsx via asset_mapping."""
+    """Return {asset_id: {name, criticality, location}} from Asset_Master.xlsx via asset_mapping."""
     try:
         from asset_mapping import load_asset_mapping
         mapping = load_asset_mapping(str(DEFAULT_DATA_DIR))
@@ -2357,7 +2482,629 @@ def _pt_extract_wo_fields(rec: dict) -> dict:
         "wo_actual_start": _pt_pick(rec, "actual_start_time", "ActualStart", "maintenance_start_time"),
         "wo_actual_end": _pt_pick(rec, "actual_end_time", "ActualEnd", "maintenance_end_time"),
         "wo_severity": _pt_pick(rec, "service_level", "ServiceLevel", "priority"),
+        "wo_request_id": _pt_pick(rec, "maintenance_order_id", "Request ID", "RequestId", "request_id"),
+        "wo_description": _pt_pick(rec, "description_original", "Description", "description", "Notes", "Remarks"),
+        "wo_translated_description": _pt_pick(rec, "translated_description", "TranslatedDescription"),
+        "wo_location": _pt_pick(rec, "raw_functional_location", "raw_location", "Location", "location", "Area"),
     }
+
+
+def normalize_spare_part_text(text: str) -> str:
+    return normalize_asset_text(text or "")
+
+
+def _pt_slug(text: str) -> str:
+    return normalize_spare_part_text(text).replace(" ", "_") or "unknown"
+
+
+def _pt_title_token(token: str) -> str:
+    if not token:
+        return ""
+    if token.isdigit():
+        return token
+    if token.isalpha() and len(token) <= 3:
+        return token.upper()
+    return token.capitalize()
+
+
+def _pt_family_name_from_asset_name(name: str) -> str:
+    tokens = [tok for tok in normalize_spare_part_text(name).split() if tok]
+    while tokens and tokens[-1].isdigit():
+        tokens = tokens[:-1]
+    if not tokens:
+        return clean_text(name) or "Unknown Family"
+    return " ".join(_pt_title_token(token) for token in tokens)
+
+
+def _pt_is_specific_asset_id(value: str) -> bool:
+    return bool(_ASSET_ID_RE.search(str(value or "").upper()))
+
+
+def _pt_is_general_area_value(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if _pt_is_specific_asset_id(text):
+        return False
+    tokens = [tok for tok in normalize_spare_part_text(text).split() if tok]
+    if not tokens:
+        return False
+    return any(token in _PT_GENERAL_AREA_TOKENS for token in tokens)
+
+
+def _pt_general_area_label(record: dict) -> str | None:
+    raw_asset = clean_text(record.get("asset_id"))
+    if raw_asset and _pt_is_general_area_value(raw_asset):
+        return raw_asset
+    if not raw_asset:
+        return "Missing / Uncategorised Asset"
+    return None
+
+
+def _pt_extract_part_code(record: dict) -> str:
+    for raw in (
+        record.get("line_property"),
+        record.get("original_description"),
+        record.get("translated_description"),
+        record.get("clean_description"),
+    ):
+        text = str(raw or "").upper()
+        for token in _PT_PART_CODE_RE.findall(text):
+            if token in {"ITEM", "THB", "PCS", "JOB"}:
+                continue
+            if token.startswith("WO"):
+                continue
+            return token
+    return ""
+
+
+def build_asset_family_profiles(asset_rows: list[dict]) -> dict:
+    grouped: dict[str, dict] = {}
+    for asset in asset_rows:
+        family_id = asset.get("asset_family_id") or _pt_slug(asset.get("asset_family") or asset.get("name"))
+        bucket = grouped.setdefault(
+            family_id,
+            {
+                "asset_family_id": family_id,
+                "asset_family": asset.get("asset_family") or _pt_family_name_from_asset_name(asset.get("name") or ""),
+                "asset_ids": [],
+                "machine_groups": Counter(),
+                "locations": Counter(),
+            },
+        )
+        bucket["asset_ids"].append(asset.get("asset_id"))
+        bucket["machine_groups"][asset.get("machine_group") or "Unknown / Review"] += 1
+        bucket["locations"][asset.get("functional_location") or ""] += 1
+
+    profiles = {}
+    family_rows = []
+    for family_id, bucket in grouped.items():
+        primary_group = (bucket["machine_groups"].most_common(1) or [("Unknown / Review", 0)])[0][0]
+        primary_location = (bucket["locations"].most_common(1) or [("", 0)])[0][0]
+        profile = build_asset_profile(
+            {
+                "asset_id": family_id,
+                "name": bucket["asset_family"],
+                "machine_group": primary_group,
+                "functional_location": primary_location,
+            }
+        )
+        profile["assetFamilyId"] = family_id
+        profile["assetFamilyName"] = bucket["asset_family"]
+        profile["includedAssetIds"] = sorted(asset_id for asset_id in bucket["asset_ids"] if asset_id)
+        profiles[family_id] = profile
+        family_rows.append(
+            {
+                "asset_family_id": family_id,
+                "asset_family": bucket["asset_family"],
+                "machine_group": primary_group,
+                "included_asset_ids": sorted(asset_id for asset_id in bucket["asset_ids"] if asset_id),
+            }
+        )
+
+    return {
+        "profiles": profiles,
+        "rows": family_rows,
+        "lookup": {row["asset_family_id"]: row for row in family_rows},
+    }
+
+
+def _pt_brand_model_from_remarks(remarks) -> str:
+    """Pull the manufacturer/model out of an Asset_Master remark such as
+    'Mfr/Model: Rational / iCombi Pro; Stage 2 import …' -> 'Rational / iCombi Pro'."""
+    m = re.search(r"mfr\s*/?\s*model\s*:\s*([^;]+)", str(remarks or ""), re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _pt_brand_aliases(brand_model: str) -> list[str]:
+    out = []
+    for part in re.split(r"[/,]", brand_model or ""):
+        nb = normalize_asset_text(part)
+        if nb and len(nb) >= 3 and not nb.isdigit():
+            out.append(nb)
+    return out
+
+
+def _pt_augment_profiles_with_brand(asset_profiles: dict, asset_rows: list[dict]) -> None:
+    """Add each asset's manufacturer/model as profile aliases so PO lines that
+    reference the asset by brand (e.g. 'Rational' / 'iCombi') match — generally,
+    for every asset, not just known ones."""
+    for row in asset_rows:
+        prof = asset_profiles.get(row.get("asset_id"))
+        if not prof:
+            continue
+        brand_aliases = _pt_brand_aliases(row.get("brand_model"))
+        if brand_aliases:
+            prof["aliases"] = sorted(set(prof.get("aliases") or []) | set(brand_aliases))
+
+
+def build_spare_part_asset_profiles() -> dict:
+    sig = (_file_signature(ASSET_MASTER_PATH),)
+    if _PT_ASSET_CATALOG_CACHE["result"] is not None and _PT_ASSET_CATALOG_CACHE["sig"] == sig:
+        return _PT_ASSET_CATALOG_CACHE["result"]
+
+    asset_rows: list[dict] = []
+    try:
+        from asset_mapping import load_asset_mapping
+
+        mapping = load_asset_mapping(str(DEFAULT_DATA_DIR))
+        for asset_id, entry in (mapping.get("asset_map") or {}).items():
+            name = clean_text(entry.get("display_name") or entry.get("mappedAssetName") or asset_id)
+            machine_group = clean_text(entry.get("machine_group") or entry.get("mappedMainAssetGroup")) or "Unknown / Review"
+            location = clean_text(entry.get("location") or entry.get("mappedLocation"))
+            criticality = clean_text(entry.get("raw_criticality") or entry.get("criticality")) or "Unclassified"
+            family_name = _pt_family_name_from_asset_name(name)
+            asset_rows.append(
+                {
+                    "asset_id": asset_id,
+                    "name": name or asset_id,
+                    "machine_group": machine_group,
+                    "functional_location": location,
+                    "criticality": criticality,
+                    "asset_family": family_name,
+                    "asset_family_id": _pt_slug(family_name),
+                    "brand_model": _pt_brand_model_from_remarks(entry.get("remarks")),
+                }
+            )
+    except Exception:
+        for asset_id, entry in _load_asset_list_lookup().items():
+            name = clean_text(entry.get("name")) or asset_id
+            family_name = _pt_family_name_from_asset_name(name)
+            asset_rows.append(
+                {
+                    "asset_id": asset_id,
+                    "name": name,
+                    "machine_group": clean_text(entry.get("location")) or "Unknown / Review",
+                    "functional_location": clean_text(entry.get("location")),
+                    "criticality": clean_text(entry.get("criticality")) or "Unclassified",
+                    "asset_family": family_name,
+                    "asset_family_id": _pt_slug(family_name),
+                }
+            )
+
+    asset_profiles = build_all_asset_profiles(asset_rows)
+    _pt_augment_profiles_with_brand(asset_profiles, asset_rows)
+    family_payload = build_asset_family_profiles(asset_rows)
+    result = {
+        "assets": asset_rows,
+        "asset_lookup": {row["asset_id"]: row for row in asset_rows if row.get("asset_id")},
+        "asset_profiles": asset_profiles,
+        "family_profiles": family_payload["profiles"],
+        "family_lookup": family_payload["lookup"],
+        "family_rows": family_payload["rows"],
+    }
+    _PT_ASSET_CATALOG_CACHE["result"] = result
+    _PT_ASSET_CATALOG_CACHE["sig"] = sig
+    return result
+
+
+def join_spare_part_usage_to_mr_wo_if_available(records: list[dict]) -> list[str]:
+    errors: list[str] = []
+    try:
+        wo_lkp, asset_lkp = _pt_build_lookups(_pt_load_wo_records())
+        for rec in records:
+            matched = wo_lkp.get(rec.get("work_order_id")) or asset_lkp.get(rec.get("asset_id"))
+            if matched:
+                rec.update(_pt_extract_wo_fields(matched))
+                rec["link_status"] = "Linked"
+    except Exception as exc:
+        errors.append(f"Work order linking failed: {exc}")
+    return errors
+
+
+def _pt_alias_hit(text: str, aliases: list[str]) -> bool:
+    tokens = [tok for tok in normalize_spare_part_text(text).split() if tok]
+    if not tokens:
+        return False
+    for alias in aliases:
+        parts = [tok for tok in alias.split() if tok]
+        if not parts or len(parts) > len(tokens):
+            continue
+        for index in range(len(tokens) - len(parts) + 1):
+            if tokens[index:index + len(parts)] == parts:
+                return True
+    return False
+
+
+def _pt_refine_match_source(record: dict, profile: dict, match: dict, family_level: bool = False) -> str:
+    source = match.get("matchSource") or "Description / remarks match"
+    if family_level:
+        return "Asset family match"
+    if source == "Translated description match":
+        source = "Description / remarks match"
+    if source == "Description match":
+        tx_text = " ".join(
+            str(record.get(field) or "")
+            for field in ("original_description", "translated_description", "clean_description")
+        )
+        wo_text = " ".join(
+            str(record.get(field) or "")
+            for field in ("wo_description", "wo_translated_description")
+        )
+        aliases = profile.get("aliases") or []
+        if wo_text and _pt_alias_hit(wo_text, aliases) and not _pt_alias_hit(tx_text, aliases):
+            return "Related WO/MR description match"
+        return "Description / remarks match"
+    return source
+
+
+def classify_spare_part_consumption_record(record: dict, asset_catalog: dict) -> dict:
+    asset_lookup = asset_catalog.get("asset_lookup") or {}
+    family_lookup = asset_catalog.get("family_lookup") or {}
+    asset_matches = match_record_to_asset_profiles(
+        record,
+        asset_catalog.get("asset_profiles") or {},
+        {"include_related": True, "limit": 5},
+    )
+    family_matches = match_record_to_asset_profiles(
+        record,
+        asset_catalog.get("family_profiles") or {},
+        {"include_related": True, "limit": 5},
+    )
+
+    asset_match = asset_matches[0] if asset_matches else None
+    resolved_asset = asset_lookup.get(asset_match.get("matchedAssetId")) if asset_match else None
+    resolved_family = None
+    family_match = None
+
+    if resolved_asset:
+        resolved_family = family_lookup.get(resolved_asset.get("asset_family_id"))
+    elif family_matches:
+        family_match = family_matches[0]
+        resolved_family = family_lookup.get(family_match.get("matchedAssetId"))
+
+    match_source = ""
+    match_confidence = "Low"
+    possible_mismatch = False
+    if asset_match and resolved_asset:
+        asset_profile = (asset_catalog.get("asset_profiles") or {}).get(resolved_asset.get("asset_id")) or {}
+        match_source = _pt_refine_match_source(record, asset_profile, asset_match)
+        match_confidence = asset_match.get("confidence") or "Medium"
+        possible_mismatch = bool(asset_match.get("possibleAssetCodingMismatch"))
+    elif family_match and resolved_family:
+        family_profile = (asset_catalog.get("family_profiles") or {}).get(resolved_family.get("asset_family_id")) or {}
+        match_source = _pt_refine_match_source(record, family_profile, family_match, family_level=True)
+        match_confidence = family_match.get("confidence") or "Low"
+        possible_mismatch = bool(family_match.get("possibleAssetCodingMismatch"))
+
+    general_area = _pt_general_area_label(record)
+    machine_group = clean_text(
+        (resolved_asset or {}).get("machine_group")
+        or (resolved_family or {}).get("machine_group")
+        or record.get("equipment_type")
+    )
+    if not match_source:
+        if machine_group:
+            match_source = "Machine group match"
+        elif general_area:
+            match_source = "General area record"
+        else:
+            match_source = "Description / remarks match"
+
+    part_name = clean_text(record.get("translated_description") or record.get("clean_description") or record.get("original_description")) or "Unknown Part"
+    part_code = _pt_extract_part_code(record)
+    family_name = (
+        (resolved_asset or {}).get("asset_family")
+        or (resolved_family or {}).get("asset_family")
+        or ""
+    )
+    family_id = (
+        (resolved_asset or {}).get("asset_family_id")
+        or (resolved_family or {}).get("asset_family_id")
+        or ""
+    )
+
+    data_quality_flags = []
+    if general_area:
+        data_quality_flags.append("General area coded")
+    if possible_mismatch:
+        data_quality_flags.append("Possible asset coding mismatch")
+    if not clean_text(record.get("asset_id")):
+        data_quality_flags.append("Missing asset ID")
+    if not machine_group:
+        data_quality_flags.append("Missing machine group")
+    if not part_code and not part_name:
+        data_quality_flags.append("Missing part code")
+    if record.get("quantity_used") is None or record.get("total_consumption") is None:
+        data_quality_flags.append("Missing quantity/value")
+    if not data_quality_flags:
+        data_quality_flags = ["Valid"]
+
+    record_search_terms = [
+        clean_text(record.get("asset_id")),
+        clean_text(record.get("equipment_name")),
+        clean_text((resolved_asset or {}).get("asset_id")),
+        clean_text((resolved_asset or {}).get("name")),
+        family_name,
+        machine_group,
+        general_area or "",
+        part_code,
+        part_name,
+        clean_text(record.get("original_description")),
+        clean_text(record.get("translated_description")),
+        clean_text(record.get("wo_description")),
+        clean_text(record.get("wo_translated_description")),
+        clean_text(record.get("wo_location")),
+    ]
+    search_terms = sorted({term for term in record_search_terms if term})
+
+    return {
+        "resolved_asset_id": (resolved_asset or {}).get("asset_id") or "",
+        "resolved_asset_name": (resolved_asset or {}).get("name") or clean_text(record.get("equipment_name")) or clean_text(record.get("asset_id")),
+        "asset_family": family_name,
+        "asset_family_id": family_id,
+        "machine_group": machine_group,
+        "criticality": clean_text((resolved_asset or {}).get("criticality") or record.get("equipment_criticality")) or "Unclassified",
+        "general_area": general_area or "",
+        "part_code": part_code,
+        "part_name": part_name,
+        "match_source": match_source,
+        "match_confidence": match_confidence,
+        "possible_asset_coding_mismatch": possible_mismatch,
+        "is_direct_match": bool(resolved_asset and match_source == "Asset ID match" and not possible_mismatch),
+        "is_related_match": bool((resolved_asset or resolved_family) and not (resolved_asset and match_source == "Asset ID match" and not possible_mismatch)),
+        "data_quality_flags": data_quality_flags,
+        "primary_data_quality_flag": data_quality_flags[0] if data_quality_flags else "Valid",
+        "mr_wo_reference": clean_text(record.get("work_order_id") or record.get("wo_request_id")),
+        "search_text": " ".join(search_terms).lower(),
+        "search_terms": search_terms,
+        "consumption_keys": {
+            "asset": (resolved_asset or {}).get("asset_id") or "",
+            "asset_family": family_id or "",
+            "machine_group": _pt_slug(machine_group) if machine_group else "",
+            "general_area": _pt_slug(general_area) if general_area else "",
+            "part": _pt_slug(part_code or part_name),
+        },
+        "consumption_labels": {
+            "asset": (resolved_asset or {}).get("name") or clean_text(record.get("equipment_name")) or clean_text(record.get("asset_id")) or "Unresolved Asset",
+            "asset_family": family_name or "Unresolved Family",
+            "machine_group": machine_group or "Unclassified",
+            "general_area": general_area or "No General Area",
+            "part": part_name,
+        },
+    }
+
+
+def _new_consumption_group(view_mode: str, group_key: str, label: str) -> dict:
+    return {
+        "view_mode": view_mode,
+        "group_key": group_key,
+        "label": label,
+        "total_consumption": 0.0,
+        "total_qty": 0.0,
+        "line_count": 0,
+        "unique_parts": set(),
+        "asset_ids": set(),
+        "asset_labels": {},
+        "asset_families": set(),
+        "family_labels": {},
+        "machine_groups": set(),
+        "machine_group_labels": {},
+        "top_part_totals": defaultdict(float),
+        "top_part_labels": {},
+        "top_asset_totals": defaultdict(float),
+        "top_family_totals": defaultdict(float),
+        "top_group_totals": defaultdict(float),
+        "search_terms": set(),
+        "confidence_counts": Counter(),
+        "match_source_counts": Counter(),
+        "data_quality_counts": Counter(),
+        "direct_match_count": 0,
+        "related_match_count": 0,
+        "coding_mismatch_count": 0,
+        "general_area_count": 0,
+    }
+
+
+def _pt_top_label(counter_map: dict, label_map: dict) -> str:
+    if not counter_map:
+        return ""
+    top_key = max(counter_map, key=lambda key: (counter_map[key], label_map.get(key, key)))
+    return label_map.get(top_key, top_key)
+
+
+def _pt_group_match_quality(confidence_counts: Counter) -> str:
+    if confidence_counts.get("High"):
+        return "High"
+    if confidence_counts.get("Medium"):
+        return "Medium"
+    return "Low"
+
+
+def _aggregate_consumption_view(records: list[dict], view_mode: str) -> list[dict]:
+    groups: dict[str, dict] = {}
+    for record in records:
+        key = ((record.get("consumption_keys") or {}).get(view_mode) or "").strip()
+        label = ((record.get("consumption_labels") or {}).get(view_mode) or "").strip()
+        if not key or not label:
+            continue
+        bucket = groups.setdefault(key, _new_consumption_group(view_mode, key, label))
+        bucket["total_consumption"] += float(record.get("total_consumption") or 0)
+        bucket["total_qty"] += float(record.get("quantity_used") or 0)
+        bucket["line_count"] += 1
+        part_key = _pt_slug(record.get("part_code") or record.get("part_name"))
+        bucket["unique_parts"].add(part_key)
+        bucket["top_part_totals"][part_key] += float(record.get("total_consumption") or 0)
+        bucket["top_part_labels"][part_key] = record.get("part_name") or record.get("part_code") or "Unknown Part"
+
+        asset_id = record.get("resolved_asset_id") or ""
+        if asset_id:
+            bucket["asset_ids"].add(asset_id)
+            bucket["asset_labels"][asset_id] = record.get("resolved_asset_name") or asset_id
+            bucket["top_asset_totals"][asset_id] += float(record.get("total_consumption") or 0)
+
+        family_id = record.get("asset_family_id") or ""
+        if family_id:
+            bucket["asset_families"].add(family_id)
+            bucket["family_labels"][family_id] = record.get("asset_family") or family_id
+            bucket["top_family_totals"][family_id] += float(record.get("total_consumption") or 0)
+
+        machine_group = record.get("machine_group") or ""
+        if machine_group:
+            machine_group_key = _pt_slug(machine_group)
+            bucket["machine_groups"].add(machine_group_key)
+            bucket["machine_group_labels"][machine_group_key] = machine_group
+            bucket["top_group_totals"][machine_group_key] += float(record.get("total_consumption") or 0)
+
+        bucket["search_terms"].update(record.get("search_terms") or [])
+        bucket["confidence_counts"][record.get("match_confidence") or "Low"] += 1
+        bucket["match_source_counts"][record.get("match_source") or "Unknown"] += 1
+        for flag in record.get("data_quality_flags") or []:
+            if flag != "Valid":
+                bucket["data_quality_counts"][flag] += 1
+        if record.get("is_direct_match"):
+            bucket["direct_match_count"] += 1
+        if record.get("is_related_match"):
+            bucket["related_match_count"] += 1
+        if record.get("possible_asset_coding_mismatch"):
+            bucket["coding_mismatch_count"] += 1
+        if record.get("general_area"):
+            bucket["general_area_count"] += 1
+
+    rows = []
+    for key, bucket in groups.items():
+        top_part = _pt_top_label(bucket["top_part_totals"], bucket["top_part_labels"])
+        top_asset = _pt_top_label(bucket["top_asset_totals"], bucket["asset_labels"])
+        top_family = _pt_top_label(bucket["top_family_totals"], bucket["family_labels"])
+        top_group = _pt_top_label(bucket["top_group_totals"], bucket["machine_group_labels"])
+        row = {
+            "view_mode": view_mode,
+            "group_key": key,
+            "label": bucket["label"],
+            "total_consumption": round(bucket["total_consumption"], 2),
+            "total_qty": round(bucket["total_qty"], 2),
+            "line_count": bucket["line_count"],
+            "unique_parts_count": len(bucket["unique_parts"]),
+            "asset_count": len(bucket["asset_ids"]),
+            "asset_family_count": len(bucket["asset_families"]),
+            "machine_group_count": len(bucket["machine_groups"]),
+            "top_part": top_part,
+            "top_consuming_asset": top_asset,
+            "top_asset_family": top_family,
+            "top_machine_group": top_group,
+            "match_quality": _pt_group_match_quality(bucket["confidence_counts"]),
+            "direct_match_count": bucket["direct_match_count"],
+            "related_match_count": bucket["related_match_count"],
+            "coding_mismatch_count": bucket["coding_mismatch_count"],
+            "general_area_count": bucket["general_area_count"],
+            "data_quality_summary": "; ".join(
+                f"{label}: {count}"
+                for label, count in bucket["data_quality_counts"].most_common(3)
+            ),
+            "search_text": " ".join(sorted(bucket["search_terms"])).lower(),
+        }
+        if view_mode == "asset":
+            asset_criticality = next(
+                (
+                    record.get("criticality")
+                    for record in records
+                    if (record.get("consumption_keys") or {}).get("asset") == key
+                    and record.get("criticality")
+                ),
+                "Unclassified",
+            )
+            row.update(
+                {
+                    "asset_id": key,
+                    "equipment_name": bucket["label"],
+                    "asset_family": top_family or "",
+                    "machine_group": top_group or "",
+                    "criticality": asset_criticality,
+                    "equipment_criticality": asset_criticality,
+                }
+            )
+        elif view_mode == "asset_family":
+            row.update(
+                {
+                    "asset_family_id": key,
+                    "asset_family": bucket["label"],
+                    "machine_group": top_group or "",
+                    "assets_included": len(bucket["asset_ids"]),
+                }
+            )
+        elif view_mode == "machine_group":
+            row.update(
+                {
+                    "machine_group": bucket["label"],
+                }
+            )
+        elif view_mode == "general_area":
+            row.update(
+                {
+                    "general_area": bucket["label"],
+                    "top_related_asset": top_asset,
+                }
+            )
+        elif view_mode == "part":
+            row.update(
+                {
+                    "part_key": key,
+                    "part_code": next(
+                        (
+                            record.get("part_code")
+                            for record in records
+                            if (record.get("consumption_keys") or {}).get("part") == key
+                            and record.get("part_code")
+                        ),
+                        "",
+                    ),
+                    "part_name": bucket["label"],
+                }
+            )
+        rows.append(row)
+
+    return sorted(rows, key=lambda row: (-row["total_consumption"], row["label"]))
+
+
+def aggregate_consumption_by_asset(records: list[dict]) -> list[dict]:
+    return _aggregate_consumption_view(records, "asset")
+
+
+def aggregate_consumption_by_asset_family(records: list[dict]) -> list[dict]:
+    return _aggregate_consumption_view(records, "asset_family")
+
+
+def aggregate_consumption_by_machine_group(records: list[dict]) -> list[dict]:
+    return _aggregate_consumption_view(records, "machine_group")
+
+
+def aggregate_consumption_by_general_area(records: list[dict]) -> list[dict]:
+    return _aggregate_consumption_view(records, "general_area")
+
+
+def aggregate_consumption_by_part(records: list[dict]) -> list[dict]:
+    return _aggregate_consumption_view(records, "part")
+
+
+def get_spare_part_usage_drilldown(records: list[dict]) -> list[dict]:
+    return sorted(records, key=lambda row: (str(row.get("project_date") or ""), str(row.get("transaction_id") or "")), reverse=True)
+
+
+def search_spare_part_consumption_smart(rows: list[dict], query: str) -> list[dict]:
+    term = normalize_spare_part_text(query)
+    if not term:
+        return rows
+    return [row for row in rows if term in normalize_spare_part_text(row.get("search_text") or row.get("label") or "")]
 
 
 _COL_PROJECT = 1
@@ -2393,18 +3140,25 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
             "status": "missing",
             "error": "Project actual transactions file not uploaded",
             "transactions": [], "top_parts": [], "by_asset": [],
-            "manual_review": [], "summary": {}, "charts": {}, "errors": [],
+            "manual_review": [], "summary": {}, "charts": {}, "consumption_analysis": {}, "errors": [],
         }
 
     _PT_CACHE_V = 3  # bump to invalidate stale cache after code changes
     try:
-        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList_Edit.xlsx")
+        _al_sig = _file_signature(ASSET_MASTER_PATH)
         _wo_sig = _pt_work_order_sources_signature()
         current_mtime = (_PT_CACHE_V, _file_signature(path), _al_sig, _wo_sig)
         if _PT_CACHE["result"] is not None and _PT_CACHE["mtime"] == current_mtime:
             return _PT_CACHE["result"]
     except OSError:
         current_mtime = None
+
+    if current_mtime is not None:
+        persistent_cached = _read_persistent_payload_cache("project_transactions", current_mtime)
+        if persistent_cached is not None:
+            _PT_CACHE["result"] = persistent_cached
+            _PT_CACHE["mtime"] = current_mtime
+            return persistent_cached
 
     try:
         raw = _read_project_transactions_source_frame(path)
@@ -2413,7 +3167,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
             "status": "error",
             "error": f"Could not read file: {exc}",
             "transactions": [], "top_parts": [], "by_asset": [],
-            "manual_review": [], "summary": {}, "charts": {}, "errors": [str(exc)],
+            "manual_review": [], "summary": {}, "charts": {}, "consumption_analysis": {}, "errors": [str(exc)],
         }
 
     errors: list[str] = []
@@ -2478,6 +3232,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
         parse_status = "Review" if (not work_order_id and not asset_id) or quantity is None else "OK"
 
         records.append({
+            "record_uid": trans_id or f"pt-{len(records) + 1}",
             "project": project,
             "work_order_id": work_order_id,
             "asset_id": asset_id,
@@ -2503,6 +3258,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
             "equipment_name": "", "equipment_type": "",
             "equipment_criticality": "", "maintenance_type": "",
             "wo_actual_start": "", "wo_actual_end": "", "wo_severity": "",
+            "wo_request_id": "", "wo_description": "", "wo_translated_description": "", "wo_location": "",
         })
 
     if not records:
@@ -2510,21 +3266,12 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
             "status": "no_data",
             "error": "No spare part consumption rows found",
             "transactions": [], "top_parts": [], "by_asset": [],
-            "manual_review": [], "summary": {}, "charts": {}, "errors": errors,
+            "manual_review": [], "summary": {}, "charts": {}, "consumption_analysis": {}, "errors": errors,
         }
 
-    # Link to work order data
-    try:
-        wo_lkp, asset_lkp = _pt_build_lookups(_pt_load_wo_records())
-        for rec in records:
-            matched = wo_lkp.get(rec["work_order_id"]) or asset_lkp.get(rec["asset_id"])
-            if matched:
-                rec.update(_pt_extract_wo_fields(matched))
-                rec["link_status"] = "Linked"
-    except Exception as exc:
-        errors.append(f"Work order linking failed: {exc}")
+    errors.extend(join_spare_part_usage_to_mr_wo_if_available(records))
 
-    # Enrich equipment fields from AssetList_Edit.xlsx for any still-unlinked records
+    # Enrich equipment fields from Asset_Master.xlsx for any still-unlinked records
     try:
         al = _load_asset_list_lookup()
         for rec in records:
@@ -2540,15 +3287,24 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
     except Exception as exc:
         errors.append(f"Asset list enrichment failed: {exc}")
 
-    # Summary
+    asset_catalog = build_spare_part_asset_profiles()
+    for rec in records:
+        rec.update(classify_spare_part_consumption_record(rec, asset_catalog))
+        if not rec.get("equipment_name") and rec.get("resolved_asset_name"):
+            rec["equipment_name"] = rec["resolved_asset_name"]
+        if not rec.get("equipment_type") and rec.get("machine_group"):
+            rec["equipment_type"] = rec["machine_group"]
+        if not rec.get("equipment_criticality") and rec.get("criticality"):
+            rec["equipment_criticality"] = rec["criticality"]
+
     total_val = sum(r["total_consumption"] or 0 for r in records)
     unique_wo = len({r["work_order_id"] for r in records if r["work_order_id"]})
-    unique_assets = len({r["asset_id"] for r in records if r["asset_id"]})
-    unique_parts = len({r["clean_description"] for r in records if r["clean_description"]})
+    unique_assets = len({r["resolved_asset_id"] or r["asset_id"] for r in records if (r["resolved_asset_id"] or r["asset_id"])})
+    unique_parts = len({_pt_slug(r["part_code"] or r["part_name"]) for r in records if (r["part_code"] or r["part_name"])})
     thai_count = sum(1 for r in records if r["has_thai"])
     unlinked = sum(1 for r in records if r["link_status"] in ("Unlinked", "Work order data unavailable"))
+    coding_mismatches = sum(1 for r in records if r.get("possible_asset_coding_mismatch"))
 
-    # Monthly trend
     monthly: dict[str, float] = {}
     for r in records:
         mk = (r["project_date"] or "")[:7]
@@ -2556,139 +3312,155 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
             monthly[mk] = monthly.get(mk, 0) + (r["total_consumption"] or 0)
     monthly_trend = [{"month": k, "total": round(v, 2)} for k, v in sorted(monthly.items())]
 
-    # Aggregation by description
     by_desc: dict[str, dict] = {}
     for r in records:
-        k = r["clean_description"] or r["original_description"] or "Unknown"
-        if k not in by_desc:
-            by_desc[k] = {"description": k, "translated": r["translated_description"] or k,
-                          "category": r["item_category"], "total_consumption": 0.0,
-                          "total_qty": 0.0, "wo_ids": set(), "asset_ids": set(), "costs": [],
-                          "_asset_breakdown": {}}
-        by_desc[k]["total_consumption"] += r["total_consumption"] or 0
-        by_desc[k]["total_qty"] += r["quantity_used"] or 0
-        by_desc[k]["wo_ids"].add(r["work_order_id"])
-        by_desc[k]["asset_ids"].add(r["asset_id"])
-        if r["unit_cost_estimate"] is not None:
-            by_desc[k]["costs"].append(r["unit_cost_estimate"])
-        # Per-asset breakdown
-        ak = r["asset_id"] or ""
-        ab = by_desc[k]["_asset_breakdown"]
-        if ak not in ab:
-            ab[ak] = {"asset_id": ak, "equipment_name": r["equipment_name"] or "",
-                      "total_consumption": 0.0, "total_qty": 0.0, "wo_ids": set(), "project_ids": set()}
-        ab[ak]["total_consumption"] += r["total_consumption"] or 0
-        ab[ak]["total_qty"] += r["quantity_used"] or 0
+        part_key = _pt_slug(r.get("part_code") or r.get("part_name") or r.get("clean_description") or r.get("original_description"))
+        if part_key not in by_desc:
+            by_desc[part_key] = {
+                "description": r.get("part_name") or r.get("clean_description") or r.get("original_description") or "Unknown",
+                "translated": r.get("part_name") or r.get("translated_description") or r.get("clean_description") or "Unknown",
+                "part_code": r.get("part_code") or "",
+                "category": r["item_category"],
+                "total_consumption": 0.0,
+                "total_qty": 0.0,
+                "wo_ids": set(),
+                "asset_ids": set(),
+                "costs": [],
+                "_asset_breakdown": {},
+            }
+        by_desc[part_key]["total_consumption"] += r["total_consumption"] or 0
+        by_desc[part_key]["total_qty"] += r["quantity_used"] or 0
         if r["work_order_id"]:
-            ab[ak]["wo_ids"].add(r["work_order_id"])
-        if r.get("project_id"):
-            ab[ak]["project_ids"].add(r["project_id"])
-        if r["equipment_name"] and not ab[ak]["equipment_name"]:
-            ab[ak]["equipment_name"] = r["equipment_name"]
+            by_desc[part_key]["wo_ids"].add(r["work_order_id"])
+        if r["resolved_asset_id"] or r["asset_id"]:
+            by_desc[part_key]["asset_ids"].add(r["resolved_asset_id"] or r["asset_id"])
+        if r["unit_cost_estimate"] is not None:
+            by_desc[part_key]["costs"].append(r["unit_cost_estimate"])
+
+        asset_key = r["resolved_asset_id"] or r["asset_id"] or ""
+        asset_breakdown = by_desc[part_key]["_asset_breakdown"]
+        if asset_key not in asset_breakdown:
+            asset_breakdown[asset_key] = {
+                "asset_id": asset_key,
+                "equipment_name": r.get("resolved_asset_name") or r.get("equipment_name") or "",
+                "total_consumption": 0.0,
+                "total_qty": 0.0,
+                "wo_ids": set(),
+            }
+        asset_breakdown[asset_key]["total_consumption"] += r["total_consumption"] or 0
+        asset_breakdown[asset_key]["total_qty"] += r["quantity_used"] or 0
+        if r["work_order_id"]:
+            asset_breakdown[asset_key]["wo_ids"].add(r["work_order_id"])
+        if r.get("resolved_asset_name") and not asset_breakdown[asset_key]["equipment_name"]:
+            asset_breakdown[asset_key]["equipment_name"] = r["resolved_asset_name"]
 
     def _fin_ab(ab_raw: dict) -> list:
         result = []
-        for v in ab_raw.values():
-            wos = v["wo_ids"] - {""}
-            result.append({
-                "asset_id": v["asset_id"],
-                "equipment_name": v["equipment_name"] or v["asset_id"] or "Unknown",
-                "wo_count": len(wos),
-                "wo_ids": sorted(wos),
-                "total_qty": round(v["total_qty"], 2),
-                "total_consumption": round(v["total_consumption"], 2),
-            })
-        return sorted(result, key=lambda x: (-x["wo_count"], -x["total_consumption"]))
+        for value in ab_raw.values():
+            wos = value["wo_ids"] - {""}
+            result.append(
+                {
+                    "asset_id": value["asset_id"],
+                    "equipment_name": value["equipment_name"] or value["asset_id"] or "Unknown",
+                    "wo_count": len(wos),
+                    "wo_ids": sorted(wos),
+                    "total_qty": round(value["total_qty"], 2),
+                    "total_consumption": round(value["total_consumption"], 2),
+                }
+            )
+        return sorted(result, key=lambda row: (-row["wo_count"], -row["total_consumption"]))
 
     def _fin(item: dict) -> dict:
         costs = item.pop("costs", [])
         wos = item.pop("wo_ids", set())
         assets = item.pop("asset_ids", set())
         ab_raw = item.pop("_asset_breakdown", {})
-        return {**item, "wo_count": len(wos - {""}), "asset_count": len(assets - {""}),
-                "avg_unit_cost": round(sum(costs) / len(costs), 2) if costs else None,
-                "total_consumption": round(item["total_consumption"], 2),
-                "total_qty": round(item["total_qty"], 2),
-                "asset_breakdown": _fin_ab(ab_raw)}
+        return {
+            **item,
+            "wo_count": len(wos - {""}),
+            "asset_count": len(assets - {""}),
+            "avg_unit_cost": round(sum(costs) / len(costs), 2) if costs else None,
+            "total_consumption": round(item["total_consumption"], 2),
+            "total_qty": round(item["total_qty"], 2),
+            "asset_breakdown": _fin_ab(ab_raw),
+        }
 
-    all_parts = [_fin(dict(v)) for v in by_desc.values()]
-    top10_val = sorted(all_parts, key=lambda x: x["total_consumption"], reverse=True)[:10]
-    top10_qty = sorted(all_parts, key=lambda x: x["total_qty"], reverse=True)[:10]
-    by_part_asset = sorted(all_parts, key=lambda x: (-x["wo_count"], -x["total_consumption"]))
+    all_parts = [_fin(dict(value)) for value in by_desc.values()]
+    top10_val = sorted(all_parts, key=lambda row: row["total_consumption"], reverse=True)[:10]
+    top10_qty = sorted(all_parts, key=lambda row: row["total_qty"], reverse=True)[:10]
+    by_part_asset = sorted(all_parts, key=lambda row: (-row["wo_count"], -row["total_consumption"]))
 
-    # By asset
-    by_asset: dict[str, dict] = {}
-    for r in records:
-        k = r["asset_id"] or "Unknown"
-        if k not in by_asset:
-            by_asset[k] = {"asset_id": k, "equipment_name": r["equipment_name"],
-                           "equipment_type": r["equipment_type"],
-                           "equipment_criticality": r["equipment_criticality"],
-                           "total_consumption": 0.0, "total_qty": 0.0,
-                           "line_count": 0, "unique_parts": set(),
-                           "top_part": "", "top_part_val": 0.0}
-        # Fill in any still-empty equipment fields from later linked records
-        entry = by_asset[k]
-        if not entry["equipment_name"] and r["equipment_name"]:
-            entry["equipment_name"] = r["equipment_name"]
-        if not entry["equipment_criticality"] and r["equipment_criticality"]:
-            entry["equipment_criticality"] = r["equipment_criticality"]
-        if not entry["equipment_type"] and r["equipment_type"]:
-            entry["equipment_type"] = r["equipment_type"]
-        by_asset[k]["total_consumption"] += r["total_consumption"] or 0
-        by_asset[k]["total_qty"] += r["quantity_used"] or 0
-        by_asset[k]["line_count"] += 1
-        by_asset[k]["unique_parts"].add(r["clean_description"])
-        if (r["total_consumption"] or 0) > by_asset[k]["top_part_val"]:
-            by_asset[k]["top_part"] = r["clean_description"] or r["original_description"]
-            by_asset[k]["top_part_val"] = r["total_consumption"] or 0
+    asset_list = aggregate_consumption_by_asset(records)
+    family_list = aggregate_consumption_by_asset_family(records)
+    machine_group_list = aggregate_consumption_by_machine_group(records)
+    general_area_list = aggregate_consumption_by_general_area(records)
+    part_list = aggregate_consumption_by_part(records)
 
-    asset_list = [
-        {**{k: v for k, v in a.items() if k not in ("unique_parts", "top_part_val")},
-         "unique_parts_count": len(a["unique_parts"] - {""}),
-         "total_consumption": round(a["total_consumption"], 2),
-         "total_qty": round(a["total_qty"], 2)}
-        for a in sorted(by_asset.values(), key=lambda x: x["total_consumption"], reverse=True)
-    ]
-
-    # Category breakdown
     by_cat: dict[str, float] = {}
     for r in records:
         by_cat[r["item_category"]] = by_cat.get(r["item_category"], 0) + (r["total_consumption"] or 0)
     cat_total = sum(by_cat.values()) or 1
-    cat_breakdown = [{"category": k, "total": round(v, 2), "pct": round(v / cat_total * 100, 1)}
-                     for k, v in sorted(by_cat.items(), key=lambda x: x[1], reverse=True)]
+    cat_breakdown = [
+        {"category": key, "total": round(value, 2), "pct": round(value / cat_total * 100, 1)}
+        for key, value in sorted(by_cat.items(), key=lambda item: item[1], reverse=True)
+    ]
 
-    # Equipment type breakdown
-    by_eq: dict[str, float] = {}
+    by_machine_group: dict[str, float] = {}
     for r in records:
-        if r["equipment_type"]:
-            by_eq[r["equipment_type"]] = by_eq.get(r["equipment_type"], 0) + (r["total_consumption"] or 0)
-    eq_breakdown = [{"equipment_type": k, "total": round(v, 2)}
-                    for k, v in sorted(by_eq.items(), key=lambda x: x[1], reverse=True)]
+        if r.get("machine_group"):
+            by_machine_group[r["machine_group"]] = by_machine_group.get(r["machine_group"], 0) + (r["total_consumption"] or 0)
+    machine_group_breakdown = [
+        {"equipment_type": key, "total": round(value, 2)}
+        for key, value in sorted(by_machine_group.items(), key=lambda item: item[1], reverse=True)
+    ]
 
-    # Translation status
     trans_cnt: dict[str, int] = {}
     for r in records:
         trans_cnt[r["translation_status"]] = trans_cnt.get(r["translation_status"], 0) + 1
-    trans_breakdown = [{"status": k, "count": v} for k, v in trans_cnt.items()]
+    trans_breakdown = [{"status": key, "count": value} for key, value in trans_cnt.items()]
 
-    # Manual review
-    manual_review = [r for r in records if
-                     not r["work_order_id"] or not r["asset_id"]
-                     or r["quantity_used"] is None or r["parse_status"] == "Review"
-                     or r["translation_status"] == "Translation failed"
-                     or r["classification_confidence"] == "Low"
-                     or r["link_status"] in ("Unlinked", "Work order data unavailable")]
+    manual_review = [
+        r
+        for r in records
+        if any(flag != "Valid" for flag in (r.get("data_quality_flags") or []))
+        or r.get("match_confidence") == "Low"
+        or r["link_status"] in ("Unlinked", "Work order data unavailable")
+    ]
+
+    consumption_analysis = {
+        "filters": {
+            "view_modes": [
+                {"value": "asset", "label": "By Asset"},
+                {"value": "asset_family", "label": "By Asset Family"},
+                {"value": "machine_group", "label": "By Machine Group"},
+                {"value": "general_area", "label": "By General Area"},
+                {"value": "part", "label": "Part Relationship"},
+            ],
+            "asset_families": [row["asset_family"] for row in family_list if row.get("asset_family")],
+            "machine_groups": [row["machine_group"] for row in machine_group_list if row.get("machine_group")],
+            "general_areas": [row["general_area"] for row in general_area_list if row.get("general_area")],
+            "criticalities": sorted({row.get("equipment_criticality") for row in asset_list if row.get("equipment_criticality")}),
+            "match_qualities": ["High", "Medium", "Low"],
+        },
+        "records": get_spare_part_usage_drilldown(records),
+        "groups": {
+            "asset": asset_list,
+            "asset_family": family_list,
+            "machine_group": machine_group_list,
+            "general_area": general_area_list,
+            "part": part_list,
+        },
+    }
 
     result = {
         "status": "ok",
         "errors": errors,
         "transactions": records,
-        "top_parts": sorted(all_parts, key=lambda x: x["total_consumption"], reverse=True),
+        "top_parts": sorted(all_parts, key=lambda row: row["total_consumption"], reverse=True),
         "by_part_asset": by_part_asset,
         "by_asset": asset_list,
         "manual_review": manual_review[:300],
+        "consumption_analysis": consumption_analysis,
         "summary": {
             "total_consumption": round(total_val, 2),
             "transaction_lines": len(records),
@@ -2697,22 +3469,31 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
             "unique_spare_parts": unique_parts,
             "thai_description_count": thai_count,
             "unlinked_count": unlinked,
+            "coding_mismatch_count": coding_mismatches,
             "avg_consumption_per_wo": round(total_val / unique_wo, 2) if unique_wo else 0,
         },
         "charts": {
             "monthly_trend": monthly_trend,
             "top10_by_value": top10_val,
-            "top10_by_qty": [{"description": x["description"], "translated": x["translated"],
-                               "category": x["category"], "total_qty": x["total_qty"]}
-                              for x in top10_qty],
+            "top10_by_qty": [
+                {
+                    "description": row["description"],
+                    "translated": row["translated"],
+                    "category": row["category"],
+                    "total_qty": row["total_qty"],
+                }
+                for row in top10_qty
+            ],
             "by_asset": asset_list[:30],
             "category_breakdown": cat_breakdown,
-            "equipment_type_breakdown": eq_breakdown,
+            "equipment_type_breakdown": machine_group_breakdown,
             "translation_status": trans_breakdown,
         },
     }
     _PT_CACHE["result"] = result
     _PT_CACHE["mtime"] = current_mtime
+    if current_mtime is not None:
+        _write_persistent_payload_cache("project_transactions", current_mtime, result)
     return result
 
 
@@ -2756,6 +3537,21 @@ def _project_transactions_all_years_records_from_path(path: Path) -> tuple[list[
 
 
 # ── All-Years CSV Transactions Parser ────────────────────────────────────────
+
+# Financial year starts in April (month 4). FY label = the calendar year in which
+# the financial year ENDS, e.g. Apr 2025 → Mar 2026 is "FY2026".
+FY_START_MONTH = 4
+
+
+def _fiscal_year(year: int, month: int) -> int:
+    """Map a calendar (year, month) to its financial-year label."""
+    return year + 1 if month >= FY_START_MONTH else year
+
+
+def _fy_span_label(fy: int) -> str:
+    """Human-readable FY span, e.g. 'Apr 2025 to Mar 2026' for fy=2026."""
+    return f"Apr {fy - 1} to Mar {fy}"
+
 
 # CSV column layout (0-indexed, after skipping textbox header rows)
 _CSV_COL_DATE = 20
@@ -2802,9 +3598,9 @@ def build_all_years_transactions_payload() -> dict:
             "category_by_year": {}, "top_parts_by_year": {}, "errors": [],
         }
 
-    _AY_CACHE_V = 2  # bump to invalidate stale cache after code changes
+    _AY_CACHE_V = 3  # bump to invalidate stale cache after code changes (now FY-keyed)
     try:
-        _al_sig = _file_signature(DEFAULT_DATA_DIR / "AssetList_Edit.xlsx")
+        _al_sig = _file_signature(ASSET_MASTER_PATH)
         _wo_sig = _pt_work_order_sources_signature()
         current_mtime = (
             _AY_CACHE_V,
@@ -2817,6 +3613,13 @@ def build_all_years_transactions_payload() -> dict:
             return _AY_CACHE["result"]
     except OSError:
         current_mtime = None
+
+    if current_mtime is not None:
+        persistent_cached = _read_persistent_payload_cache("project_transactions_all", current_mtime)
+        if persistent_cached is not None:
+            _AY_CACHE["result"] = persistent_cached
+            _AY_CACHE["mtime"] = current_mtime
+            return persistent_cached
 
     raw_rows = []
     if CSV_ALL_YEARS_PATH.exists():
@@ -2954,7 +3757,7 @@ def build_all_years_transactions_payload() -> dict:
     except Exception as exc:
         errors.append(f"WO linking failed: {exc}")
 
-    # Enrich equipment fields from AssetList_Edit.xlsx for any still-unlinked records
+    # Enrich equipment fields from Asset_Master.xlsx for any still-unlinked records
     try:
         al = _load_asset_list_lookup()
         for rec in records:
@@ -2968,15 +3771,24 @@ def build_all_years_transactions_payload() -> dict:
     except Exception as exc:
         errors.append(f"Asset list enrichment failed: {exc}")
 
-    years = sorted({r["year"] for r in records})
+    # Attach financial-year label to every record (calendar year/month preserved).
+    for r in records:
+        mo = int(r["month"][5:7]) if r.get("month") else 1
+        r["fy"] = _fiscal_year(r["year"], mo)
 
-    # Per-year summary
+    # "years" is the financial-year axis used by the consumption charts/tabs.
+    years = sorted({r["fy"] for r in records})
+
+    # Per-FY summary
     yearly_summary = []
     for yr in years:
-        yr_rows = [r for r in records if r["year"] == yr]
+        yr_rows = [r for r in records if r["fy"] == yr]
         total = sum(r["total_consumption"] or 0 for r in yr_rows)
         yearly_summary.append({
             "year": yr,
+            "fy": yr,
+            "fy_label": f"FY{yr}",
+            "fy_span": _fy_span_label(yr),
             "total_consumption": round(total, 2),
             "transaction_lines": len(yr_rows),
             "unique_assets": len({r["asset_id"] for r in yr_rows if r["asset_id"]}),
@@ -2984,22 +3796,23 @@ def build_all_years_transactions_payload() -> dict:
             "unique_parts": len({r["clean_description"] for r in yr_rows if r["clean_description"]}),
         })
 
-    # Monthly trend per year: {year: [{month, total}]}
+    # Monthly trend per FY: {fy: [{month, total}]} — month stays 'YYYY-MM';
+    # the frontend orders the axis Apr→Mar.
     monthly_by_year: dict[str, list] = {}
     for yr in years:
         monthly: dict[str, float] = {}
         for r in records:
-            if r["year"] == yr and r["month"]:
+            if r["fy"] == yr and r["month"]:
                 monthly[r["month"]] = monthly.get(r["month"], 0) + (r["total_consumption"] or 0)
         monthly_by_year[str(yr)] = [{"month": k, "total": round(v, 2)}
                                      for k, v in sorted(monthly.items())]
 
-    # Category breakdown per year: {year: [{category, total, pct}]}
+    # Category breakdown per FY: {fy: [{category, total, pct}]}
     category_by_year: dict[str, list] = {}
     for yr in years:
         by_cat: dict[str, float] = {}
         for r in records:
-            if r["year"] == yr:
+            if r["fy"] == yr:
                 by_cat[r["item_category"]] = by_cat.get(r["item_category"], 0) + (r["total_consumption"] or 0)
         cat_total = sum(by_cat.values()) or 1
         category_by_year[str(yr)] = [
@@ -3007,12 +3820,12 @@ def build_all_years_transactions_payload() -> dict:
             for k, v in sorted(by_cat.items(), key=lambda x: x[1], reverse=True)
         ]
 
-    # Parts per year with full aggregation
+    # Parts per FY with full aggregation
     top_parts_by_year: dict[str, list] = {}
     for yr in years:
         by_desc: dict[str, dict] = {}
         for r in records:
-            if r["year"] != yr:
+            if r["fy"] != yr:
                 continue
             k = r["clean_description"] or r["original_description"] or "Unknown"
             if k not in by_desc:
@@ -3045,19 +3858,29 @@ def build_all_years_transactions_payload() -> dict:
             for v in sorted(by_desc.values(), key=lambda x: x["total"], reverse=True)
         ]
 
-    # YoY growth between consecutive years
+    # Year-over-year consumption change between consecutive years.
+    # (Consumption rising is not necessarily good, so this is "consumption %", not "growth".)
     yoy_growth = []
     for i in range(1, len(yearly_summary)):
         prev = yearly_summary[i - 1]
         curr = yearly_summary[i]
-        prev_total = prev["total_consumption"] or 1
-        growth = round((curr["total_consumption"] - prev_total) / prev_total * 100, 1)
-        yoy_growth.append({"from": prev["year"], "to": curr["year"], "growth_pct": growth})
+        prev_total = prev["total_consumption"]
+        diff = round(curr["total_consumption"] - (prev_total or 0), 2)
+        if not prev_total:
+            # Previous FY had no consumption — % is undefined; show as "New".
+            yoy_growth.append({"from": prev["year"], "to": curr["year"], "growth_pct": None,
+                               "consumption_pct": None, "consumption_diff": diff, "label": "New"})
+        else:
+            pct = round(diff / prev_total * 100, 1)
+            yoy_growth.append({"from": prev["year"], "to": curr["year"], "growth_pct": pct,
+                               "consumption_pct": pct, "consumption_diff": diff,
+                               "label": f"{'+' if pct > 0 else ''}{pct}%"})
 
     result = {
         "status": "ok",
         "errors": errors,
         "years": years,
+        "fy_start_month": FY_START_MONTH,
         "total_records": len(records),
         "yearly_summary": yearly_summary,
         "monthly_by_year": monthly_by_year,
@@ -3068,6 +3891,7 @@ def build_all_years_transactions_payload() -> dict:
             {
                 "project_date": r["project_date"],
                 "year": r["year"],
+                "fy": r["fy"],
                 "month": r["month"],
                 "transaction_id": r["transaction_id"],
                 "work_order_id": r["work_order_id"],
@@ -3087,6 +3911,8 @@ def build_all_years_transactions_payload() -> dict:
     }
     _AY_CACHE["result"] = result
     _AY_CACHE["mtime"] = current_mtime
+    if current_mtime is not None:
+        _write_persistent_payload_cache("project_transactions_all", current_mtime, result)
     return result
 
 
@@ -3148,18 +3974,93 @@ _TYPE_CLEAN = {"Expent  cost": "Expent Cost", "CAPEX  (Budget)": "CAPEX Budget",
                "CAPEX  (Unbudget)": "CAPEX Unbudget"}
 
 
+# Manual Thai → English glossary for common spare-part descriptions appearing in
+# the Gen PO data. Used as a final fallback after the automatic translator so
+# users always see English in the dashboard.
+_EPO_THAI_GLOSSARY = {
+    "กระสอบ": "Sack/Bag",
+    "ข้อต่อตรง": "Straight connector",
+    "แคล้มก้ามปูยึดท่อ": "Pipe clamp",
+    "อุปกรณ์ทองแดง": "Copper fittings",
+    "หลอดไฟฟลูออเรสเซนต์": "Fluorescent lamp",
+    "เกลือล้างเรซิน": "Resin cleaning salt",
+    "ถ้วยเซรามิก": "Ceramic cup/nozzle",
+    "ลวดป้อนอาร์กอน": "Argon welding wire",
+    "รีแพร์แคล้ม": "Repair clamp",
+    "เคเบิ้ลไทร์": "Cable tie",
+    "สายยางผ้าใบ": "Reinforced rubber hose",
+}
+
+
+_SERVICE_KEYWORDS = (
+    "labour", "labor", "service", "transport", "cleaning", "civil",
+    "annual", "admin", "safety", "ppe",
+)
+
+
+def _epo_apply_thai_glossary(text: str) -> str:
+    """Substitute known Thai phrases with English equivalents."""
+    if not text:
+        return text
+    out = text
+    for thai, eng in _EPO_THAI_GLOSSARY.items():
+        if thai in out:
+            out = out.replace(thai, eng)
+    return out
+
+
+def _epo_classify_item(item_number: str, description: str, group_of_cost: str) -> str:
+    """Classify a Gen PO line as Stock, Non-Stock, or Service.
+
+    Rules:
+      • Item number starts with SFST34            → Stock (inventory)
+      • Item number starts with SFST81 / SFST82   → Non-Stock (externally bought)
+      • Description / group contains service kws  → Service
+      • Otherwise                                 → Other
+    """
+    code = (item_number or "").strip().upper()
+    if code.startswith("SFST34"):
+        return "Stock"
+    if code.startswith("SFST81") or code.startswith("SFST82"):
+        return "Non-Stock"
+    haystack = f"{description or ''} {group_of_cost or ''}".lower()
+    if any(kw in haystack for kw in _SERVICE_KEYWORDS):
+        return "Service"
+    return "Other"
+
+
+def _epo_parse_int_days(raw) -> int | None:
+    if raw is None:
+        return None
+    s = str(raw).strip().replace(",", "")
+    if not s or s.lower() == "nan":
+        return None
+    try:
+        return int(float(s))
+    except ValueError:
+        return None
+
+
 def build_external_po_payload() -> dict:
     data_dir_path = Path(__file__).resolve().parent.parent / "data"
     future_paths, _ = _resolve_future_sources(data_dir_path)
     path = future_paths.get("po_list") or GEN_PO_SPARE_PARTS_PATH
     if not path or not path.exists():
         return {"status": "missing", "records": [], "summary": {}, "data_quality": [], "filters": {}}
+    _EPO_CACHE_V = 1
     try:
-        current_mtime = path.stat().st_mtime
+        current_mtime = (_EPO_CACHE_V, _file_signature(path))
         if _EPO_CACHE["result"] is not None and _EPO_CACHE["mtime"] == current_mtime:
             return _EPO_CACHE["result"]
     except OSError:
         current_mtime = None
+
+    if current_mtime is not None:
+        persistent_cached = _read_persistent_payload_cache("external_po", current_mtime)
+        if persistent_cached is not None:
+            _EPO_CACHE["result"] = persistent_cached
+            _EPO_CACHE["mtime"] = current_mtime
+            return persistent_cached
 
     try:
         df = pd.read_excel(path, sheet_name="Gen PO in D365 Rev.01", dtype=str)
@@ -3185,6 +4086,9 @@ def build_external_po_payload() -> dict:
                     desc_out = t
             except Exception:
                 pass
+        # Final pass over the manual glossary to catch any phrases the
+        # automatic translator missed.
+        desc_out = _epo_apply_thai_glossary(desc_out)
 
         group_raw = _epo_col(row, "Group of cost")
         has_thai_group = bool(_THAI_RE.search(group_raw))
@@ -3196,6 +4100,7 @@ def build_external_po_payload() -> dict:
                     group_out = t
             except Exception:
                 pass
+        group_out = _epo_apply_thai_glossary(group_out)
 
         type_raw = _epo_col(row, "Type of cost")
         type_clean = _TYPE_CLEAN.get(type_raw, type_raw.strip()) if type_raw else ""
@@ -3205,11 +4110,49 @@ def build_external_po_payload() -> dict:
         vendor_clean = re.sub(r"^V\d+\s*-\s*", "", vendor_raw).strip() if vendor_raw else ""
 
         grn_no = _epo_col(row, "GRN No.")
+        item_number = _epo_col(row, "Item number")
+
+        lead_time_days = _epo_parse_int_days(_epo_col(row, "Lead time delivery (day)"))
+        actual_lead_days = _epo_parse_int_days(_epo_col(row, "GRN-PO date (Day)"))
+        status_text = _epo_col(row, "PR PO GRN Status").strip()
+        kpi_text = _epo_col(row, "KPI Status").strip()
+
+        is_pending = "waitting" in status_text.lower() or "waiting" in status_text.lower()
+        delay_days: int | None = None
+        delivery_flag = "Pending"
+        if not is_pending and actual_lead_days is not None and lead_time_days is not None:
+            diff = actual_lead_days - lead_time_days
+            if diff <= 0:
+                delivery_flag = "Ontime"
+                delay_days = 0
+            else:
+                delivery_flag = "Delayed"
+                delay_days = diff
+        elif not is_pending and kpi_text:
+            delivery_flag = "Ontime" if "ontime" in kpi_text.lower() else "Delayed"
+            delay_days = 0 if delivery_flag == "Ontime" else None
+
+        classification = _epo_classify_item(item_number, desc_out, group_out)
+        total_price_val = _epo_parse_float(_epo_col(row, "Total price"))
+
+        # Per-row badge flags surfaced in the dashboard (matches user spec)
+        row_flags: list[str] = []
+        if delivery_flag == "Delayed":
+            row_flags.append("delayed")
+        if delivery_flag == "Pending":
+            row_flags.append("pending")
+        if lead_time_days is not None and lead_time_days > 60:
+            row_flags.append("long_lead")
+        if total_price_val is not None and total_price_val > 50000:
+            row_flags.append("high_value")
+        if has_thai_desc:
+            row_flags.append("thai_desc")
 
         records.append({
             "pr_no": pr_no,
             "po_no": po_no,
             "grn_no": grn_no,
+            "item_number": item_number,
             "description_raw": desc_raw,
             "description": desc_out,
             "has_thai": has_thai_desc,
@@ -3220,17 +4163,22 @@ def build_external_po_payload() -> dict:
             "qty": _epo_parse_float(_epo_col(row, "Qty'")),
             "unit": _epo_norm_unit(_epo_col(row, "Unit")),
             "price_unit": _epo_parse_float(_epo_col(row, "Price/Unit")),
-            "total_price": _epo_parse_float(_epo_col(row, "Total price")),
+            "total_price": total_price_val,
             "vendor": vendor_clean,
             "vendor_raw": vendor_raw,
-            "status": _epo_col(row, "PR PO GRN Status").strip(),
+            "status": status_text,
             "date_pr": _epo_parse_date(_epo_col(row, "DMY Create PR")),
             "date_po": _epo_parse_date(_epo_col(row, "Date Gen PO")),
             "date_grn": _epo_parse_date(_epo_col(row, "Date recive bill")),
-            "lead_time": _epo_col(row, "Lead time delivery (day)"),
-            "actual_lead": _epo_col(row, "GRN-PO date"),
-            "kpi": _epo_col(row, "KPI Status").strip(),
+            "lead_time": lead_time_days,
+            "actual_lead": actual_lead_days,
+            "kpi": kpi_text,
             "note": _epo_col(row, "Note"),
+            "classification": classification,
+            "delivery_flag": delivery_flag,
+            "delay_days": delay_days,
+            "is_pending": is_pending,
+            "row_flags": row_flags,
         })
 
     # ── Summary ────────────────────────────────────────────────────────────────
@@ -3286,6 +4234,125 @@ def build_external_po_payload() -> dict:
         if quality_by_rule[rule_id]
     ]
 
+    # ── Supplier Delivery KPI dashboard analytics ──────────────────────────────
+    delivered = [r for r in records if r["delivery_flag"] in ("Ontime", "Delayed")]
+    on_time_rows = [r for r in delivered if r["delivery_flag"] == "Ontime"]
+    delayed_rows = [r for r in delivered if r["delivery_flag"] == "Delayed"]
+    pending_rows = [r for r in records if r["delivery_flag"] == "Pending"]
+    on_time_rate = round(len(on_time_rows) / len(delivered) * 100, 1) if delivered else 0.0
+    avg_delay = (
+        round(sum(r["delay_days"] for r in delayed_rows if r["delay_days"] is not None) / len(delayed_rows), 1)
+        if delayed_rows else 0.0
+    )
+
+    # ── Supplier performance aggregation ───────────────────────────────────────
+    from collections import defaultdict
+    sup_agg: dict[str, dict] = defaultdict(lambda: {
+        "total_pos": 0, "on_time": 0, "delayed": 0, "pending": 0,
+        "delay_days_sum": 0, "delay_count": 0, "spend": 0.0,
+    })
+    for r in records:
+        vendor_key = r["vendor"] or "Unknown"
+        s = sup_agg[vendor_key]
+        s["total_pos"] += 1
+        s["spend"] += r["total_price"] or 0
+        flag = r["delivery_flag"]
+        if flag == "Ontime":
+            s["on_time"] += 1
+        elif flag == "Delayed":
+            s["delayed"] += 1
+            if r["delay_days"] is not None:
+                s["delay_days_sum"] += r["delay_days"]
+                s["delay_count"] += 1
+        elif flag == "Pending":
+            s["pending"] += 1
+
+    supplier_performance = []
+    for vendor, s in sup_agg.items():
+        evaluated = s["on_time"] + s["delayed"]
+        rate = round(s["on_time"] / evaluated * 100, 1) if evaluated else None
+        avg_d = round(s["delay_days_sum"] / s["delay_count"], 1) if s["delay_count"] else 0.0
+        supplier_performance.append({
+            "vendor": vendor,
+            "total_pos": s["total_pos"],
+            "on_time": s["on_time"],
+            "delayed": s["delayed"],
+            "pending": s["pending"],
+            "avg_delay": avg_d,
+            "on_time_rate": rate,
+            "spend": round(s["spend"], 2),
+        })
+    supplier_performance.sort(key=lambda x: -x["spend"])
+
+    # ── Category analysis (Stock vs Non-Stock parts) ───────────────────────────
+    cat_agg: dict[str, dict] = defaultdict(lambda: {
+        "count": 0, "spend": 0.0, "on_time": 0, "delayed": 0,
+    })
+    for r in records:
+        c = cat_agg[r["classification"]]
+        c["count"] += 1
+        c["spend"] += r["total_price"] or 0
+        if r["delivery_flag"] == "Ontime":
+            c["on_time"] += 1
+        elif r["delivery_flag"] == "Delayed":
+            c["delayed"] += 1
+    category_summary = []
+    for cls in ("Stock", "Non-Stock", "Service", "Other"):
+        if cls not in cat_agg:
+            continue
+        c = cat_agg[cls]
+        evaluated = c["on_time"] + c["delayed"]
+        rate = round(c["on_time"] / evaluated * 100, 1) if evaluated else None
+        category_summary.append({
+            "classification": cls,
+            "count": c["count"],
+            "spend": round(c["spend"], 2),
+            "on_time_rate": rate,
+        })
+
+    # ── Services breakdown by Group of cost ────────────────────────────────────
+    services_by_group: dict[str, dict] = defaultdict(lambda: {
+        "count": 0, "spend": 0.0, "on_time": 0, "delayed": 0,
+    })
+    for r in records:
+        if r["classification"] != "Service":
+            continue
+        g = r["group_of_cost"] or "Unclassified"
+        bucket = services_by_group[g]
+        bucket["count"] += 1
+        bucket["spend"] += r["total_price"] or 0
+        if r["delivery_flag"] == "Ontime":
+            bucket["on_time"] += 1
+        elif r["delivery_flag"] == "Delayed":
+            bucket["delayed"] += 1
+    service_groups = []
+    for g, b in services_by_group.items():
+        evaluated = b["on_time"] + b["delayed"]
+        rate = round(b["on_time"] / evaluated * 100, 1) if evaluated else None
+        service_groups.append({
+            "group": g, "count": b["count"], "spend": round(b["spend"], 2),
+            "on_time_rate": rate,
+        })
+    service_groups.sort(key=lambda x: -x["spend"])
+
+    # ── Monthly spend trend (by PO date) ───────────────────────────────────────
+    monthly: dict[str, float] = defaultdict(float)
+    for r in records:
+        d = r["date_po"]
+        if not d or len(d) < 7:
+            continue
+        monthly[d[:7]] += r["total_price"] or 0
+    monthly_trend = [
+        {"month": k, "spend": round(v, 2)}
+        for k, v in sorted(monthly.items())
+    ]
+
+    # ── Top 10 vendors by spend ────────────────────────────────────────────────
+    top_vendors = sorted(
+        ({"vendor": v, "spend": round(s["spend"], 2)} for v, s in sup_agg.items()),
+        key=lambda x: -x["spend"],
+    )[:10]
+
     # ── Filters ────────────────────────────────────────────────────────────────
     result = {
         "status": "ok",
@@ -3301,7 +4368,18 @@ def build_external_po_payload() -> dict:
             "awaiting_delivery": awaiting,
             "over_delivery_rate": over_rate,
             "total_flagged": total_flagged,
+            "on_time_count": len(on_time_rows),
+            "delayed_count": len(delayed_rows),
+            "pending_count": len(pending_rows),
+            "evaluated_count": len(delivered),
+            "on_time_rate": on_time_rate,
+            "avg_delay_days": avg_delay,
         },
+        "supplier_performance": supplier_performance,
+        "category_summary": category_summary,
+        "service_groups": service_groups,
+        "monthly_trend": monthly_trend,
+        "top_vendors": top_vendors,
         "data_quality": data_quality,
         "filters": {
             "types_of_cost": sorted({r["type_of_cost"] for r in records if r["type_of_cost"]}),
@@ -3309,11 +4387,1005 @@ def build_external_po_payload() -> dict:
             "statuses": sorted({r["status"] for r in records if r["status"]}),
             "vendors": sorted({r["vendor"] for r in records if r["vendor"]}),
             "machines": sorted({r["pd_machine"] for r in records if r["pd_machine"]}),
+            "classifications": sorted({r["classification"] for r in records if r["classification"]}),
+            "delivery_flags": ["Ontime", "Delayed", "Pending"],
         },
     }
     _EPO_CACHE["result"] = result
     _EPO_CACHE["mtime"] = current_mtime
+    if current_mtime is not None:
+        _write_persistent_payload_cache("external_po", current_mtime, result)
     return result
+
+
+def _asset_intel_bool(value, default=False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _asset_intel_date_in_range(value, date_from=None, date_to=None) -> bool:
+    date_value = _date_iso(value) or clean_text(value)
+    if not date_value:
+        return True
+    if date_from and date_value[:10] < str(date_from)[:10]:
+        return False
+    if date_to and date_value[:10] > str(date_to)[:10]:
+        return False
+    return True
+
+
+def _asset_intel_safe_float(value) -> float:
+    try:
+        if value is None or value == "":
+            return 0.0
+        numeric = float(value)
+        if math.isnan(numeric):
+            return 0.0
+        return numeric
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _asset_intel_unique(values) -> list[str]:
+    return sorted({clean_text(value) for value in values if clean_text(value)})
+
+
+def _asset_intel_slug(text: str) -> str:
+    return _pt_slug(text)
+
+
+def _asset_intel_text(row: dict, *keys: str) -> str:
+    if not keys:
+        keys = tuple(row.keys())
+    return " ".join(clean_text(row.get(key)) for key in keys if clean_text(row.get(key)))
+
+
+def _asset_intel_confidence_rank(value: str) -> int:
+    return {"High": 3, "Medium": 2, "Low": 1}.get(clean_text(value), 0)
+
+
+def _asset_intel_options(asset_catalog: dict, spare_payload: dict | None = None, pt_payload: dict | None = None) -> dict:
+    spare_payload = spare_payload or {}
+    pt_payload = pt_payload or {}
+    asset_rows = asset_catalog.get("assets") or []
+    po_rows = spare_payload.get("po_classification", {}).get("records") or []
+    pt_filters = pt_payload.get("consumption_analysis", {}).get("filters") or {}
+    return {
+        "assets": [
+            {
+                "asset_id": row.get("asset_id"),
+                "asset_name": row.get("name"),
+                "asset_family": row.get("asset_family"),
+                "machine_group": row.get("machine_group"),
+            }
+            for row in asset_rows[:500]
+        ],
+        "asset_families": _asset_intel_unique(
+            [row.get("asset_family") for row in asset_catalog.get("family_rows") or []]
+            or pt_filters.get("asset_families")
+            or []
+        ),
+        "machine_groups": _asset_intel_unique(
+            [row.get("machine_group") for row in asset_rows]
+            + list(pt_filters.get("machine_groups") or [])
+        ),
+        "suppliers": _asset_intel_unique(row.get("vendor_name") or row.get("supplier") for row in po_rows),
+    }
+
+
+def _asset_intel_profile_aliases(profile: dict | None) -> list[str]:
+    if not profile:
+        return []
+    aliases = []
+    for alias in profile.get("aliases") or []:
+        clean_alias = clean_text(alias)
+        if clean_alias:
+            aliases.append(clean_alias)
+    return aliases[:30]
+
+
+def _asset_intel_match_source_for_context(match: dict, context: str, record: dict | None = None) -> str:
+    source = clean_text((match or {}).get("matchSource")) or "Description match"
+    if context == "po":
+        if source in {"Description match", "Translated description match", "Related keyword match"}:
+            return "PO description match"
+        if source == "Asset name match" and clean_text((record or {}).get("pd_machine")):
+            return "PO asset / machine match"
+    if context == "store":
+        if source in {"Description match", "Translated description match"}:
+            if clean_text((record or {}).get("wo_description") or (record or {}).get("wo_translated_description")):
+                return "Related WO/MR match"
+            return "Store transaction match"
+    if context == "work_order" and source == "Related keyword match":
+        return "Description match"
+    if source == "Description match" and context == "work_order":
+        return "Description match"
+    if source == "Translated description match" and context == "work_order":
+        return "Translated description match"
+    return source
+
+
+def _asset_intel_general_area_or_missing(asset_id: str) -> bool:
+    return not clean_text(asset_id) or _pt_is_general_area_value(asset_id)
+
+
+def _asset_intel_data_quality_flags(record: dict, match: dict | None, source: str, context: str) -> list[str]:
+    flags: list[str] = []
+    asset_id = clean_text(record.get("asset_id") or record.get("recorded_asset_id"))
+    if not asset_id:
+        flags.append("Missing asset ID")
+    elif _pt_is_general_area_value(asset_id):
+        flags.append("General area coded")
+    if (match or {}).get("possibleAssetCodingMismatch") or record.get("possible_asset_coding_mismatch"):
+        flags.append("Possible asset coding mismatch")
+    if source in {"Description match", "Translated description match", "PO description match", "Store transaction match", "Related WO/MR match"}:
+        flags.append("Found through description")
+    if context == "store" and not clean_text(record.get("work_order_id") or record.get("wo_request_id")):
+        flags.append("No linked WO/MR reference")
+    if context == "po" and not clean_text(record.get("code")):
+        flags.append("Missing part code")
+    return list(dict.fromkeys(flags)) or ["Direct match"]
+
+
+def _asset_intel_public_flag(flags: list[str]) -> str:
+    public = [flag for flag in flags if flag and flag != "Direct match"]
+    return "; ".join(public[:3]) if public else "Direct match"
+
+
+def _asset_intel_status_group(status: str) -> str:
+    text = normalize_spare_part_text(status)
+    if any(token in text for token in ("finish", "finished", "confirm", "confirmed", "complete", "completed", "closed", "ended")):
+        return "finished"
+    if any(token in text for token in ("open", "progress", "started", "pending", "created", "active", "scheduled")):
+        return "open"
+    return "other"
+
+
+def _asset_intel_part_key(*values) -> str:
+    for value in values:
+        text = normalize_spare_part_text(value)
+        if text:
+            return text
+    return ""
+
+
+def _asset_intel_build_target(
+    query: str | None = None,
+    asset_id: str | None = None,
+    asset_name: str | None = None,
+    asset_family: str | None = None,
+    machine_group: str | None = None,
+    asset_catalog: dict | None = None,
+) -> dict:
+    asset_catalog = asset_catalog or build_spare_part_asset_profiles()
+    asset_lookup = asset_catalog.get("asset_lookup") or {}
+    asset_profiles = asset_catalog.get("asset_profiles") or {}
+    family_lookup = asset_catalog.get("family_lookup") or {}
+    family_profiles = asset_catalog.get("family_profiles") or {}
+    asset_rows = asset_catalog.get("assets") or []
+
+    query_text = clean_text(query or asset_name or asset_id or asset_family or machine_group)
+    asset_id_text = clean_text(asset_id)
+    family_text = clean_text(asset_family)
+    group_text = clean_text(machine_group)
+    norm_query = normalize_spare_part_text(query_text)
+
+    if asset_id_text:
+        for row_id, row in asset_lookup.items():
+            if normalize_spare_part_text(row_id) == normalize_spare_part_text(asset_id_text):
+                profile = asset_profiles.get(row_id) or build_asset_profile(row)
+                return {
+                    "mode": "asset",
+                    "query": query_text,
+                    "query_norm": norm_query,
+                    "profile": profile,
+                    "asset_ids": {row_id},
+                    "asset_rows": [row],
+                    "family_profile": None,
+                    "machine_group": row.get("machine_group") or "",
+                }
+
+    if family_text:
+        family_norm = normalize_spare_part_text(family_text)
+        for family_id, row in family_lookup.items():
+            if family_norm in {
+                normalize_spare_part_text(family_id),
+                normalize_spare_part_text(row.get("asset_family")),
+            }:
+                included_ids = set(row.get("included_asset_ids") or [])
+                return {
+                    "mode": "family",
+                    "query": family_text,
+                    "query_norm": family_norm,
+                    "profile": family_profiles.get(family_id),
+                    "asset_ids": included_ids,
+                    "asset_rows": [asset for asset in asset_rows if asset.get("asset_id") in included_ids],
+                    "family_profile": family_profiles.get(family_id),
+                    "machine_group": row.get("machine_group") or "",
+                }
+
+    if group_text:
+        group_norm = normalize_spare_part_text(group_text)
+        group_assets = [row for row in asset_rows if normalize_spare_part_text(row.get("machine_group")) == group_norm]
+        return {
+            "mode": "machine_group",
+            "query": group_text,
+            "query_norm": group_norm,
+            "profile": build_asset_profile({"asset_id": _asset_intel_slug(group_text), "name": group_text, "machine_group": group_text}),
+            "asset_ids": {row.get("asset_id") for row in group_assets if row.get("asset_id")},
+            "asset_rows": group_assets,
+            "family_profile": None,
+            "machine_group": group_text,
+        }
+
+    if norm_query:
+        exact_asset = next(
+            (
+                row
+                for row in asset_rows
+                if norm_query in {
+                    normalize_spare_part_text(row.get("asset_id")),
+                    normalize_spare_part_text(row.get("name")),
+                }
+            ),
+            None,
+        )
+        if exact_asset:
+            row_id = exact_asset.get("asset_id")
+            return {
+                "mode": "asset",
+                "query": query_text,
+                "query_norm": norm_query,
+                "profile": asset_profiles.get(row_id) or build_asset_profile(exact_asset),
+                "asset_ids": {row_id},
+                "asset_rows": [exact_asset],
+                "family_profile": None,
+                "machine_group": exact_asset.get("machine_group") or "",
+            }
+
+        query_record = {
+            "asset_id": query_text,
+            "machine_name": query_text,
+            "description_original": query_text,
+            "translated_description": query_text,
+        }
+        asset_matches = match_record_to_asset_profiles(query_record, asset_profiles, {"include_related": True, "limit": 1})
+        if asset_matches:
+            matched_id = asset_matches[0].get("matchedAssetId")
+            row = asset_lookup.get(matched_id)
+            if row:
+                return {
+                    "mode": "asset",
+                    "query": query_text,
+                    "query_norm": norm_query,
+                    "profile": asset_profiles.get(matched_id) or build_asset_profile(row),
+                    "asset_ids": {matched_id},
+                    "asset_rows": [row],
+                    "family_profile": None,
+                    "machine_group": row.get("machine_group") or "",
+                }
+
+        exact_family = next(
+            (
+                (family_id, row)
+                for family_id, row in family_lookup.items()
+                if (
+                    norm_query in {
+                        normalize_spare_part_text(row.get("asset_family")),
+                        normalize_spare_part_text(family_id),
+                    }
+                    or (
+                        len(norm_query) >= 4
+                        and norm_query in normalize_spare_part_text(row.get("asset_family"))
+                    )
+                )
+            ),
+            None,
+        )
+        if exact_family:
+            family_id, row = exact_family
+            included_ids = set(row.get("included_asset_ids") or [])
+            return {
+                "mode": "family",
+                "query": query_text,
+                "query_norm": norm_query,
+                "profile": family_profiles.get(family_id),
+                "asset_ids": included_ids,
+                "asset_rows": [asset for asset in asset_rows if asset.get("asset_id") in included_ids],
+                "family_profile": family_profiles.get(family_id),
+                "machine_group": row.get("machine_group") or "",
+            }
+
+        family_matches = match_record_to_asset_profiles(query_record, family_profiles, {"include_related": True, "limit": 1})
+        if family_matches:
+            family_id = family_matches[0].get("matchedAssetId")
+            row = family_lookup.get(family_id)
+            if row:
+                included_ids = set(row.get("included_asset_ids") or [])
+                return {
+                    "mode": "family",
+                    "query": query_text,
+                    "query_norm": norm_query,
+                    "profile": family_profiles.get(family_id),
+                    "asset_ids": included_ids,
+                    "asset_rows": [asset for asset in asset_rows if asset.get("asset_id") in included_ids],
+                    "family_profile": family_profiles.get(family_id),
+                    "machine_group": row.get("machine_group") or "",
+                }
+
+        group_match = next(
+            (
+                row.get("machine_group")
+                for row in asset_rows
+                if norm_query == normalize_spare_part_text(row.get("machine_group"))
+                or (
+                    len(norm_query) >= 4
+                    and norm_query in normalize_spare_part_text(row.get("machine_group"))
+                )
+            ),
+            None,
+        )
+        if group_match:
+            group_assets = [row for row in asset_rows if row.get("machine_group") == group_match]
+            return {
+                "mode": "machine_group",
+                "query": query_text,
+                "query_norm": norm_query,
+                "profile": build_asset_profile({"asset_id": _asset_intel_slug(group_match), "name": group_match, "machine_group": group_match}),
+                "asset_ids": {row.get("asset_id") for row in group_assets if row.get("asset_id")},
+                "asset_rows": group_assets,
+                "family_profile": None,
+                "machine_group": group_match,
+            }
+
+    return {
+        "mode": "search" if query_text else "empty",
+        "query": query_text,
+        "query_norm": norm_query,
+        "profile": build_asset_profile({"asset_id": "", "name": query_text}) if query_text else None,
+        "asset_ids": set(),
+        "asset_rows": [],
+        "family_profile": None,
+        "machine_group": "",
+    }
+
+
+def _asset_intel_selected_asset(target: dict) -> dict:
+    mode = target.get("mode")
+    asset_rows = target.get("asset_rows") or []
+    first_asset = asset_rows[0] if asset_rows else {}
+    profile = target.get("profile") or {}
+    family_profile = target.get("family_profile") or {}
+    family_name = clean_text(first_asset.get("asset_family") or family_profile.get("assetFamilyName"))
+    if mode == "family":
+        family_name = family_name or clean_text(target.get("query"))
+    return {
+        "assetId": clean_text(first_asset.get("asset_id") if mode == "asset" else ""),
+        "assetName": clean_text(first_asset.get("name") if mode == "asset" else target.get("query")) or "Search required",
+        "assetFamily": family_name,
+        "machineGroup": clean_text(first_asset.get("machine_group") or target.get("machine_group")),
+        "criticality": clean_text(first_asset.get("criticality")),
+        "selectionMode": mode,
+        "aliases": _asset_intel_profile_aliases(profile),
+        "includedAssetCount": len(asset_rows),
+        "includedAssets": [
+            {"asset_id": row.get("asset_id"), "asset_name": row.get("name")}
+            for row in asset_rows[:50]
+        ],
+    }
+
+
+def _asset_intel_match_record(
+    record: dict,
+    target: dict,
+    context: str,
+    include_related_matches: bool = True,
+    include_low_confidence: bool = False,
+) -> dict | None:
+    mode = target.get("mode")
+    if mode == "empty":
+        return None
+
+    record_asset_id = clean_text(record.get("resolved_asset_id") or record.get("asset_id") or record.get("recorded_asset_id"))
+    record_asset_norm = normalize_spare_part_text(record_asset_id)
+    selected_asset_ids = {normalize_spare_part_text(asset_id) for asset_id in (target.get("asset_ids") or set()) if asset_id}
+    query_norm = target.get("query_norm") or ""
+    # Memoise the normalised search text on the (cached) record: normalising every
+    # record's text was re-run on every query for thousands of rows — the main
+    # remaining hot spot. The record objects are reused across queries, so this
+    # runs once per record then is free.
+    search_text = record.get("_asset_intel_search_norm")
+    if search_text is None:
+        search_text = normalize_spare_part_text(record.get("_asset_intel_search_text") or _asset_intel_text(record))
+        if isinstance(record, dict):
+            record["_asset_intel_search_norm"] = search_text
+
+    if mode == "search":
+        if not query_norm or query_norm not in search_text:
+            return None
+        confidence = "Medium" if len(query_norm.split()) > 1 or len(query_norm) >= 4 else "Low"
+        if confidence == "Low" and not include_low_confidence:
+            return None
+        source = "Supplier match" if context == "po" and query_norm in normalize_spare_part_text(record.get("supplier") or record.get("vendor_name")) else (
+            "PO description match" if context == "po" else "Store transaction match" if context == "store" else "Description match"
+        )
+        return {
+            "matchSource": source,
+            "confidence": confidence,
+            "possibleAssetCodingMismatch": _asset_intel_general_area_or_missing(record.get("asset_id") or record.get("recorded_asset_id")),
+        }
+
+    if selected_asset_ids and record_asset_norm in selected_asset_ids:
+        return {
+            "matchSource": "Asset ID match",
+            "confidence": "High",
+            "possibleAssetCodingMismatch": False,
+        }
+
+    profile = target.get("profile")
+    matches = []
+    if profile:
+        matches = match_record_to_asset_profiles(record, [profile], {"include_related": True, "limit": 1})
+
+    if not matches and mode in {"family", "machine_group"}:
+        asset_catalog = build_spare_part_asset_profiles()
+        asset_profiles = asset_catalog.get("asset_profiles") or {}
+        target_profiles = [
+            asset_profiles[asset_id]
+            for asset_id in (target.get("asset_ids") or set())
+            if asset_id in asset_profiles
+        ]
+        matches = match_record_to_asset_profiles(record, target_profiles, {"include_related": True, "limit": 1})
+
+    if matches:
+        match = dict(matches[0])
+        source = _asset_intel_match_source_for_context(match, context, record)
+        if mode == "family" and source not in {"Asset ID match", "Asset name match"}:
+            source = "Asset family match" if context != "po" else "PO description match"
+        if mode == "machine_group" and source not in {"Asset ID match", "Asset name match"}:
+            source = "Machine group match" if context != "po" else "PO description match"
+        direct = source == "Asset ID match" or (source == "Asset name match" and match.get("confidence") == "High")
+        if match.get("confidence") == "Low" and not include_low_confidence:
+            return None
+        if not include_related_matches and not direct:
+            return None
+        match["matchSource"] = source
+        return match
+
+    if mode == "machine_group":
+        group_norm = normalize_spare_part_text(target.get("machine_group") or target.get("query"))
+        row_group_norm = normalize_spare_part_text(record.get("machine_group") or record.get("equipment_type") or record.get("asset_family"))
+        if group_norm and row_group_norm == group_norm:
+            if not include_low_confidence:
+                return None
+            return {
+                "matchSource": "Machine group match",
+                "confidence": "Low",
+                "possibleAssetCodingMismatch": _asset_intel_general_area_or_missing(record.get("asset_id") or record.get("recorded_asset_id")),
+            }
+
+    if query_norm and include_related_matches and query_norm in search_text:
+        confidence = "Low"
+        if confidence == "Low" and not include_low_confidence:
+            return None
+        return {
+            "matchSource": "Description match" if context == "work_order" else "PO description match" if context == "po" else "Store transaction match",
+            "confidence": confidence,
+            "possibleAssetCodingMismatch": _asset_intel_general_area_or_missing(record.get("asset_id") or record.get("recorded_asset_id")),
+        }
+
+    return None
+
+
+def _asset_intel_normalize_work_order(rec: dict) -> dict:
+    wo_fields = _pt_extract_wo_fields(rec)
+    asset_id = _pt_pick(rec, "asset_id", "Asset ID", "AssetId", "AssetID", "machine_code", "PD Machine")
+    asset_name = (
+        wo_fields.get("equipment_name")
+        or _pt_pick(rec, "asset_name", "Asset Name", "machine_name", "MachineName", "Name", "Equipment")
+        or asset_id
+    )
+    description = wo_fields.get("wo_description") or _pt_pick(rec, "Maintenance request", "Description", "description", "Notes", "Remarks")
+    translated = wo_fields.get("wo_translated_description") or _pt_pick(rec, "Translated description", "TranslatedDescription")
+    date_value = (
+        wo_fields.get("wo_actual_start")
+        or _pt_pick(rec, "Actual start", "Actual Start", "Created date", "Created Date", "created_date", "Request Date")
+    )
+    mr_number = _pt_pick(rec, "maintenance_request_id", "Maintenance request", "Maintenance Request", "MR number", "MR No.", "Request ID", "RequestId")
+    wo_number = _pt_pick(rec, "maintenance_order_id", "Work order", "Work Order", "WorkOrderId", "WO number", "WO No.", "WO ID")
+    status = _pt_pick(rec, "current_lifecycle_state", "Current lifecycle state", "Current Lifecycle State", "status", "Status")
+    normalized = {
+        "date": _date_iso(date_value) or clean_text(date_value),
+        "mr_number": mr_number,
+        "wo_number": wo_number,
+        "asset_id": asset_id,
+        "recorded_asset_id": asset_id,
+        "asset_name": asset_name,
+        "machine_name": asset_name,
+        "equipment_name": asset_name,
+        "functional_location": wo_fields.get("wo_location") or _pt_pick(rec, "Functional location", "Functional Location", "Location", "Area"),
+        "description": description,
+        "description_original": description,
+        "translated_description": translated,
+        "status": status,
+        "maintenance_request_type": _pt_pick(rec, "Maintenance request type", "maintenance_request_type", "Request Type"),
+        "service_level": wo_fields.get("wo_severity"),
+        "actual_start": _date_iso(wo_fields.get("wo_actual_start")) or wo_fields.get("wo_actual_start"),
+        "actual_end": _date_iso(wo_fields.get("wo_actual_end")) or wo_fields.get("wo_actual_end"),
+    }
+    normalized["_asset_intel_search_text"] = _asset_intel_text(
+        normalized,
+        "asset_id", "asset_name", "functional_location", "description", "translated_description", "mr_number", "wo_number", "status"
+    )
+    return normalized
+
+
+# Normalising every WO record (~4,600) is pure-CPU but heavy (many alias lookups
+# + regex), and it ran on every analysis — the ~21s hot spot. The records are
+# deterministic and _pt_load_wo_records() is cached, so we normalise once and
+# reuse, keyed on the cached records' identity (a new list = data changed).
+_ASSET_INTEL_WO_NORM_CACHE = {"key": None, "records": None}
+
+
+def _asset_intel_normalized_wo_records() -> list[dict]:
+    recs = _pt_load_wo_records()
+    key = id(recs)
+    cache = _ASSET_INTEL_WO_NORM_CACHE
+    if cache["key"] == key and cache["records"] is not None:
+        return cache["records"]
+    normalized = [_asset_intel_normalize_work_order(rec) for rec in recs]
+    cache["key"] = key
+    cache["records"] = normalized
+    return normalized
+
+
+def find_related_work_orders_for_asset(
+    target: dict,
+    date_from=None,
+    date_to=None,
+    include_related_matches=True,
+    include_low_confidence=False,
+) -> list[dict]:
+    rows: list[dict] = []
+    for row in _asset_intel_normalized_wo_records():
+        if not _asset_intel_date_in_range(row.get("date") or row.get("actual_start"), date_from, date_to):
+            continue
+        match = _asset_intel_match_record(row, target, "work_order", include_related_matches, include_low_confidence)
+        if not match:
+            continue
+        source = match.get("matchSource") or "Description match"
+        flags = _asset_intel_data_quality_flags(row, match, source, "work_order")
+        rows.append({
+            "date": row.get("date") or row.get("actual_start"),
+            "mr_number": row.get("mr_number"),
+            "wo_number": row.get("wo_number"),
+            "recorded_asset_id": row.get("asset_id"),
+            "recorded_asset_name": row.get("asset_name") or row.get("functional_location"),
+            "functional_location": row.get("functional_location"),
+            "description": row.get("translated_description") or row.get("description"),
+            "original_description": row.get("description"),
+            "status": row.get("status") or "Unclassified",
+            "match_source": source,
+            "match_confidence": match.get("confidence") or "Low",
+            "data_quality_flag": _asset_intel_public_flag(flags),
+            "data_quality_flags": flags,
+            "possible_asset_coding_mismatch": bool(match.get("possibleAssetCodingMismatch")),
+            "is_direct_match": source == "Asset ID match",
+        })
+    return sorted(rows, key=lambda row: str(row.get("date") or ""), reverse=True)
+
+
+def _asset_intel_store_match_record(row: dict) -> dict:
+    record = dict(row)
+    record["asset_id"] = clean_text(row.get("asset_id") or row.get("resolved_asset_id"))
+    record["machine_name"] = clean_text(row.get("equipment_name") or row.get("resolved_asset_name") or row.get("asset_id"))
+    record["description_original"] = clean_text(row.get("original_description") or row.get("clean_description") or row.get("part_name"))
+    record["translated_description"] = clean_text(row.get("translated_description") or row.get("part_name"))
+    record["remarks"] = _asset_intel_text(row, "project_id", "transaction_id", "line_property", "work_order_id", "supplier")
+    record["_asset_intel_search_text"] = _asset_intel_text(
+        row,
+        "asset_id", "resolved_asset_id", "equipment_name", "resolved_asset_name", "asset_family", "machine_group",
+        "part_code", "part_name", "original_description", "translated_description", "clean_description", "work_order_id",
+        "wo_request_id", "wo_description", "wo_translated_description", "project_id", "transaction_id",
+    )
+    return record
+
+
+# Same idea as the WO cache: normalise store/PO rows once and reuse (keyed on the
+# cached source list's identity), instead of re-normalising thousands of rows on
+# every analysis. Returns (source_row, normalized_match_record) pairs.
+_ASSET_INTEL_STORE_NORM_CACHE = {"key": None, "pairs": None}
+_ASSET_INTEL_PO_NORM_CACHE = {"key": None, "pairs": None}
+
+
+def _asset_intel_normalized_store_rows():
+    payload = build_project_transactions_payload()
+    source_rows = payload.get("transactions") or payload.get("consumption_analysis", {}).get("records") or []
+    cache = _ASSET_INTEL_STORE_NORM_CACHE
+    key = id(source_rows)
+    if cache["key"] == key and cache["pairs"] is not None:
+        return cache["pairs"]
+    pairs = [(s, _asset_intel_store_match_record(s)) for s in source_rows]
+    cache["key"] = key
+    cache["pairs"] = pairs
+    return pairs
+
+
+def _asset_intel_normalized_po_rows():
+    source_rows = (build_spare_parts_payload().get("po_classification", {}) or {}).get("records") or []
+    cache = _ASSET_INTEL_PO_NORM_CACHE
+    key = id(source_rows)
+    if cache["key"] == key and cache["pairs"] is not None:
+        return cache["pairs"]
+    pairs = [(s, _asset_intel_po_match_record(s)) for s in source_rows]
+    cache["key"] = key
+    cache["pairs"] = pairs
+    return pairs
+
+
+def find_spare_part_transactions_for_asset(
+    target: dict,
+    date_from=None,
+    date_to=None,
+    include_related_matches=True,
+    include_low_confidence=False,
+) -> list[dict]:
+    rows: list[dict] = []
+    for source, record in _asset_intel_normalized_store_rows():
+        if not _asset_intel_date_in_range(source.get("project_date"), date_from, date_to):
+            continue
+        match = _asset_intel_match_record(record, target, "store", include_related_matches, include_low_confidence)
+        if not match:
+            continue
+        source_label = match.get("matchSource") or source.get("match_source") or "Store transaction match"
+        flags = _asset_intel_data_quality_flags(record, match, source_label, "store")
+        rows.append({
+            "date": source.get("project_date"),
+            "item_code": source.get("part_code") or _pt_extract_part_code(source) or source.get("item_code"),
+            "part_name": source.get("part_name") or source.get("translated_description") or source.get("clean_description") or source.get("original_description"),
+            "quantity": source.get("quantity_used"),
+            "value": source.get("total_consumption"),
+            "recorded_asset_project": clean_text(source.get("asset_id") or source.get("project_id") or source.get("equipment_name")),
+            "resolved_asset_id": source.get("resolved_asset_id"),
+            "resolved_asset_name": source.get("resolved_asset_name"),
+            "asset_family": source.get("asset_family"),
+            "machine_group": source.get("machine_group"),
+            "related_wo_mr": clean_text(source.get("work_order_id") or source.get("wo_request_id") or source.get("mr_wo_reference")),
+            "transaction_id": source.get("transaction_id"),
+            "match_source": source_label,
+            "match_confidence": match.get("confidence") or source.get("match_confidence") or "Low",
+            "data_quality_flag": _asset_intel_public_flag(flags),
+            "data_quality_flags": flags,
+            "possible_asset_coding_mismatch": bool(match.get("possibleAssetCodingMismatch") or source.get("possible_asset_coding_mismatch")),
+            "is_direct_match": source_label == "Asset ID match",
+        })
+    return sorted(rows, key=lambda row: str(row.get("date") or ""), reverse=True)
+
+
+def _asset_intel_po_match_record(row: dict) -> dict:
+    record = {
+        "asset_id": clean_text(row.get("asset_id") or row.get("pd_machine")),
+        "machine_name": clean_text(row.get("pd_machine") or row.get("translated_pd_machine")),
+        "description_original": _asset_intel_text(row, "original_description", "description", "clean_description", "code"),
+        "translated_description": _asset_intel_text(row, "translated_description", "clean_description"),
+        "code": clean_text(row.get("code")),
+        "supplier": clean_text(row.get("supplier") or row.get("vendor_name")),
+        "vendor_name": clean_text(row.get("vendor_name") or row.get("supplier")),
+        "remarks": _asset_intel_text(
+            row,
+            "supplier", "vendor_name", "group_of_cost", "translated_group_of_cost", "classification", "classification_reason", "po_number",
+        ),
+        "pd_machine": row.get("pd_machine"),
+        "_asset_intel_search_text": _asset_intel_text(
+            row,
+            "po_number", "code", "original_description", "description", "translated_description", "clean_description",
+            "supplier", "vendor_name", "pd_machine", "translated_pd_machine", "group_of_cost", "translated_group_of_cost",
+        ),
+    }
+    return record
+
+
+def find_purchase_orders_for_asset(
+    target: dict,
+    date_from=None,
+    date_to=None,
+    include_related_matches=True,
+    include_low_confidence=False,
+) -> list[dict]:
+    # Match EVERY PO row by alias/description (no spare-classification pre-filter:
+    # many real rows — Robot Coupe / CL50 motors, OPTIBELT belts — are "Manual
+    # Review"). Two stages so a whole purchase order is captured, not just the one
+    # line whose text names the asset:
+    #   1) line-level: a PO line directly matches the asset alias/description.
+    #   2) PO-level propagation: every OTHER line under a PO number that had a
+    #      matched line is included as a "Same PO asset-context match".
+    candidates = []          # (source, record, po_date)
+    direct_match = {}        # id(source) -> match dict
+    matched_po_numbers = set()
+    for source, record in _asset_intel_normalized_po_rows():
+        po_date = source.get("po_date") or source.get("goods_received_date")
+        if not _asset_intel_date_in_range(po_date, date_from, date_to):
+            continue
+        candidates.append((source, record, po_date))
+        match = _asset_intel_match_record(record, target, "po", include_related_matches, include_low_confidence)
+        if match:
+            direct_match[id(source)] = match
+            po_num = clean_text(source.get("po_number"))
+            if po_num:
+                matched_po_numbers.add(po_num)
+
+    # For PO-level propagation, exclude lines that clearly belong to a DIFFERENT
+    # specific asset (e.g. a shared cleaning PO that also lists "Bratt Pan No.1"
+    # or "Combi Oven No.2-3" — those lines are not this asset's history). Only the
+    # lines on already-matched POs are checked, so this stays cheap.
+    _all_profiles = list((build_spare_part_asset_profiles().get("asset_profiles") or {}).values())
+    _selected_ids = {normalize_spare_part_text(a) for a in (target.get("asset_ids") or set()) if a}
+
+    rows: list[dict] = []
+    for source, record, po_date in candidates:
+        match = direct_match.get(id(source))
+        po_num = clean_text(source.get("po_number"))
+        if match:
+            source_label = match.get("matchSource") or "PO description match"
+        elif po_num and po_num in matched_po_numbers:
+            # Another line on this PO matched the asset. Include this line too —
+            # unless it clearly names a different specific asset (number-aware).
+            other = match_record_to_asset_profiles(record, _all_profiles, {"include_related": False, "limit": 1}) if _all_profiles else []
+            if other:
+                other_id = normalize_spare_part_text(other[0].get("matchedAssetId") or "")
+                if other_id and other_id not in _selected_ids:
+                    continue
+            match = {
+                "confidence": "Medium",
+                "possibleAssetCodingMismatch": _asset_intel_general_area_or_missing(
+                    source.get("asset_id") or source.get("pd_machine")),
+            }
+            source_label = "Same PO asset-context match"
+        else:
+            continue
+        flags = _asset_intel_data_quality_flags(record, match, source_label, "po")
+        supplier = clean_text(source.get("vendor_name") or source.get("supplier")) or "Unmatched"
+        part_description = clean_text(source.get("translated_description") or source.get("clean_description") or source.get("original_description") or source.get("description"))
+        rows.append({
+            "po_date": po_date,
+            "po_number": source.get("po_number"),
+            "supplier": supplier,
+            "part_description": part_description,
+            "item_code": source.get("code"),
+            "quantity": source.get("quantity_ordered") or source.get("quantity_received"),
+            "value": source.get("total_cost"),
+            "related_asset_alias": clean_text(source.get("pd_machine") or source.get("asset_id") or target.get("query")),
+            "classification": source.get("classification"),
+            "match_source": source_label,
+            "match_confidence": match.get("confidence") or "Low",
+            "data_quality_flag": _asset_intel_public_flag(flags),
+            "data_quality_flags": flags,
+            "possible_asset_coding_mismatch": bool(match.get("possibleAssetCodingMismatch")),
+            "is_direct_match": source_label in ("Asset ID match", "PO description match", "Supplier match"),
+            "is_same_po_match": source_label == "Same PO asset-context match",
+        })
+    return sorted(rows, key=lambda row: str(row.get("po_date") or ""), reverse=True)
+
+
+def aggregate_suppliers_for_asset(purchase_parts: list[dict]) -> list[dict]:
+    buckets: dict[str, dict] = {}
+    for row in purchase_parts:
+        supplier = clean_text(row.get("supplier")) or "Unmatched"
+        bucket = buckets.setdefault(
+            supplier,
+            {
+                "supplier": supplier,
+                "parts": Counter(),
+                "total_po_value": 0.0,
+                "po_line_count": 0,
+                "latest_purchase_date": None,
+            },
+        )
+        part = clean_text(row.get("part_description") or row.get("item_code")) or "Unmatched item"
+        bucket["parts"][part] += 1
+        bucket["total_po_value"] += _asset_intel_safe_float(row.get("value"))
+        bucket["po_line_count"] += 1
+        if row.get("po_date") and (bucket["latest_purchase_date"] is None or row["po_date"] > bucket["latest_purchase_date"]):
+            bucket["latest_purchase_date"] = row["po_date"]
+
+    summary = []
+    for bucket in buckets.values():
+        summary.append({
+            "supplier": bucket["supplier"],
+            "parts_supplied": [part for part, _ in bucket["parts"].most_common(5)],
+            "parts_supplied_text": "; ".join(part for part, _ in bucket["parts"].most_common(5)),
+            "total_po_value": round(bucket["total_po_value"], 2),
+            "po_line_count": bucket["po_line_count"],
+            "latest_purchase_date": bucket["latest_purchase_date"],
+        })
+    return sorted(summary, key=lambda row: (-row["total_po_value"], row["supplier"]))
+
+
+def find_suppliers_for_asset(purchase_parts: list[dict]) -> list[dict]:
+    return aggregate_suppliers_for_asset(purchase_parts)
+
+
+def calculate_asset_parts_data_confidence(related_work_orders: list[dict], spare_parts_used: list[dict], purchase_parts: list[dict]) -> dict:
+    rows = [*related_work_orders, *spare_parts_used, *purchase_parts]
+    if not rows:
+        return {"label": "Low", "score": 0, "basis": "No related records found"}
+    counts = Counter(row.get("match_confidence") or "Low" for row in rows)
+    weighted = counts["High"] * 100 + counts["Medium"] * 65 + counts["Low"] * 35
+    score = round(weighted / max(1, len(rows)))
+    if score >= 78:
+        label = "High"
+    elif score >= 50:
+        label = "Medium"
+    else:
+        label = "Low"
+    return {
+        "label": label,
+        "score": score,
+        "basis": f"{counts['High']} high, {counts['Medium']} medium, {counts['Low']} low-confidence matches",
+    }
+
+
+def build_asset_parts_summary(
+    related_work_orders: list[dict],
+    spare_parts_used: list[dict],
+    purchase_parts: list[dict],
+    suppliers: list[dict],
+) -> dict:
+    wo_status_counts = Counter(_asset_intel_status_group(row.get("status")) for row in related_work_orders)
+    used_part_counter = Counter()
+    used_part_values = Counter()
+    for row in spare_parts_used:
+        key = clean_text(row.get("part_name") or row.get("item_code")) or "Unknown Part"
+        used_part_counter[key] += _asset_intel_safe_float(row.get("quantity"))
+        used_part_values[key] += _asset_intel_safe_float(row.get("value"))
+    top_used_part = ""
+    if used_part_values:
+        top_used_part = max(used_part_values, key=lambda key: (used_part_values[key], used_part_counter[key], key))
+
+    purchase_parts_unique = {
+        _asset_intel_part_key(row.get("item_code"), row.get("part_description"))
+        for row in purchase_parts
+        if _asset_intel_part_key(row.get("item_code"), row.get("part_description"))
+    }
+    store_part_keys = {
+        _asset_intel_part_key(row.get("item_code"), row.get("part_name"))
+        for row in spare_parts_used
+        if _asset_intel_part_key(row.get("item_code"), row.get("part_name"))
+    }
+    purchase_only_count = sum(
+        1
+        for row in purchase_parts
+        if _asset_intel_part_key(row.get("item_code"), row.get("part_description"))
+        and _asset_intel_part_key(row.get("item_code"), row.get("part_description")) not in store_part_keys
+    )
+    latest_supplier = next((row.get("supplier") for row in sorted(purchase_parts, key=lambda item: str(item.get("po_date") or ""), reverse=True) if row.get("supplier")), "")
+    confidence = calculate_asset_parts_data_confidence(related_work_orders, spare_parts_used, purchase_parts)
+    all_rows = [*related_work_orders, *spare_parts_used, *purchase_parts]
+    direct_wo = sum(1 for row in related_work_orders if row.get("match_source") == "Asset ID match")
+    description_wo = len(related_work_orders) - direct_wo
+    return {
+        "relatedWorkOrderCount": len(related_work_orders),
+        "directWorkOrderMatches": direct_wo,
+        "descriptionWorkOrderMatches": description_wo,
+        "openInProgressWorkOrders": wo_status_counts["open"],
+        "finishedConfirmedWorkOrders": wo_status_counts["finished"],
+        "sparePartTransactionCount": len(spare_parts_used),
+        "totalSparePartQuantity": round(sum(_asset_intel_safe_float(row.get("quantity")) for row in spare_parts_used), 3),
+        "totalSparePartValue": round(sum(_asset_intel_safe_float(row.get("value")) for row in spare_parts_used), 2),
+        "uniqueSpareParts": len(store_part_keys),
+        "topUsedPart": top_used_part,
+        "purchaseLineCount": len(purchase_parts),
+        "totalPurchaseValue": round(sum(_asset_intel_safe_float(row.get("value")) for row in purchase_parts), 2),
+        "uniquePurchasedParts": len(purchase_parts_unique),
+        "latestPurchaseDate": max((row.get("po_date") for row in purchase_parts if row.get("po_date")), default=""),
+        "supplierCount": len(suppliers),
+        "mainSupplier": suppliers[0].get("supplier") if suppliers else "",
+        "latestSupplierUsed": latest_supplier,
+        "supplierListAvailable": bool(suppliers),
+        "possibleCodingMismatchCount": sum(1 for row in all_rows if row.get("possible_asset_coding_mismatch")),
+        "missingAssetIdRecords": sum(1 for row in all_rows if "Missing asset ID" in (row.get("data_quality_flags") or [])),
+        "descriptionOnlyRecords": sum(1 for row in all_rows if "Found through description" in (row.get("data_quality_flags") or [])),
+        "poOnlyPartRecords": purchase_only_count,
+        "confidence": confidence["label"],
+        "confidenceScore": confidence["score"],
+        "confidenceBasis": confidence["basis"],
+    }
+
+
+def _asset_intel_data_gaps(summary: dict, related_work_orders: list[dict], spare_parts_used: list[dict], purchase_parts: list[dict]) -> list[str]:
+    gaps: list[str] = []
+    if related_work_orders and not spare_parts_used:
+        gaps.append("WO/MR records found, but no matching store consumption found.")
+    if purchase_parts and not spare_parts_used:
+        gaps.append("Purchase records found in Gen PO, but no actual store issue transaction found.")
+    if spare_parts_used and any(not clean_text(row.get("related_wo_mr")) for row in spare_parts_used):
+        gaps.append("Spare part usage found, but no linked WO/MR reference available.")
+    if summary.get("directWorkOrderMatches", 0) == 0 and related_work_orders:
+        gaps.append("No direct asset ID work orders found.")
+    if summary.get("descriptionOnlyRecords", 0):
+        gaps.append("Records were found through description matching, not direct Asset ID.")
+    if summary.get("poOnlyPartRecords", 0):
+        gaps.append("Some purchase records were found in Gen PO but not in actual store issue transactions.")
+    if not related_work_orders and not spare_parts_used and not purchase_parts:
+        gaps.append("No related WO/MR, store consumption, or Gen PO records were found for the current search.")
+    return gaps
+
+
+def build_asset_parts_intelligence_context(
+    query: str | None = None,
+    asset_id: str | None = None,
+    asset_name: str | None = None,
+    asset_family: str | None = None,
+    machine_group: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    include_related_matches=True,
+    include_low_confidence=False,
+) -> dict:
+    asset_catalog = build_spare_part_asset_profiles()
+    spare_payload = build_spare_parts_payload()
+    pt_payload = build_project_transactions_payload()
+    target = _asset_intel_build_target(query, asset_id, asset_name, asset_family, machine_group, asset_catalog)
+    options = _asset_intel_options(asset_catalog, spare_payload, pt_payload)
+    include_related = _asset_intel_bool(include_related_matches, True)
+    include_low = _asset_intel_bool(include_low_confidence, False)
+
+    if target.get("mode") == "empty":
+        return {
+            "status": "ready",
+            "selectedAsset": _asset_intel_selected_asset(target),
+            "relatedWorkOrders": [],
+            "sparePartsUsed": [],
+            "purchaseParts": [],
+            "suppliers": [],
+            "supplierSummary": [],
+            "summary": build_asset_parts_summary([], [], [], []),
+            "dataGaps": ["Search for an asset, family, machine group, part, or supplier to analyse related records."],
+            "options": options,
+            "meta": {"readOnly": True, "rowLimit": 300, "truncated": {}},
+        }
+
+    related_work_orders = find_related_work_orders_for_asset(target, date_from, date_to, include_related, include_low)
+    spare_parts_used = find_spare_part_transactions_for_asset(target, date_from, date_to, include_related, include_low)
+    purchase_parts = find_purchase_orders_for_asset(target, date_from, date_to, include_related, include_low)
+    supplier_summary = aggregate_suppliers_for_asset(purchase_parts)
+    summary = build_asset_parts_summary(related_work_orders, spare_parts_used, purchase_parts, supplier_summary)
+    row_limit = 300
+    return {
+        "status": "ok",
+        "selectedAsset": _asset_intel_selected_asset(target),
+        "relatedWorkOrders": related_work_orders[:row_limit],
+        "sparePartsUsed": spare_parts_used[:row_limit],
+        "purchaseParts": purchase_parts[:row_limit],
+        "suppliers": supplier_summary,
+        "supplierSummary": supplier_summary,
+        "summary": summary,
+        "dataGaps": _asset_intel_data_gaps(summary, related_work_orders, spare_parts_used, purchase_parts),
+        "options": options,
+        "meta": {
+            "readOnly": True,
+            "rowLimit": row_limit,
+            "truncated": {
+                "relatedWorkOrders": len(related_work_orders) > row_limit,
+                "sparePartsUsed": len(spare_parts_used) > row_limit,
+                "purchaseParts": len(purchase_parts) > row_limit,
+            },
+            "filters": {
+                "query": query,
+                "assetId": asset_id,
+                "assetName": asset_name,
+                "assetFamily": asset_family,
+                "machineGroup": machine_group,
+                "dateFrom": date_from,
+                "dateTo": date_to,
+                "includeRelatedMatches": include_related,
+                "includeLowConfidence": include_low,
+            },
+        },
+    }
 
 
 def _clear_spare_related_caches():
@@ -3324,6 +5396,7 @@ def _clear_spare_related_caches():
     _AY_CACHE["mtime"] = None
     _EPO_CACHE["result"] = None
     _EPO_CACHE["mtime"] = None
+    _clear_persistent_payload_cache()
 
 
 def _stage_uploaded_file(file_storage, fallback_stem: str) -> Path:
@@ -3483,41 +5556,38 @@ def import_project_transactions_file(file_storage):
 
 
 def get_maintenance_import_status():
-    spare_payload = build_spare_parts_payload()
-    pt_payload = build_project_transactions_payload()
-    ay_payload = build_all_years_transactions_payload()
-    epo_payload = build_external_po_payload()
+    _, future_source_status = _resolve_future_sources(DEFAULT_DATA_DIR)
 
     from downtime_service import get_work_order_import_status  # local import to avoid heavier module work at import time
 
     work_order_status = get_work_order_import_status()
+    project_path = _resolve_project_transactions_source_path()
+    annual_import_paths = _project_transactions_import_history_paths()
+    all_years_available = CSV_ALL_YEARS_PATH.exists() or bool(annual_import_paths)
+
+    def _future_source(key, label, template):
+        source = future_source_status.get(key, {})
+        return {
+            "label": label,
+            "template": template,
+            "available": bool(source.get("available")),
+            "uploaded": bool(source.get("uploaded")),
+            "using_fallback": bool(source.get("using_fallback")),
+            "file_name": source.get("file_name"),
+            "message": source.get("message") or ("File loaded" if source.get("available") else "File not loaded"),
+            "validation": {},
+        }
+
     sources = {
-        "inventory": {
-            "label": "Inventory",
-            "template": "Item list for spare parts / Dynamics inventory export",
-            **(spare_payload.get("data_sources", {}).get("spare_parts_master") or {}),
-            "validation": {
-                "rows": spare_payload.get("inventory", {}).get("summary", {}).get("total_items"),
-                "flagged_rows": sum(1 for row in spare_payload.get("inventory", {}).get("records", []) if row.get("data_quality_flags")),
-            },
-        },
-        "external_po": {
-            "label": "External Parts",
-            "template": "Gen PO in D365 Rev.01 export",
-            **(spare_payload.get("data_sources", {}).get("po_list") or {}),
-            "validation": {
-                "rows": len(spare_payload.get("po_classification", {}).get("records", []) or []),
-                "manual_review_rows": spare_payload.get("comparison", {}).get("summary", {}).get("manual_review_po_items"),
-                "flagged_rows": epo_payload.get("summary", {}).get("total_flagged"),
-            },
-        },
+        "inventory": _future_source("spare_parts_master", "Inventory", "Item list for spare parts / Dynamics inventory export"),
+        "external_po": _future_source("po_list", "External Parts", "Gen PO in D365 Rev.01 export"),
         "project_transactions": {
             "label": "Spare Parts Consumption",
             "template": "Project annual transactions export",
-            "available": pt_payload.get("status") == "ok",
-            "file_name": _resolve_project_transactions_source_path().name if _resolve_project_transactions_source_path() else None,
-            "message": pt_payload.get("error") or ("Using current project transactions source" if pt_payload.get("status") == "ok" else "Project transactions file not uploaded"),
-            "validation": _project_transactions_validation_summary(pt_payload) if pt_payload.get("status") == "ok" else {},
+            "available": bool(project_path),
+            "file_name": project_path.name if project_path else None,
+            "message": f"Using {project_path.name}" if project_path else "Project transactions file not uploaded",
+            "validation": {},
         },
         "work_orders": {
             "label": "Downtime Work Orders",
@@ -3530,10 +5600,10 @@ def get_maintenance_import_status():
         "all_years_history": {
             "label": "All Years History",
             "template": "Multi-year project transactions history",
-            "available": ay_payload.get("status") == "ok",
-            "file_name": CSV_ALL_YEARS_PATH.name if CSV_ALL_YEARS_PATH.exists() else None,
-            "message": ay_payload.get("error") or ("Historical analysis ready" if ay_payload.get("status") == "ok" else "All-years history not available"),
-            "validation": {"years": ay_payload.get("years") or []},
+            "available": all_years_available,
+            "file_name": CSV_ALL_YEARS_PATH.name if CSV_ALL_YEARS_PATH.exists() else (annual_import_paths[-1].name if annual_import_paths else None),
+            "message": "Historical analysis ready" if all_years_available else "All-years history not available",
+            "validation": {},
         },
     }
 

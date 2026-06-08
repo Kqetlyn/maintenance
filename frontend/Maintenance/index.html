@@ -7,12 +7,19 @@
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link
+        rel="preload"
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap"
+        as="style"
+        onload="this.onload=null;this.rel='stylesheet'"
+    >
+    <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet"></noscript>
 
-    <link rel="stylesheet" href="/shared/navbar.css">
-    <link rel="stylesheet" href="/Maintenance/style.css?v=20260514-spare-part-drilldown-7">
+    <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
+    <link rel="stylesheet" href="/Maintenance/style.css?v=20260604-mr-search-1">
+    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260608-mira-ov-9">
+    <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body data-sync-page="maintenance">
     <div id="navbar"></div>
@@ -20,148 +27,387 @@
     <main class="dashboard-content">
         <header class="dash-header">
             <div class="header-copy">
-                <h1 id="maintenance-page-title">Utility Maintenance</h1>
-                <p class="subtitle" id="maintenance-page-subtitle">Utility preventive maintenance planning and schedule visibility for management review</p>
+                <h1 id="maintenance-page-title">Preventive Maintenance Schedule</h1>
+                <p class="subtitle" id="maintenance-page-subtitle">Monthly PM planning, completion tracking, backlog, and compliance overview.</p>
             </div>
-            <div class="header-right"></div>
         </header>
 
         <section class="card-shell view-toggle maintenance-tab-toggle">
-            <button type="button" class="toggle-btn active" data-view-tab="overview">Overview</button>
-            <button type="button" class="toggle-btn" data-view-tab="utility">Utility</button>
-            <button type="button" class="toggle-btn" data-view-tab="equipment">Equipment</button>
+            <button type="button" class="toggle-btn active" data-view-tab="mira_overview">MIRA Overview</button>
+            <button type="button" class="toggle-btn" data-view-tab="overview">PM Schedule</button>
             <button type="button" class="toggle-btn" data-view-tab="spare_parts">Spare Parts</button>
-            <button type="button" class="toggle-btn" data-view-tab="analysis">Analysis</button>
             <button type="button" class="toggle-btn" data-view-tab="downtime">Downtime</button>
         </section>
 
-        <section id="overview-view" class="maintenance-view">
-            <section class="summary-grid overview-summary-grid">
-                <article class="summary-card summary-card-kpi summary-card-amber">
-                    <span class="summary-label">Scheduled Tasks</span>
-                    <strong id="overview-scheduled-tasks">--</strong>
-                </article>
-                <article class="summary-card summary-card-kpi summary-card-green">
-                    <span class="summary-label">Completed Tasks</span>
-                    <strong id="overview-completed-tasks">--</strong>
-                </article>
-                <article class="summary-card summary-card-kpi summary-card-blue">
-                    <span class="summary-label">Pending Tasks</span>
-                    <strong id="overview-pending-tasks">--</strong>
-                </article>
-                <article class="summary-card summary-card-kpi summary-card-purple">
-                    <span class="summary-label">Completion Rate</span>
-                    <strong id="overview-completion-rate">--</strong>
-                </article>
-                <article class="summary-card summary-card-kpi summary-card-amber">
-                    <span class="summary-label">Tasks Requiring Inspection</span>
-                    <strong id="overview-inspection-tasks">--</strong>
-                </article>
-                <article class="summary-card summary-card-kpi summary-card-blue">
-                    <span class="summary-label">Tasks Pending Follow-Up</span>
-                    <strong id="overview-follow-up-tasks">--</strong>
-                </article>
-            </section>
+        <section id="mira-overview-view" class="maintenance-view">
+            <div id="mira-overview-root" class="mira-overview-root"></div>
+        </section>
 
-            <section class="card-shell overview-mix-card">
-                <div class="section-head">
-                    <div>
-                        <h2>Preventive vs Corrective Maintenance</h2>
-                        <p class="section-subtitle">Scheduled preventive maintenance baseline compared with corrective work orders for the selected month</p>
-                    </div>
-                    <div class="mix-card-actions">
-                        <label class="control-field compact-field maintenance-mix-month-field">
-                            <span>Chart Month</span>
-                            <select id="maintenance-mix-month"></select>
-                        </label>
-                        <div class="mix-ratio-summary">
-                            <span id="mix-preventive-ratio">Ratio --</span>
-                            <span id="mix-corrective-ratio">Status --</span>
+        <section id="overview-view" class="maintenance-view hidden">
+            <div id="pm-overview" class="pm-module">
+                <p id="pm-ov-context" class="pm-context-line">Preventive maintenance schedule summary.</p>
+
+                <section class="pm-page-filters" aria-label="Stage and scope filters">
+                    <div class="pm-seg-group">
+                        <span class="pm-seg-label">Stage</span>
+                        <div class="pm-seg" id="pm-stage-seg" role="group">
+                            <button type="button" data-pm-stage="all" class="active">Both</button>
+                            <button type="button" data-pm-stage="stage1">Stage 1</button>
+                            <button type="button" data-pm-stage="stage2">Stage 2</button>
                         </div>
                     </div>
-                </div>
-                <div class="overview-mix-layout">
-                    <div class="overview-chart-wrap">
-                        <canvas id="overview-maintenance-mix-chart"></canvas>
-                        <div id="overview-maintenance-mix-empty" class="chart-empty-state" hidden>No preventive or corrective maintenance records available for this month.</div>
+                    <div class="pm-seg-group">
+                        <span class="pm-seg-label">Scope</span>
+                        <div class="pm-seg" id="pm-scope-seg" role="group">
+                            <button type="button" data-pm-scope="all" class="active">Both</button>
+                            <button type="button" data-pm-scope="equipment">Production Equipment</button>
+                            <button type="button" data-pm-scope="utility">Utilities</button>
+                        </div>
                     </div>
-                    <div class="mix-breakdown">
-                        <article>
-                            <span>Preventive Scheduled</span>
-                            <strong id="mix-preventive-count">0</strong>
-                        </article>
-                        <article>
-                            <span>Corrective Work Orders</span>
-                            <strong id="mix-corrective-count">0</strong>
-                        </article>
-                        <article>
-                            <span>Variance</span>
-                            <strong id="mix-variance-count">0</strong>
-                        </article>
-                        <article>
-                            <span>Performance</span>
-                            <strong id="mix-performance-status">--</strong>
-                        </article>
-                        <p id="mix-total-note" class="mix-total-note">No preventive or corrective maintenance records available for comparison</p>
-                    </div>
-                </div>
-            </section>
+                </section>
 
-            <section class="card-shell filter-card">
-                <div class="section-head">
+                <section class="summary-grid pm-kpi-grid pm-kpi-grid-compact">
+                    <article class="summary-card pm-kpi pm-kpi-blue">
+                        <span class="summary-label">PM Scheduled This Month</span>
+                        <strong id="pm-ov-sched-month">--</strong>
+                        <span class="pm-kpi-sub" id="pm-ov-sched-month-sub">--</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-green">
+                        <span class="summary-label">PM Completed This Month</span>
+                        <strong id="pm-ov-completed-month">--</strong>
+                        <span class="pm-kpi-sub">manual completions</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-purple">
+                        <span class="summary-label">PM Compliance %</span>
+                        <strong id="pm-ov-compliance">--</strong>
+                        <span class="pm-kpi-sub">completed / scheduled</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-red">
+                        <span class="summary-label">Overdue PM</span>
+                        <strong id="pm-ov-overdue">--</strong>
+                        <span class="pm-kpi-sub">week passed, not settled</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-amber">
+                        <span class="summary-label">Backlog PM</span>
+                        <strong id="pm-ov-backlog">--</strong>
+                        <span class="pm-kpi-sub">not done / carried forward</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-purple">
+                        <span class="summary-label">Deferred PM</span>
+                        <strong id="pm-ov-deferred">--</strong>
+                        <span class="pm-kpi-sub">postponed to new date</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-blue">
+                        <span class="summary-label">PM Due This Week</span>
+                        <strong id="pm-ov-due-week">--</strong>
+                        <span class="pm-kpi-sub">current week</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-slate">
+                        <span class="summary-label">PM Without PIC</span>
+                        <strong id="pm-ov-no-pic">--</strong>
+                        <span class="pm-kpi-sub">needs an owner</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-amber">
+                        <span class="summary-label">Late Completed PM</span>
+                        <strong id="pm-ov-late">--</strong>
+                        <span class="pm-kpi-sub">done after the week</span>
+                    </article>
+                </section>
+
+                <section class="card-shell pm-calendar-shell" id="pm-calendar-section">
+                    <div class="section-head pm-calendar-head">
+                        <div>
+                            <h2>Calendar Planner</h2>
+                            <p class="section-subtitle">Plan, add, and update preventive maintenance by month, week, or day.</p>
+                        </div>
+                        <div class="pm-calendar-controls">
+                            <button type="button" class="pm-btn-primary pm-add-btn" id="pm-add-task-btn">+ Schedule Maintenance</button>
+                            <button type="button" class="pm-icon-btn" id="pm-calendar-prev" title="Previous period">&#8249;</button>
+                            <div class="pm-calendar-mode" role="tablist" aria-label="Calendar view">
+                                <button type="button" class="pm-tab active" data-pm-calendar-mode="month">Month</button>
+                                <button type="button" class="pm-tab" data-pm-calendar-mode="week">Week</button>
+                                <button type="button" class="pm-tab" data-pm-calendar-mode="day">Day</button>
+                            </div>
+                            <button type="button" class="pm-icon-btn" id="pm-calendar-next" title="Next period">&#8250;</button>
+                        </div>
+                    </div>
+                    <div class="pm-calendar-legend" aria-hidden="true">
+                        <span><i class="pm-dot pm-dot-blue"></i>Pending</span>
+                        <span><i class="pm-dot pm-dot-green"></i>Done</span>
+                        <span><i class="pm-dot pm-dot-red"></i>Overdue</span>
+                        <span><i class="pm-dot pm-dot-amber"></i>Backlog</span>
+                        <span><i class="pm-dot pm-dot-grey"></i>No PM</span>
+                    </div>
+                    <div class="pm-calendar-layout">
+                        <div>
+                            <div class="pm-calendar-title" id="pm-calendar-title">--</div>
+                            <div class="pm-calendar-weekdays" id="pm-calendar-weekdays"></div>
+                            <div class="pm-calendar-grid" id="pm-calendar-grid"></div>
+                        </div>
+                        <aside class="pm-calendar-detail" id="pm-calendar-detail">
+                            <h3 id="pm-calendar-detail-title">Select a date</h3>
+                            <p id="pm-calendar-detail-subtitle">PM task details will appear here.</p>
+                            <div id="pm-calendar-detail-list" class="pm-calendar-detail-list"></div>
+                        </aside>
+                    </div>
+                </section>
+
+                <section class="card-shell pm-table-card" id="pm-task-list-section">
+                    <div class="section-head pm-table-head">
+                        <div>
+                            <h2>Task List</h2>
+                            <p class="section-subtitle"><span id="pm-task-count">0</span> PM records for operational follow-up</p>
+                        </div>
+                    </div>
+                    <div class="pm-task-filter-grid">
+                        <label class="control-field search-field">
+                            <span>Search</span>
+                            <input id="pm-task-search" type="search" placeholder="Asset ID, asset name, system">
+                        </label>
+                        <label class="control-field">
+                            <span>Month</span>
+                            <select id="pm-task-month"></select>
+                        </label>
+                        <label class="control-field">
+                            <span>From</span>
+                            <input id="pm-task-date-from" type="date">
+                        </label>
+                        <label class="control-field">
+                            <span>To</span>
+                            <input id="pm-task-date-to" type="date">
+                        </label>
+                    </div>
+                    <div class="table-wrap pm-task-scroll">
+                        <table class="pm-table">
+                            <thead id="pm-task-table-head"></thead>
+                            <tbody id="pm-task-table-body">
+                                <tr><td class="empty-row">Loading PM schedule.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <section class="pm-purpose-head" id="pm-analysis-section">
                     <div>
-                        <h2>Maintenance Overview</h2>
-                        <p class="section-subtitle">Combined preventive maintenance summary across utility and equipment schedules</p>
+                        <h2>PM Analysis</h2>
+                        <p class="section-subtitle">Completion, compliance trend, backlog concentration, and workload for the selected filters.</p>
                     </div>
-                </div>
-                <div class="filter-grid">
-                    <label class="control-field">
-                        <span>Month</span>
-                        <select id="overview-filter-month"></select>
-                    </label>
-                    <label class="control-field">
-                        <span>Category</span>
-                        <select id="overview-filter-category"></select>
-                    </label>
-                    <label class="control-field">
-                        <span>Status</span>
-                        <select id="overview-filter-status"></select>
-                    </label>
-                    <label class="control-field">
-                        <span>Sort</span>
-                        <select id="overview-filter-sort"></select>
-                    </label>
-                    <label class="control-field search-field">
-                        <span>Search</span>
-                        <input id="overview-filter-search" type="search" placeholder="Asset code, name, or person in charge">
-                    </label>
-                    <div class="control-field action-field">
-                        <span>&nbsp;</span>
-                        <button type="button" id="apply-overview-filters" class="apply-btn">Apply Filters</button>
-                    </div>
-                </div>
-            </section>
+                </section>
 
-            <section class="card-shell table-card">
-                <div class="table-wrap">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Date of Maintenance</th>
-                                <th>Machine</th>
-                                <th>PM Type</th>
-                                <th>Status</th>
-                                <th>Person In Charge</th>
-                                <th>Additional Inspection</th>
-                                <th>Follow Up on Inspection</th>
-                            </tr>
-                        </thead>
-                        <tbody id="overview-table-body">
-                            <tr><td colspan="7" class="empty-row">Loading maintenance overview.</td></tr>
-                        </tbody>
-                    </table>
+                <section class="pm-chart-grid">
+                    <article class="card-shell pm-chart-card pm-chart-wide">
+                        <div class="section-head"><div><h2>Scheduled vs Completed PM by Month</h2>
+                            <p class="section-subtitle">Verified done and auto-assumed done against the plan</p></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-chart-month"></canvas></div>
+                    </article>
+                    <article class="card-shell pm-chart-card">
+                        <div class="section-head"><div><h2>PM Compliance Trend</h2>
+                            <p class="section-subtitle">Monthly compliance %, target 90%</p></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-chart-compliance"></canvas></div>
+                    </article>
+                </section>
+
+                <section class="pm-chart-grid">
+                    <article class="card-shell pm-chart-card">
+                        <div class="section-head"><div><h2>PM Status Breakdown</h2></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-chart-status"></canvas></div>
+                    </article>
+                    <article class="card-shell pm-chart-card">
+                        <div class="section-head"><div><h2>PM Workload by Functional Location &amp; Stage</h2>
+                            <p class="section-subtitle">Scheduled PM workload grouped by System / Area (functional location)</p></div></div>
+                        <div class="pm-chart-wrap pm-chart-tall"><canvas id="pm-chart-workload"></canvas></div>
+                    </article>
+                </section>
+
+                <section class="pm-chart-grid">
+                    <article class="card-shell pm-chart-card pm-chart-wide">
+                        <div class="section-head"><div><h2>Backlog / Overdue PM by System or Area</h2>
+                            <p class="section-subtitle">Where delayed PM is concentrated</p></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-chart-backlog-system"></canvas></div>
+                    </article>
+                    <article class="card-shell pm-chart-card">
+                        <div class="section-head"><div><h2>Top 10 Repeated Backlog / Overdue</h2></div></div>
+                        <div class="table-wrap pm-top-table-wrap">
+                            <table class="pm-table pm-top-table">
+                                <thead><tr><th>Asset</th><th>System / Area</th><th class="pm-num">Items</th></tr></thead>
+                                <tbody id="pm-top-backlog-body"><tr><td colspan="3" class="empty-row">No backlog or overdue PM.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </article>
+                </section>
+
+                <section class="card-shell pm-dq-card" hidden>
+                    <details class="pm-dq-details">
+                        <summary>Data quality &amp; review (admin) — <span id="pm-ov-dq-count">0</span> flagged rows</summary>
+                        <div class="pm-dq-chips" id="pm-ov-dq-chips"></div>
+                        <div class="table-wrap">
+                            <table class="pm-table">
+                                <thead>
+                                    <tr>
+                                        <th>Stage</th><th>Asset ID</th><th>Asset Name</th>
+                                        <th>Main Asset Group</th><th>Planned Month</th>
+                                        <th>Status</th><th>Mapping Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="pm-ov-dq-body">
+                                    <tr><td colspan="7" class="empty-row">No data quality issues.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </details>
+                </section>
+            </div>
+
+            <div id="pm-edit-modal" class="pm-modal-overlay" hidden>
+                <div class="pm-modal" role="dialog" aria-modal="true" aria-labelledby="pm-edit-title">
+                    <div class="pm-modal-head">
+                        <div>
+                            <h3 id="pm-edit-title">Update PM Task</h3>
+                            <p id="pm-edit-subtitle" class="pm-modal-sub"></p>
+                        </div>
+                        <button type="button" class="pm-modal-close" id="pm-edit-close" title="Close">&#10005;</button>
+                    </div>
+                    <form id="pm-edit-form" class="pm-modal-body">
+                        <div class="pm-edit-meta" id="pm-edit-meta"></div>
+                        <label class="pm-edit-field">
+                            <span>Status</span>
+                            <select id="pm-edit-status">
+                                <option value="Pending">Pending</option>
+                                <option value="Done">Done</option>
+                                <option value="Backlog">Backlog</option>
+                                <option value="Deferred">Deferred</option>
+                                <option value="Not Applicable">Not Applicable</option>
+                                <option value="Cancelled">Cancelled</option>
+                            </select>
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>Scheduled Date <small>(expected week/date to complete PM)</small></span>
+                            <input type="date" id="pm-edit-scheduled">
+                        </label>
+                        <label class="pm-edit-field pm-edit-field-wide">
+                            <span>PM Type / Task Description</span>
+                            <input type="text" id="pm-edit-description" placeholder="Maintenance task" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field" id="pm-edit-completion-field" hidden>
+                            <span>Completion Date</span>
+                            <input type="date" id="pm-edit-completion">
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>PIC / Technician</span>
+                            <input type="text" id="pm-edit-pic" placeholder="Name or team" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field" id="pm-edit-reschedule-field" hidden>
+                            <span>Rescheduled Date</span>
+                            <input type="date" id="pm-edit-reschedule">
+                        </label>
+                        <label class="pm-edit-field pm-edit-field-wide" id="pm-edit-reason-field" hidden>
+                            <span id="pm-edit-reason-label">Backlog Reason</span>
+                            <input type="text" id="pm-edit-reason" placeholder="Reason" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field pm-edit-field-wide">
+                            <span>Remarks</span>
+                            <textarea id="pm-edit-remarks" rows="2" placeholder="Notes for review"></textarea>
+                        </label>
+                        <p class="pm-edit-error" id="pm-edit-error" hidden></p>
+                        <div class="pm-modal-foot">
+                            <span class="pm-edit-audit" id="pm-edit-audit"></span>
+                            <div class="pm-modal-actions">
+                                <button type="button" class="pm-btn-danger" id="pm-edit-delete" hidden>Delete</button>
+                                <button type="button" class="pm-btn-ghost" id="pm-edit-cancel">Cancel</button>
+                                <button type="submit" class="pm-btn-primary" id="pm-edit-save">Save Update</button>
+                            </div>
+                        </div>
+                    </form>
                 </div>
-            </section>
+            </div>
+
+            <div id="pm-plan-modal" class="pm-modal-overlay" hidden>
+                <div class="pm-modal pm-modal-lg" role="dialog" aria-modal="true" aria-labelledby="pm-plan-title">
+                    <div class="pm-modal-head">
+                        <div>
+                            <h3 id="pm-plan-title">Schedule Maintenance</h3>
+                            <p class="pm-modal-sub">Create a manual PM task. Saved to the planner without changing the imported PM schedule.</p>
+                        </div>
+                        <button type="button" class="pm-modal-close" id="pm-plan-close" title="Close">&#10005;</button>
+                    </div>
+                    <form id="pm-plan-form" class="pm-modal-body">
+                        <div class="pm-edit-field pm-edit-field-wide pm-asset-search">
+                            <span>Asset (search by ID, name, system, or category)</span>
+                            <input type="text" id="pm-plan-asset-search" placeholder="Type to search Asset_Master…" autocomplete="off">
+                            <div id="pm-asset-results" class="pm-asset-results" hidden></div>
+                        </div>
+                        <label class="pm-edit-field">
+                            <span>Asset ID *</span>
+                            <input type="text" id="pm-plan-asset-id" placeholder="Asset ID" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>Asset Name</span>
+                            <input type="text" id="pm-plan-asset-name" placeholder="Asset name" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>Asset Category</span>
+                            <select id="pm-plan-category">
+                                <option value="Utility">Utility</option>
+                                <option value="Equipment">Equipment</option>
+                            </select>
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>PM Stage</span>
+                            <select id="pm-plan-stage">
+                                <option value="Stage 1">Stage 1</option>
+                                <option value="Stage 2">Stage 2</option>
+                            </select>
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>System / Area</span>
+                            <input type="text" id="pm-plan-system" placeholder="System or area" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>Priority / Criticality</span>
+                            <input type="text" id="pm-plan-priority" placeholder="e.g. High / Critical" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field pm-edit-field-wide">
+                            <span>PM Type / Task Description *</span>
+                            <input type="text" id="pm-plan-description" placeholder="e.g. Quarterly inspection and lubrication" autocomplete="off">
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>Scheduled Date *</span>
+                            <input type="date" id="pm-plan-date">
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>Scheduled Week</span>
+                            <input type="text" id="pm-plan-week" readonly placeholder="auto">
+                        </label>
+                        <label class="pm-edit-field">
+                            <span>Frequency</span>
+                            <select id="pm-plan-frequency">
+                                <option value="One-time">One-time</option>
+                                <option value="Weekly">Weekly</option>
+                                <option value="Monthly">Monthly</option>
+                                <option value="Quarterly">Quarterly</option>
+                                <option value="Yearly">Yearly</option>
+                                <option value="Custom">Custom</option>
+                            </select>
+                        </label>
+                        <label class="pm-edit-field" id="pm-plan-custom-field" hidden>
+                            <span>Custom interval (days)</span>
+                            <input type="number" id="pm-plan-custom" min="1" step="1" placeholder="e.g. 14">
+                        </label>
+                        <label class="pm-edit-field pm-edit-field-wide">
+                            <span>Remarks</span>
+                            <textarea id="pm-plan-remarks" rows="2" placeholder="Planning notes"></textarea>
+                        </label>
+                        <p class="pm-edit-error" id="pm-plan-error" hidden></p>
+                        <div class="pm-modal-foot">
+                            <span class="pm-edit-audit">Source: Manual Planner</span>
+                            <div class="pm-modal-actions">
+                                <button type="button" class="pm-btn-ghost" id="pm-plan-cancel">Cancel</button>
+                                <button type="submit" class="pm-btn-primary" id="pm-plan-save">Add PM Task</button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
         </section>
 
         <section id="spare-parts-view" class="maintenance-view hidden">
@@ -169,7 +415,6 @@
                 <div class="section-head">
                     <div>
                         <h2>Spare Parts Imports</h2>
-                        <p class="section-subtitle">Load the export-template files for inventory, external Gen PO, and annual spare-parts consumption. Each upload is validated before the dashboard refreshes.</p>
                     </div>
                     <div class="spare-currency-control">
                         <label for="spare-currency-global">Currency</label>
@@ -213,22 +458,185 @@
             </section>
 
             <section class="card-shell spare-overview-shell">
-                <div class="section-head">
+                <div class="section-head spare-overview-head">
                     <div>
                         <h2>Spare Parts Overview</h2>
-                        <p class="section-subtitle">Current in-store inventory compared with classified external spare-parts purchases from the imported files.</p>
+                        <p id="spare-overview-context" class="section-subtitle spare-overview-context">Showing all imported purchase data.</p>
+                    </div>
+                    <div class="filter-grid spare-overview-filter-grid">
+                        <label class="control-field">
+                            <span>Range</span>
+                            <select id="spare-period-filter">
+                                <option value="all">All Data</option>
+                                <option value="ytd">YTD</option>
+                            </select>
+                        </label>
+                        <label class="control-field">
+                            <span>Year</span>
+                            <select id="spare-year-filter">
+                                <option value="all">All Years</option>
+                            </select>
+                        </label>
+                        <label class="control-field">
+                            <span>Month</span>
+                            <select id="spare-month-filter">
+                                <option value="all">All Months</option>
+                            </select>
+                        </label>
                     </div>
                 </div>
-                <div id="spare-page-notes" class="spare-note-stack"></div>
-                <section class="summary-grid spare-summary-grid">
-                    <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Current Inventory Value</span><strong id="spare-total-inventory-value">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Current Stocked Spare Part Items</span><strong id="spare-current-stocked-items">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">External PO Spare Part Value</span><strong id="spare-external-spare-po-value">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Stocked Spare Part PO Value</span><strong id="spare-stocked-spare-po-value">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label">Non-Stock / Direct Purchase Value</span><strong id="spare-non-stock-spare-po-value">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-red"><span class="summary-label">Non-Spare Part / Service PO Value</span><strong id="spare-non-spare-service-po-value">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">External Purchase Dependency</span><strong id="spare-external-dependency">--</strong></article>
-                    <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label">Manual Review PO Items</span><strong id="spare-manual-review-po-items">--</strong></article>
+                <div class="spare-kpi-rows">
+                    <section class="summary-grid spare-summary-grid spare-kpi-row-primary" aria-label="Current in-stock spare parts">
+                        <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">No. of Current In-Stock Spare Parts</span><strong id="spare-in-stock-items">--</strong></article>
+                        <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Current In-Stock Value</span><strong id="spare-in-stock-value">--</strong></article>
+                    </section>
+                    <section class="summary-grid spare-summary-grid spare-kpi-row-consumption" aria-label="Spare parts consumption">
+                        <article class="summary-card summary-card-kpi summary-card-blue spare-kpi-dual">
+                            <span class="summary-label">Stocked Spare Part Purchase</span>
+                            <strong id="spare-stocked-value">--</strong>
+                            <span class="spare-kpi-sub"><span id="spare-stocked-count">--</span> PO rows</span>
+                        </article>
+                        <article class="summary-card summary-card-kpi summary-card-amber spare-kpi-dual">
+                            <span class="summary-label">Non-Stock</span>
+                            <strong id="spare-non-stock-spare-po-value">--</strong>
+                            <span class="spare-kpi-sub"><span id="spare-non-stock-count">--</span> PO rows</span>
+                        </article>
+                        <article class="summary-card summary-card-kpi summary-card-red spare-kpi-dual">
+                            <span class="summary-label">Services</span>
+                            <strong id="spare-non-spare-service-po-value">--</strong>
+                            <span class="spare-kpi-sub"><span id="spare-services-count">--</span> PO rows</span>
+                            <span class="spare-kpi-note">Services include repair and cleaning.</span>
+                        </article>
+                    </section>
+                </div>
+            </section>
+
+            <section class="card-shell asset-intel-card" id="asset-parts-intelligence-card">
+                <div class="section-head asset-intel-head">
+                    <div>
+                        <h2>Asset Parts Intelligence</h2>
+                        <p class="section-subtitle">View related work orders, spare parts, and suppliers for selected assets or machine groups.</p>
+                    </div>
+                    <span class="asset-intel-readonly">Read-only analysis</span>
+                </div>
+
+                <div class="asset-intel-controls">
+                    <label class="control-field asset-intel-search-field">
+                        <span>Search asset / machine group / part / supplier</span>
+                        <input type="search" id="asset-intel-search" placeholder="e.g. Dicing Machine, Robot Coupe CL50, Combi Oven, Refrigeration…" autocomplete="off">
+                    </label>
+                    <label class="control-field">
+                        <span>Asset family</span>
+                        <select id="asset-intel-family"><option value="">All / detect from search</option></select>
+                    </label>
+                    <label class="control-field">
+                        <span>Machine group</span>
+                        <select id="asset-intel-machine-group"><option value="">All / detect from search</option></select>
+                    </label>
+                    <label class="control-field">
+                        <span>Date from</span>
+                        <input type="date" id="asset-intel-date-from">
+                    </label>
+                    <label class="control-field">
+                        <span>Date to</span>
+                        <input type="date" id="asset-intel-date-to">
+                    </label>
+                    <label class="asset-intel-toggle">
+                        <input type="checkbox" id="asset-intel-include-related" checked>
+                        <span>Include related description matches</span>
+                    </label>
+                    <label class="asset-intel-toggle">
+                        <input type="checkbox" id="asset-intel-include-low">
+                        <span>Include possible low-confidence matches</span>
+                    </label>
+                    <button type="button" class="toggle-btn asset-intel-analyse-btn" id="asset-intel-analyse">Analyse Asset</button>
+                </div>
+                <p class="asset-intel-status" id="asset-intel-status">Search for an asset, family, machine group, part, or supplier to begin.</p>
+
+                <article class="asset-intel-selected">
+                    <div>
+                        <span class="asset-intel-eyebrow">Selected scope</span>
+                        <h3 id="asset-intel-selected-name">No asset selected</h3>
+                        <p id="asset-intel-selected-meta">Results will include direct matches and clearly flagged related matches.</p>
+                    </div>
+                    <div class="asset-intel-aliases" id="asset-intel-aliases"></div>
+                </article>
+
+                <section class="summary-grid spare-summary-grid asset-intel-summary-grid">
+                    <article class="summary-card summary-card-kpi summary-card-blue asset-intel-kpi">
+                        <span class="summary-label">Related WO/MR</span>
+                        <strong id="asset-intel-kpi-wo-total">--</strong>
+                        <small id="asset-intel-kpi-wo-detail">Direct -- | Description -- | Open -- | Finished --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-green asset-intel-kpi">
+                        <span class="summary-label">Spare Parts Used</span>
+                        <strong id="asset-intel-kpi-store-total">--</strong>
+                        <small id="asset-intel-kpi-store-detail">Qty -- | Value -- | Unique -- | Top --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-amber asset-intel-kpi">
+                        <span class="summary-label">Purchased Parts</span>
+                        <strong id="asset-intel-kpi-po-total">--</strong>
+                        <small id="asset-intel-kpi-po-detail">Value -- | Unique -- | Latest --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-blue asset-intel-kpi">
+                        <span class="summary-label">Suppliers</span>
+                        <strong id="asset-intel-kpi-suppliers-total">--</strong>
+                        <small id="asset-intel-kpi-suppliers-detail">Main -- | Latest --</small>
+                    </article>
+                    <article class="summary-card summary-card-kpi summary-card-purple asset-intel-kpi">
+                        <span class="summary-label">Data Quality</span>
+                        <strong id="asset-intel-kpi-quality-confidence">--</strong>
+                        <small id="asset-intel-kpi-quality-detail">Mismatches -- | Missing ID -- | Description -- | PO-only --</small>
+                    </article>
+                </section>
+
+                <div class="asset-intel-data-gaps" id="asset-intel-data-gaps">
+                    <span>Data confidence notes will appear after analysis.</span>
+                </div>
+
+                <article class="spare-panel-table asset-intel-supplier-card">
+                    <div class="spare-panel-head"><h3>Supplier Summary</h3><p>Suppliers linked to the selected asset, family, machine group, part, or search term.</p></div>
+                    <div class="table-wrap spare-table-wrap">
+                        <table>
+                            <thead><tr><th>Supplier name</th><th>Parts supplied</th><th>Total PO value</th><th>PO lines</th><th>Latest purchase date</th></tr></thead>
+                            <tbody id="asset-intel-supplier-body"><tr><td colspan="5" class="empty-row">Analyse an asset to view supplier relationships.</td></tr></tbody>
+                        </table>
+                    </div>
+                </article>
+
+                <section class="asset-intel-panel-grid">
+                    <article class="spare-panel-table asset-intel-panel">
+                        <div class="spare-panel-head"><h3>Related WO/MR</h3><p>Direct and description-based maintenance records with confidence and coding flags.</p></div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>Date</th><th>MR number</th><th>WO number</th><th>Recorded asset ID</th><th>Recorded asset name / area</th><th>Description</th><th>Status</th><th>Match source</th><th>Match confidence</th><th>Data quality flag</th></tr></thead>
+                                <tbody id="asset-intel-wo-body"><tr><td colspan="10" class="empty-row">Analyse an asset to view related WO/MR records.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </article>
+
+                    <article class="spare-panel-table asset-intel-panel">
+                        <div class="spare-panel-head"><h3>Spare Parts Used</h3><p>Actual store issue / project transaction records linked by asset, WO/MR, or description.</p></div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>Date</th><th>Item code</th><th>Part name</th><th>Quantity</th><th>Value</th><th>Recorded asset / project</th><th>Related WO/MR</th><th>Match source</th><th>Match confidence</th><th>Data quality flag</th></tr></thead>
+                                <tbody id="asset-intel-store-body"><tr><td colspan="10" class="empty-row">Analyse an asset to view store consumption.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </article>
+
+                    <article class="spare-panel-table asset-intel-panel">
+                        <div class="spare-panel-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                            <div><h3>Suppliers / Purchase History</h3><p>Gen PO spare-part purchases and services found through asset references, aliases, descriptions, and suppliers.</p></div>
+                            <button type="button" class="toggle-btn" id="asset-intel-export-po" disabled title="Export the matched purchase history + supplier summary to an Excel-ready file">Export Excel</button>
+                        </div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>PO date</th><th>PO number</th><th>Supplier</th><th>Part / item description</th><th>Quantity</th><th>Value</th><th>Related asset / alias matched</th><th>Match source</th><th>Match confidence</th></tr></thead>
+                                <tbody id="asset-intel-po-body"><tr><td colspan="9" class="empty-row">Analyse an asset to view purchase history.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </article>
                 </section>
             </section>
 
@@ -244,9 +652,9 @@
                     <small>Current store stock and stock status</small>
                 </button>
                 <button class="spare-select-card" type="button" data-spare-panel="comparison">
-                    <span>Inventory vs External</span>
+                    <span>Inventory / Non-Stock Split</span>
                     <strong id="spare-selector-comparison-metric">--</strong>
-                    <small>Inventory matches and purchase dependency</small>
+                    <small>Inventory value share vs non-stock spare-part PO value share</small>
                 </button>
             </section>
 
@@ -263,7 +671,6 @@
                         <article class="spare-panel-metric"><span>Gen PO Spare Part Quantity</span><strong id="spare-fast-moving-parts">--</strong></article>
                         <article class="spare-panel-metric"><span>Gen PO Non-Spare Quantity</span><strong id="spare-slow-moving-parts">--</strong></article>
                         <article class="spare-panel-metric"><span>Gen PO Spare Part Line Count</span><strong id="spare-dormant-parts">--</strong></article>
-                        <article class="spare-panel-metric"><span>Translation Failed PO Rows</span><strong id="spare-health-percent">--</strong></article>
                     </section>
 
                     <section class="spare-panel-chart-grid">
@@ -289,8 +696,8 @@
                         <div class="spare-panel-head"><h3>Gen PO Summary List</h3><p>Grouped spare part purchases only, with vendor concentration and last purchase date.</p></div>
                         <div class="table-wrap spare-table-wrap">
                             <table>
-                                <thead><tr><th>Clean Description</th><th>Translated Description</th><th>Classification</th><th>Total Quantity Purchased</th><th>Total PO Value</th><th>PO Line Count</th><th>Vendor Count</th><th>Last Purchase Date</th><th>Inventory Match Status</th></tr></thead>
-                                <tbody id="spare-turnover-table-body"><tr><td colspan="9" class="empty-row">No classified spare part purchases yet.</td></tr></tbody>
+                                <thead><tr><th>Clean Description</th><th>Translated Description</th><th>Classification</th><th>Total Quantity Purchased</th><th>Total PO Value</th><th>PO Line Count</th><th>Vendor Count</th><th>Last Purchase Date</th></tr></thead>
+                                <tbody id="spare-turnover-table-body"><tr><td colspan="8" class="empty-row">No classified spare part purchases yet.</td></tr></tbody>
                             </table>
                         </div>
                     </article>
@@ -298,17 +705,23 @@
                     <div id="spare-external-purchases-slot" class="spare-external-purchases-slot"></div>
 
                     <article class="spare-panel-table spare-genpo-classification-table">
-                        <div class="spare-panel-head"><h3>Gen PO Classification Table</h3><p>Detailed Gen PO line classification with original Thai text, translated text, match status, and reasoning.</p></div>
+                        <div class="spare-panel-head"><h3>Gen PO Classification Table</h3><p>Detailed Gen PO line classification with original Thai text, translated text, and reasoning.</p></div>
                         <div class="table-wrap spare-table-wrap">
                             <table>
-                                <thead><tr><th>PO No.</th><th>PO Date</th><th>Item Code</th><th>Original Description</th><th>Translated Description</th><th>Clean Description</th><th>Quantity</th><th>Unit</th><th>Total Price</th><th>Vendor Name</th><th>Group of Cost</th><th>PD Machine</th><th>Classification</th><th>Confidence</th><th>Classification Reason</th><th>Translation Status</th><th>Inventory Match Status</th></tr></thead>
-                                <tbody id="spare-external-po-table-body"><tr><td colspan="17" class="empty-row">Gen PO file not uploaded.</td></tr></tbody>
+                                <thead><tr><th>PO No.</th><th>PO Date</th><th>Item Code</th><th>Original Description</th><th>Translated Description</th><th>Clean Description</th><th>Quantity</th><th>Unit</th><th>Total Price</th><th>Vendor Name</th><th>Group of Cost</th><th>PD Machine</th><th>Classification</th><th>Confidence</th><th>Classification Reason</th><th>Translation Status</th></tr></thead>
+                                <tbody id="spare-external-po-table-body"><tr><td colspan="16" class="empty-row">Gen PO file not uploaded.</td></tr></tbody>
                             </table>
                         </div>
                     </article>
 
                     <article class="spare-panel-table">
-                        <div class="spare-panel-head"><h3>Manual Review Table</h3><p>Rows flagged for missing item code, unclear description, translation failure, low confidence, weak match, or missing total price.</p></div>
+                        <div class="spare-panel-head spare-panel-head-search">
+                            <div>
+                                <h3>Manual Review Table <span class="spare-panel-count" id="spare-manual-review-count">--</span></h3>
+                                <p>Rows flagged for missing item code, description too short to classify, translation failure, low confidence, weak match, or missing total price.</p>
+                            </div>
+                            <input type="search" id="spare-manual-review-search" class="spare-panel-search" placeholder="Search PO no., description, item code, vendor…" autocomplete="off" aria-label="Search manual review table">
+                        </div>
                         <div class="table-wrap spare-table-wrap">
                             <table>
                                 <thead><tr><th>PO No.</th><th>PO Date</th><th>Item Code</th><th>Original Description</th><th>Translated Description</th><th>Total Price</th><th>Vendor Name</th><th>Reason for Review</th></tr></thead>
@@ -365,7 +778,6 @@
                     <div class="section-head">
                         <div>
                             <h2>Inventory vs External Analysis</h2>
-                            <p class="section-subtitle">Current inventory master compared with classified external Gen PO spare part purchases.</p>
                         </div>
                     </div>
 
@@ -376,7 +788,7 @@
                     </section>
 
                     <article class="spare-panel-chart spare-panel-chart-single">
-                        <div class="spare-panel-head"><h3>Inventory vs External Purchase Value</h3><p>Shows value comparison when inventory value is available; otherwise falls back to quantity comparison.</p></div>
+                        <div class="spare-panel-head"><h3>Inventory vs Non-Stock and Services Purchase Value</h3><p>Compares current inventory against non-stock spare-part purchases and services/non-spare purchases. Falls back to quantity when inventory value is unavailable.</p></div>
                         <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="spare-consumption-chart"></canvas></div>
                     </article>
 
@@ -397,7 +809,6 @@
                 <div class="pt-section-head">
                     <div>
                         <h2>Project Actual Transactions 2026</h2>
-                        <p class="section-subtitle">Spare part consumption parsed from the Project Actual Transactions file — classified, translated, and linked to work order data.</p>
                     </div>
                     <div id="pt-status-badge" class="pt-status-badge"></div>
                 </div>
@@ -406,7 +817,6 @@
                     <label class="control-field"><span>Month</span><select id="pt-month-filter"><option value="all">All Months</option></select></label>
                     <label class="control-field"><span>Category</span><select id="pt-category-filter"><option value="all">All Categories</option></select></label>
                     <label class="control-field"><span>Asset</span><select id="pt-asset-filter"><option value="all">All Assets</option></select></label>
-                    <label class="control-field"><span>Link Status</span><select id="pt-link-filter"><option value="all">All</option><option value="Linked">Linked</option><option value="Unlinked">Unlinked</option></select></label>
                     <label class="control-field search-field"><span>Search</span><input id="pt-search" type="search" placeholder="Part description, WO ID, asset…"></label>
                 </div>
             </section>
@@ -417,7 +827,6 @@
                 <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">Unique Work Orders</span><strong id="pt-kpi-unique-wo">--</strong></article>
                 <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Unique Assets</span><strong id="pt-kpi-unique-assets">--</strong></article>
                 <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Unique Spare Parts</span><strong id="pt-kpi-unique-parts">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-red"><span class="summary-label">Unlinked Records</span><strong id="pt-kpi-unlinked">--</strong></article>
                 <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">Avg Spend / WO (THB)</span><strong id="pt-kpi-avg-per-wo">--</strong></article>
             </section>
 
@@ -444,58 +853,167 @@
                 </article>
             </section>
 
-            <!-- ─── External Purchase Orders ──────────────────────────────────── -->
-            <section class="card-shell epo-section" id="epo-section">
+            <!-- ─── External Purchases (Supplier Delivery KPI Dashboard) ─── -->
+            <section class="card-shell epo-section epo-dashboard" id="epo-section">
                 <div class="epo-header">
                     <div>
-                        <h2 class="epo-title">External Purchases (PO)</h2>
-                        <p class="section-subtitle">Gen PO in D365 Rev.01 — all external purchase orders</p>
+                        <h2 class="epo-title">Supplier Delivery KPI Dashboard</h2>
                     </div>
                     <div class="epo-header-right">
                         <span id="epo-status-badge" class="epo-status-badge"></span>
                     </div>
                 </div>
 
-                <!-- Summary KPI cards -->
+                <!-- KPI Summary Cards (top row) -->
                 <div class="epo-kpi-grid" id="epo-kpi-grid">
-                    <div class="epo-kpi-card epo-kpi-blue"><span class="epo-kpi-label">Total Spend</span><strong id="epo-kpi-spend">--</strong></div>
-                    <div class="epo-kpi-card epo-kpi-indigo"><span class="epo-kpi-label">Total POs</span><strong id="epo-kpi-pos">--</strong></div>
-                    <div class="epo-kpi-card epo-kpi-amber"><span class="epo-kpi-label">Awaiting Delivery</span><strong id="epo-kpi-awaiting">--</strong></div>
-                    <div class="epo-kpi-card epo-kpi-green"><span class="epo-kpi-label">Expent Cost</span><strong id="epo-kpi-expent">--</strong></div>
-                    <div class="epo-kpi-card epo-kpi-purple"><span class="epo-kpi-label">CAPEX Budget</span><strong id="epo-kpi-capex-b">--</strong></div>
-                    <div class="epo-kpi-card epo-kpi-rose"><span class="epo-kpi-label">CAPEX Unbudget</span><strong id="epo-kpi-capex-u">--</strong></div>
+                    <div class="epo-kpi-card epo-kpi-indigo"><span class="epo-kpi-label">Total POs</span><strong id="epo-kpi-pos">--</strong><span class="epo-kpi-sub" id="epo-kpi-lines">--</span></div>
+                    <div class="epo-kpi-card epo-kpi-green"><span class="epo-kpi-label">On-time Delivery</span><strong id="epo-kpi-ontime-rate">--</strong><span class="epo-kpi-sub" id="epo-kpi-ontime-count">--</span></div>
+                    <div class="epo-kpi-card epo-kpi-red"><span class="epo-kpi-label">Average Delay</span><strong id="epo-kpi-avg-delay">--</strong><span class="epo-kpi-sub" id="epo-kpi-delayed-count">--</span></div>
+                    <div class="epo-kpi-card epo-kpi-amber"><span class="epo-kpi-label">Pending Deliveries</span><strong id="epo-kpi-awaiting">--</strong><span class="epo-kpi-sub">Awaiting Supplier</span></div>
+                    <div class="epo-kpi-card epo-kpi-blue"><span class="epo-kpi-label">Total Spend (THB)</span><strong id="epo-kpi-spend">--</strong><span class="epo-kpi-sub" id="epo-kpi-spend-sub">--</span></div>
                 </div>
 
                 <!-- Tab bar -->
                 <div class="epo-tabs-row">
-                    <button class="epo-tab-btn active" type="button" data-epotab="table">Line Items</button>
+                    <button class="epo-tab-btn active" type="button" data-epotab="overview">Overview</button>
+                    <button class="epo-tab-btn" type="button" data-epotab="suppliers">Supplier Performance</button>
+                    <button class="epo-tab-btn" type="button" data-epotab="log">PO Delivery Log</button>
+                    <button class="epo-tab-btn" type="button" data-epotab="category">Category Analysis</button>
+                    <button class="epo-tab-btn" type="button" data-epotab="spend">Spend Analysis</button>
                     <button class="epo-tab-btn" type="button" data-epotab="quality">
                         Data Quality <span class="epo-dq-badge" id="epo-dq-badge" style="display:none"></span>
                     </button>
                 </div>
 
-                <!-- Panel: Line Items -->
-                <div class="epo-panel" id="epo-panel-table">
+                <!-- Panel: Overview -->
+                <div class="epo-panel" id="epo-panel-overview">
+                    <div class="epo-overview-grid">
+                        <article class="epo-mini-card">
+                            <h3>Delivery Mix</h3>
+                            <div class="epo-chart-wrap"><canvas id="epo-chart-delivery"></canvas></div>
+                        </article>
+                        <article class="epo-mini-card">
+                            <h3>Cost Type Split</h3>
+                            <div class="epo-chart-wrap"><canvas id="epo-chart-costtype"></canvas></div>
+                        </article>
+                        <article class="epo-mini-card">
+                            <h3>Classification Split</h3>
+                            <div class="epo-chart-wrap"><canvas id="epo-chart-classification"></canvas></div>
+                        </article>
+                    </div>
+                </div>
+
+                <!-- Panel: Supplier Performance -->
+                <div class="epo-panel" id="epo-panel-suppliers" style="display:none">
                     <div class="tbl-filter-bar">
-                        <input type="search" id="epo-search" class="tbl-search-input" placeholder="Search description, machine, vendor…">
-                        <select id="epo-filter-type" class="tbl-filter-select"><option value="">All Cost Types</option></select>
-                        <select id="epo-filter-group" class="tbl-filter-select"><option value="">All Groups</option></select>
-                        <select id="epo-filter-status" class="tbl-filter-select"><option value="">All Statuses</option></select>
-                        <select id="epo-filter-vendor" class="tbl-filter-select"><option value="">All Vendors</option></select>
-                        <input type="date" id="epo-date-from" class="tbl-filter-select" title="PR date from">
-                        <input type="date" id="epo-date-to" class="tbl-filter-select" title="PR date to">
+                        <input type="search" id="epo-sup-search" class="tbl-search-input" placeholder="Search vendor name…">
+                        <select id="epo-sup-tier" class="tbl-filter-select">
+                            <option value="">All On-time Tiers</option>
+                            <option value="green">Green ≥ 85%</option>
+                            <option value="amber">Amber 70–84%</option>
+                            <option value="red">Red &lt; 70%</option>
+                        </select>
                     </div>
                     <div class="table-wrap spare-table-wrap">
                         <table>
                             <thead><tr>
-                                <th>PR No.</th><th>PO No.</th><th>Description</th><th>Machine</th>
-                                <th>Vendor</th><th>Qty</th><th>Unit</th><th>Unit Price</th>
-                                <th>Total</th><th>Cost Type</th><th>Status</th><th>GRN No.</th>
+                                <th>Vendor Name</th><th>Total POs</th><th>On-time</th><th>Delayed</th>
+                                <th>Pending</th><th>Avg Delay (days)</th><th>On-time Rate</th>
+                                <th>Spend (THB)</th><th>Status</th>
                             </tr></thead>
-                            <tbody id="epo-table-body"><tr><td colspan="12" class="empty-row">Loading…</td></tr></tbody>
+                            <tbody id="epo-sup-body"><tr><td colspan="9" class="empty-row">Loading…</td></tr></tbody>
+                        </table>
+                    </div>
+                </div>
+
+                <!-- Panel: PO-Level Delivery Log -->
+                <div class="epo-panel" id="epo-panel-log" style="display:none">
+                    <div class="tbl-filter-bar">
+                        <input type="search" id="epo-search" class="tbl-search-input" placeholder="Search PO No., vendor, description…">
+                        <select id="epo-filter-type" class="tbl-filter-select"><option value="">All Cost Types</option></select>
+                        <select id="epo-filter-group" class="tbl-filter-select"><option value="">All Groups</option></select>
+                        <select id="epo-filter-status" class="tbl-filter-select"><option value="">All Statuses</option></select>
+                        <select id="epo-filter-vendor" class="tbl-filter-select"><option value="">All Vendors</option></select>
+                        <select id="epo-filter-classification" class="tbl-filter-select"><option value="">All Classifications</option></select>
+                        <select id="epo-filter-delivery" class="tbl-filter-select">
+                            <option value="">All Delivery</option>
+                            <option value="Ontime">On-time</option>
+                            <option value="Delayed">Delayed</option>
+                            <option value="Pending">Pending</option>
+                        </select>
+                        <input type="date" id="epo-date-from" class="tbl-filter-select" title="PO date from">
+                        <input type="date" id="epo-date-to" class="tbl-filter-select" title="PO date to">
+                    </div>
+                    <div class="table-wrap spare-table-wrap">
+                        <table class="epo-log-table">
+                            <thead><tr>
+                                <th data-epo-sort="po_no">PO No.</th>
+                                <th data-epo-sort="date_po">PO Date</th>
+                                <th data-epo-sort="lead_time">Lead (d)</th>
+                                <th data-epo-sort="date_grn">GRN Date</th>
+                                <th data-epo-sort="actual_lead">Actual (d)</th>
+                                <th data-epo-sort="delay_days">Delay (d)</th>
+                                <th data-epo-sort="total_price">Total</th>
+                                <th>Flags</th>
+                            </tr></thead>
+                            <tbody id="epo-table-body"><tr><td colspan="8" class="empty-row">Loading…</td></tr></tbody>
                         </table>
                     </div>
                     <p class="epo-row-count" id="epo-row-count"></p>
+                </div>
+
+                <!-- Panel: Category Analysis (sub-tabs) -->
+                <div class="epo-panel" id="epo-panel-category" style="display:none">
+                    <div class="epo-subtabs-row">
+                        <button class="epo-subtab-btn active" type="button" data-eposubtab="parts">A. Stock vs Non-Stock (Parts)</button>
+                        <button class="epo-subtab-btn" type="button" data-eposubtab="services">B. Services</button>
+                    </div>
+                    <div class="epo-subpanel" id="epo-subpanel-parts">
+                        <div class="epo-overview-grid">
+                            <article class="epo-mini-card">
+                                <h3>Spend Split — Stock vs Non-Stock</h3>
+                                <div class="epo-chart-wrap"><canvas id="epo-chart-parts-spend"></canvas></div>
+                            </article>
+                            <article class="epo-mini-card">
+                                <h3>Line Count — Stock vs Non-Stock</h3>
+                                <div class="epo-chart-wrap"><canvas id="epo-chart-parts-count"></canvas></div>
+                            </article>
+                        </div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>Classification</th><th>Line Count</th><th>Spend (THB)</th><th>On-time Rate</th></tr></thead>
+                                <tbody id="epo-parts-cat-body"><tr><td colspan="4" class="empty-row">Loading…</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="epo-subpanel" id="epo-subpanel-services" style="display:none">
+                        <div class="epo-overview-grid">
+                            <article class="epo-mini-card epo-mini-card-wide">
+                                <h3>Service Spend by Group of Cost</h3>
+                                <div class="epo-chart-wrap"><canvas id="epo-chart-services"></canvas></div>
+                            </article>
+                        </div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>Group of Cost</th><th>Line Count</th><th>Spend (THB)</th><th>On-time Rate</th></tr></thead>
+                                <tbody id="epo-services-body"><tr><td colspan="4" class="empty-row">No service rows.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Panel: Spend Analysis -->
+                <div class="epo-panel" id="epo-panel-spend" style="display:none">
+                    <div class="epo-overview-grid">
+                        <article class="epo-mini-card epo-mini-card-wide">
+                            <h3>Monthly Spend Trend</h3>
+                            <div class="epo-chart-wrap"><canvas id="epo-chart-monthly"></canvas></div>
+                        </article>
+                        <article class="epo-mini-card epo-mini-card-wide">
+                            <h3>Top 10 Vendors by Total Spend</h3>
+                            <div class="epo-chart-wrap"><canvas id="epo-chart-top-vendors"></canvas></div>
+                        </article>
+                    </div>
                 </div>
 
                 <!-- Panel: Data Quality -->
@@ -503,7 +1021,7 @@
                     <div id="epo-dq-content"><p class="epo-dq-empty">Checking data quality…</p></div>
                 </div>
             </section>
-            <!-- ─── End External Purchase Orders ─────────────────────────────── -->
+            <!-- ─── End External Purchases ─────────────────────────────────── -->
 
             <article class="card-shell table-card pt-transactions-card">
                 <div class="section-head"><div><h2>All Transactions</h2><p class="section-subtitle">Full detail of all parsed spare part consumption lines (max 300 rows shown).</p></div></div>
@@ -511,17 +1029,16 @@
                     <input type="search" id="pt-txn-search" class="tbl-search-input" placeholder="Search description or asset…">
                     <select id="pt-txn-cat" class="tbl-filter-select"><option value="">All Categories</option></select>
                     <select id="pt-txn-asset" class="tbl-filter-select"><option value="">All Assets</option></select>
-                    <select id="pt-txn-status" class="tbl-filter-select"><option value="">All Link Statuses</option></select>
                 </div>
                 <div class="table-wrap spare-table-wrap">
                     <table>
                         <thead>
                             <tr>
                                 <th>Date</th><th>Work Order ID</th><th>Asset ID</th><th>Item Description</th><th>Category</th>
-                                <th>Qty</th><th>Total (THB)</th><th>Unit Cost</th><th>Equipment</th><th>Link Status</th>
+                                <th>Qty</th><th>Total (THB)</th><th>Unit Cost</th><th>Equipment</th>
                             </tr>
                         </thead>
-                        <tbody id="pt-transactions-body"><tr><td colspan="10" class="empty-row">Awaiting data.</td></tr></tbody>
+                        <tbody id="pt-transactions-body"><tr><td colspan="9" class="empty-row">Awaiting data.</td></tr></tbody>
                     </table>
                 </div>
             </article>
@@ -529,10 +1046,10 @@
             <section class="spare-table-grid">
                 <article class="card-shell table-card pt-parts-combined-card">
                     <div class="section-head">
-                        <div><h2>All Spare Parts</h2><p class="section-subtitle">All parts aggregated by description. Click a part to show its matching transaction lines below.</p></div>
+                        <div><h2>All Spare Parts</h2><p class="section-subtitle">All parts aggregated by description.</p></div>
                         <div class="pt-table-year-wrap">
                             <select id="pt-top-parts-year" class="control-select">
-                                <option value="all">All Years</option>
+                                <option value="all">All FY</option>
                             </select>
                         </div>
                     </div>
@@ -550,7 +1067,6 @@
                         <div class="section-head pt-selected-transactions-head">
                             <div>
                                 <h3 id="pt-selected-part-title">Selected Part Transactions</h3>
-                                <p class="section-subtitle" id="pt-selected-part-subtitle">Select a spare part above to view its related transaction lines.</p>
                             </div>
                             <button type="button" class="pt-clear-selection-btn hidden" id="pt-clear-selected-part">Clear selection</button>
                         </div>
@@ -559,72 +1075,139 @@
                                 <thead>
                                     <tr>
                                         <th>Date</th><th>Work Order ID</th><th>Asset ID</th><th>Item Description</th><th>Category</th>
-                                        <th>Qty</th><th>Total</th><th>Unit Cost</th><th>Equipment</th><th>Link Status</th>
+                                        <th>Qty</th><th>Total</th><th>Unit Cost</th><th>Equipment</th>
                                     </tr>
                                 </thead>
-                                <tbody id="pt-selected-part-transactions-body"><tr><td colspan="10" class="empty-row">Select a spare part above to view related transactions.</td></tr></tbody>
+                                <tbody id="pt-selected-part-transactions-body"><tr><td colspan="9" class="empty-row">Select a spare part above to view related transactions.</td></tr></tbody>
                             </table>
                         </div>
                     </div>
                 </article>
-                <article class="card-shell table-card pau-card" id="pau-card">
-                    <div class="section-head">
-                        <div>
-                            <h2>Part Usage by Asset</h2>
-                            <p class="section-subtitle">Ranked by work order count — click any part to see which assets used it. Matches the year selected in All Spare Parts above.</p>
+                <article class="card-shell table-card pt-insights-card">
+                    <div class="pt-insight-tabs-row" role="tablist" aria-label="Project transactions insights">
+                        <button class="pt-insight-tab-btn active" id="pt-insight-tab-part_usage" type="button" role="tab" aria-controls="pt-insight-panel-part_usage" aria-selected="true" tabindex="0" data-ptinsighttab="part_usage">Part Usage</button>
+                        <button class="pt-insight-tab-btn" id="pt-insight-tab-consumption" type="button" role="tab" aria-controls="pt-insight-panel-consumption" aria-selected="false" tabindex="-1" data-ptinsighttab="consumption">Consumption</button>
+                        <button class="pt-insight-tab-btn" id="pt-insight-tab-data_quality" type="button" role="tab" aria-controls="pt-insight-panel-data_quality" aria-selected="false" tabindex="-1" data-ptinsighttab="data_quality">Data Quality</button>
+                    </div>
+
+                    <div class="pt-insight-panel pau-card is-active" id="pt-insight-panel-part_usage" role="tabpanel" aria-labelledby="pt-insight-tab-part_usage">
+                        <div class="section-head">
+                            <div>
+                                <h2>Part Usage by Asset</h2>
+                                <p class="section-subtitle">Ranked by work order count. Matches the year selected in All Spare Parts above.</p>
+                            </div>
+                            <div class="pau-sort-wrap">
+                                <label class="control-label">Rank by</label>
+                                <select id="pau-sort" class="control-select">
+                                    <option value="wo_count">Work Orders</option>
+                                    <option value="total_consumption">Total Value (THB)</option>
+                                    <option value="total_qty">Total Qty</option>
+                                    <option value="asset_count">Assets Used By</option>
+                                </select>
+                            </div>
                         </div>
-                        <div class="pau-sort-wrap">
-                            <label class="control-label">Rank by</label>
-                            <select id="pau-sort" class="control-select">
-                                <option value="wo_count">Work Orders</option>
-                                <option value="total_consumption">Total Value (THB)</option>
-                                <option value="total_qty">Total Qty</option>
-                                <option value="asset_count">Assets Used By</option>
+                        <div class="tbl-filter-bar">
+                            <input type="search" id="pau-search" class="tbl-search-input" placeholder="Search part description…">
+                            <select id="pau-cat" class="tbl-filter-select"><option value="">All Categories</option></select>
+                        </div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table class="pau-table" id="pau-table">
+                                <thead>
+                                    <tr>
+                                        <th class="pau-th-rank">#</th>
+                                        <th>Part Description</th>
+                                        <th>Category</th>
+                                        <th class="pau-th-num">WOs</th>
+                                        <th class="pau-th-num">Assets</th>
+                                        <th class="pau-th-num">Total (THB)</th>
+                                        <th class="pau-th-num">Qty</th>
+                                        <th class="pau-th-expand"></th>
+                                    </tr>
+                                </thead>
+                                <tbody id="pau-body"><tr><td colspan="8" class="empty-row">Awaiting data.</td></tr></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="pt-insight-panel" id="pt-insight-panel-consumption" role="tabpanel" aria-labelledby="pt-insight-tab-consumption" hidden>
+                        <div class="section-head"><div><h2>Consumption by Asset</h2><p class="section-subtitle">Smart spare-part consumption by asset, asset family, machine group, general area, or part relationship.</p></div></div>
+                        <div class="tbl-filter-bar pt-consumption-toolbar">
+                            <select id="pt-consumption-view" class="tbl-filter-select" aria-label="Consumption view mode">
+                                <option value="asset">By Asset</option>
+                                <option value="asset_family">By Asset Family</option>
+                                <option value="machine_group">By Machine Group</option>
+                                <option value="general_area">By General Area</option>
+                                <option value="part">Part Relationship</option>
                             </select>
+                            <select id="pt-consumption-focus" class="tbl-filter-select" aria-label="Consumption focus">
+                                <option value="">All Rows</option>
+                            </select>
+                            <input type="search" id="pt-asset-search" class="tbl-search-input" placeholder="Search equipment or asset code…">
+                            <select id="pt-asset-crit" class="tbl-filter-select"><option value="">All Criticality</option></select>
+                            <button type="button" class="pt-consumption-clear-btn hidden" id="pt-consumption-clear-selection">Clear selection</button>
                         </div>
+                        <section class="summary-grid spare-summary-grid pt-consumption-summary-grid">
+                            <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Total Value</span><strong id="pt-cons-kpi-total-value">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Total Qty</span><strong id="pt-cons-kpi-total-qty">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">Lines</span><strong id="pt-cons-kpi-lines">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label" id="pt-cons-kpi-four-label">Unique Parts</span><strong id="pt-cons-kpi-four-value">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label" id="pt-cons-kpi-five-label">Top Part</span><strong id="pt-cons-kpi-five-value">--</strong></article>
+                            <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label" id="pt-cons-kpi-six-label">Match Notes</span><strong id="pt-cons-kpi-six-value">--</strong></article>
+                        </section>
+                        <p id="pt-consumption-selection-note" class="spare-management-summary">Awaiting data.</p>
+                        <section class="spare-panel-chart-grid pt-consumption-chart-grid">
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-top-parts-title">Top Parts</h3><p id="pt-cons-chart-top-parts-subtitle">Highest-value parts in the current selection.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-top-parts"></canvas></div>
+                            </article>
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-trend-title">Monthly Trend</h3><p id="pt-cons-chart-trend-subtitle">Monthly spare-part usage for the current selection.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-trend"></canvas></div>
+                            </article>
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-entities-title">Top Contributors</h3><p id="pt-cons-chart-entities-subtitle">Top related contributors within the current selection.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-entities"></canvas></div>
+                            </article>
+                            <article class="spare-panel-chart">
+                                <div class="spare-panel-head"><h3 id="pt-cons-chart-split-title">Value Split</h3><p id="pt-cons-chart-split-subtitle">Value split by family or machine group.</p></div>
+                                <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="pt-consumption-chart-split"></canvas></div>
+                            </article>
+                        </section>
+                        <div class="spare-panel-head">
+                            <h3 id="pt-consumption-table-title">Grouped Consumption</h3>
+                            <p id="pt-consumption-table-subtitle">Click a row to drill into detailed usage lines.</p>
+                        </div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead id="pt-consumption-head"><tr><th>Equipment</th><th>Asset ID</th><th>Asset Family</th><th>Machine Group</th><th>Criticality</th><th>Total Value</th><th>Total Qty</th><th>Lines</th><th>Unique Parts</th><th>Top Part</th><th>Match Quality</th></tr></thead>
+                                <tbody id="pt-consumption-body"><tr><td colspan="11" class="empty-row">Awaiting data.</td></tr></tbody>
+                            </table>
+                        </div>
+                        <article class="spare-panel-table pt-consumption-drilldown-card">
+                            <div class="spare-panel-head spare-panel-head-search">
+                                <div>
+                                    <h3 id="pt-consumption-drilldown-title">Usage Drilldown</h3>
+                                    <p id="pt-consumption-drilldown-subtitle">Select a grouped row above to inspect individual consumption lines.</p>
+                                </div>
+                                <button type="button" class="pt-consumption-clear-btn hidden" id="pt-consumption-clear-drilldown">Clear drilldown</button>
+                            </div>
+                            <div class="table-wrap spare-table-wrap">
+                                <table>
+                                    <thead><tr><th>Date</th><th>Asset ID</th><th>Equipment</th><th>Asset Family</th><th>Machine Group</th><th>Part Code</th><th>Part Name</th><th>Qty</th><th>Value</th><th>MR / WO Ref</th><th>Match Source</th><th>Data Quality</th></tr></thead>
+                                    <tbody id="pt-consumption-drilldown-body"><tr><td colspan="12" class="empty-row">Select a grouped row above to inspect detailed usage lines.</td></tr></tbody>
+                                </table>
+                            </div>
+                        </article>
                     </div>
-                    <div class="tbl-filter-bar">
-                        <input type="search" id="pau-search" class="tbl-search-input" placeholder="Search part description…">
-                        <select id="pau-cat" class="tbl-filter-select"><option value="">All Categories</option></select>
-                    </div>
-                    <div class="table-wrap spare-table-wrap">
-                        <table class="pau-table" id="pau-table">
-                            <thead>
-                                <tr>
-                                    <th class="pau-th-rank">#</th>
-                                    <th>Part Description</th>
-                                    <th>Category</th>
-                                    <th class="pau-th-num">WOs</th>
-                                    <th class="pau-th-num">Assets</th>
-                                    <th class="pau-th-num">Total (THB)</th>
-                                    <th class="pau-th-num">Qty</th>
-                                    <th class="pau-th-expand"></th>
-                                </tr>
-                            </thead>
-                            <tbody id="pau-body"><tr><td colspan="8" class="empty-row">Awaiting data.</td></tr></tbody>
-                        </table>
-                    </div>
-                </article>
-                <article class="card-shell table-card">
-                    <div class="section-head"><div><h2>Consumption by Asset</h2><p class="section-subtitle">Aggregated spare part spend per asset.</p></div></div>
-                    <div class="tbl-filter-bar">
-                        <input type="search" id="pt-asset-search" class="tbl-search-input" placeholder="Search equipment or asset code…">
-                        <select id="pt-asset-crit" class="tbl-filter-select"><option value="">All Criticality</option></select>
-                    </div>
-                    <div class="table-wrap spare-table-wrap">
-                        <table>
-                            <thead><tr><th>Equipment</th><th>Criticality</th><th>Total (THB)</th><th>Total Qty</th><th>Lines</th><th>Unique Parts</th><th>Top Part</th></tr></thead>
-                            <tbody id="pt-by-asset-body"><tr><td colspan="7" class="empty-row">Awaiting data.</td></tr></tbody>
-                        </table>
-                    </div>
-                </article>
-                <article class="card-shell table-card">
-                    <div class="section-head"><div><h2>Manual Review Required</h2><p class="section-subtitle">Low-confidence, unlinked, or incomplete rows requiring review.</p></div></div>
-                    <div class="table-wrap spare-table-wrap">
-                        <table>
-                            <thead><tr><th>Date</th><th>WO ID</th><th>Asset ID</th><th>Description</th><th>Category</th><th>Confidence</th><th>Link Status</th><th>Parse Status</th></tr></thead>
-                            <tbody id="pt-manual-review-body"><tr><td colspan="8" class="empty-row">Awaiting data.</td></tr></tbody>
-                        </table>
+
+                    <div class="pt-insight-panel" id="pt-insight-panel-data_quality" role="tabpanel" aria-labelledby="pt-insight-tab-data_quality" hidden>
+                        <div class="section-head"><div><h2>Data Quality</h2><p class="section-subtitle">Low-confidence or incomplete rows requiring review.</p></div></div>
+                        <div class="table-wrap spare-table-wrap">
+                            <table>
+                                <thead><tr><th>Date</th><th>WO ID</th><th>Asset ID</th><th>Description</th><th>Category</th><th>Confidence</th><th>Parse Status</th></tr></thead>
+                                <tbody id="pt-manual-review-body"><tr><td colspan="7" class="empty-row">Awaiting data.</td></tr></tbody>
+                            </table>
+                        </div>
                     </div>
                 </article>
             </section>
@@ -637,7 +1220,7 @@
                 <div class="ay-tabs-row">
                     <button class="ay-tab-btn active" type="button" data-aytab="yearly">Year-on-Year Comparison</button>
                     <button class="ay-tab-btn" type="button" data-aytab="spt">Specific Part Trend</button>
-                    <span class="ay-tab-meta" id="ay-subtitle">Loading multi-year data…</span>
+                    <span class="ay-tab-meta" id="ay-subtitle">Loading financial-year data…</span>
                 </div>
 
                 <!-- Panel 1: Year-on-Year Comparison -->
@@ -646,33 +1229,33 @@
                     <div class="ay-yoy-row" id="ay-yoy-row"></div>
                     <div class="ay-charts-row">
                         <div class="ay-chart-box">
-                            <p class="ay-chart-label">Total Consumption by Year</p>
+                            <p class="ay-chart-label">Total Consumption by Financial Year</p>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-yearly"></canvas></div>
                         </div>
                         <div class="ay-chart-box">
                             <div class="ay-chart-title-row">
-                                <p class="ay-chart-label">Monthly Comparison</p>
-                                <select id="ay-monthly-year-filter" class="control-select ay-chart-select"><option value="all">All Years</option></select>
+                                <p class="ay-chart-label">Monthly Comparison (Apr–Mar)</p>
+                                <select id="ay-monthly-year-filter" class="control-select ay-chart-select"><option value="all">All FY</option></select>
                             </div>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-monthly"></canvas></div>
                         </div>
                     </div>
                     <div class="ay-charts-row">
                         <div class="ay-chart-box ay-chart-wide">
-                            <p class="ay-chart-label">Category Breakdown by Year</p>
+                            <p class="ay-chart-label">Category Breakdown by Financial Year</p>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-category"></canvas></div>
                         </div>
                         <div class="ay-chart-box ay-chart-wide">
-                            <p class="ay-chart-label">Top 10 Parts — <span id="ay-top-year-label">All Years</span></p>
+                            <p class="ay-chart-label">Top 10 Parts — <span id="ay-top-year-label">All FY</span></p>
                             <div class="ay-year-tabs" id="ay-year-tabs"></div>
                             <div class="chart-container ay-chart-container"><canvas id="ay-chart-top-parts"></canvas></div>
                         </div>
                     </div>
                     <div class="ay-table-card">
-                        <h4 class="ay-table-title">Year Summary</h4>
+                        <h4 class="ay-table-title">Financial Year Summary</h4>
                         <div class="spare-table-wrap">
                             <table class="spare-table">
-                                <thead><tr><th>Year</th><th>Total Consumption</th><th>Lines</th><th>Unique Assets</th><th>Unique Work Orders</th><th>Unique Parts</th><th>YoY Growth</th></tr></thead>
+                                <thead><tr><th>Financial Year</th><th>Total Consumption</th><th>Lines</th><th>Unique Assets</th><th>Unique Work Orders</th><th>Unique Parts</th><th>YoY Consumption %</th></tr></thead>
                                 <tbody id="ay-summary-body"></tbody>
                             </table>
                         </div>
@@ -730,8 +1313,8 @@
                                 <option value="total_consumption">Consumption Value</option>
                                 <option value="quantity_used">Quantity Used</option>
                                 <option value="transaction_count">Transaction Count</option>
-                                <option value="wo_count">Linked WO Count</option>
-                                <option value="asset_count">Linked Asset Count</option>
+                                <option value="wo_count">WO Count</option>
+                                <option value="asset_count">Asset Count</option>
                             </select>
                         </label>
                     </div>
@@ -739,8 +1322,8 @@
                         <div class="spt-kpi-card"><div class="spt-kpi-label">Total Consumption Value</div><div class="spt-kpi-value" id="spt-kpi-total">—</div></div>
                         <div class="spt-kpi-card"><div class="spt-kpi-label">Total Quantity Used</div><div class="spt-kpi-value" id="spt-kpi-qty">—</div></div>
                         <div class="spt-kpi-card"><div class="spt-kpi-label">Transaction Lines</div><div class="spt-kpi-value" id="spt-kpi-lines">—</div></div>
-                        <div class="spt-kpi-card"><div class="spt-kpi-label">Linked Work Orders</div><div class="spt-kpi-value" id="spt-kpi-wos">—</div></div>
-                        <div class="spt-kpi-card"><div class="spt-kpi-label">Linked Assets</div><div class="spt-kpi-value" id="spt-kpi-assets">—</div></div>
+                        <div class="spt-kpi-card"><div class="spt-kpi-label">Work Orders</div><div class="spt-kpi-value" id="spt-kpi-wos">—</div></div>
+                        <div class="spt-kpi-card"><div class="spt-kpi-label">Assets</div><div class="spt-kpi-value" id="spt-kpi-assets">—</div></div>
                         <div class="spt-kpi-card"><div class="spt-kpi-label">Latest Usage Date</div><div class="spt-kpi-value" id="spt-kpi-latest">—</div></div>
                     </div>
                     <div class="spt-insight-row" id="spt-insight-row"></div>
@@ -758,7 +1341,7 @@
                         <h4 class="ay-table-title">Yearly Usage Trend</h4>
                         <div class="spare-table-wrap">
                             <table class="spare-table">
-                                <thead><tr><th>Year</th><th>Qty Used</th><th>Total Value</th><th>Lines</th><th>Linked WOs</th><th>Linked Assets</th><th>Avg / WO</th><th>% vs Prev Year</th></tr></thead>
+                                <thead><tr><th>Year</th><th>Qty Used</th><th>Total Value</th><th>Lines</th><th>WOs</th><th>Assets</th><th>Avg / WO</th><th>% vs Prev Year</th></tr></thead>
                                 <tbody id="spt-yearly-body"><tr><td colspan="8" class="empty-row">Select a spare part above.</td></tr></tbody>
                             </table>
                         </div>
@@ -767,7 +1350,7 @@
                         <h4 class="ay-table-title">Monthly Usage Trend</h4>
                         <div class="spare-table-wrap">
                             <table class="spare-table">
-                                <thead><tr><th>Year</th><th>Month</th><th>Qty Used</th><th>Total Value</th><th>Lines</th><th>Linked WOs</th><th>Linked Assets</th></tr></thead>
+                                <thead><tr><th>Year</th><th>Month</th><th>Qty Used</th><th>Total Value</th><th>Lines</th><th>WOs</th><th>Assets</th></tr></thead>
                                 <tbody id="spt-monthly-body"><tr><td colspan="7" class="empty-row">Select a spare part above.</td></tr></tbody>
                             </table>
                         </div>
@@ -780,8 +1363,8 @@
                         <div id="spt-txn-panel" class="hidden" style="margin-top:12px">
                             <div class="spare-table-wrap">
                                 <table class="spare-table">
-                                    <thead><tr><th>Date</th><th>Transaction ID</th><th>Part Name</th><th>Qty</th><th>Value</th><th>Asset ID</th><th>Work Order</th><th>Category</th><th>Link</th></tr></thead>
-                                    <tbody id="spt-txn-body"><tr><td colspan="9" class="empty-row">Expand to view transactions.</td></tr></tbody>
+                                    <thead><tr><th>Date</th><th>Transaction ID</th><th>Part Name</th><th>Qty</th><th>Value</th><th>Asset ID</th><th>Work Order</th><th>Category</th></tr></thead>
+                                    <tbody id="spt-txn-body"><tr><td colspan="8" class="empty-row">Expand to view transactions.</td></tr></tbody>
                                 </table>
                             </div>
                         </div>
@@ -791,132 +1374,6 @@
             </section>
             <!-- ─── End Spare Part Analysis ───────────────────────────────────── -->
 
-        </section>
-
-        <section id="analysis-view" class="maintenance-view hidden">
-            <section class="card-shell filter-card analysis-filter-card">
-                <div class="section-head">
-                    <div>
-                        <h2>Maintenance Analysis</h2>
-                        <p class="section-subtitle">Minitab-style reliability analysis from cleaned imported work-order data. Use Export for validation in Minitab when needed.</p>
-                    </div>
-                    <button type="button" id="analysis-export-btn" class="apply-btn">Export Analysis Tables</button>
-                </div>
-                <div class="filter-grid analysis-filter-grid">
-                    <label class="control-field"><span>Date Range</span><select id="analysis-date-range"><option value="all">All Years</option><option value="ytd">YTD / Current Year</option><option value="last12">Last 12 Months</option><option value="previous_year">Previous Year</option><option value="custom">Custom Date Range</option></select></label>
-                    <label class="control-field analysis-custom-date"><span>Start</span><input id="analysis-start-date" type="date"></label>
-                    <label class="control-field analysis-custom-date"><span>End</span><input id="analysis-end-date" type="date"></label>
-                    <label class="control-field"><span>AssetID</span><select id="analysis-asset-filter"></select></label>
-                    <label class="control-field"><span>MachineName</span><select id="analysis-machine-filter"></select></label>
-                    <label class="control-field"><span>MachineGroup</span><select id="analysis-machine-group-filter"></select></label>
-                    <label class="control-field"><span>CriticalityGroup</span><select id="analysis-criticality-filter"></select></label>
-                    <label class="control-field"><span>SeverityLevel</span><select id="analysis-severity-filter"></select></label>
-                    <label class="control-field"><span>ProductionLine</span><select id="analysis-production-line-filter"></select></label>
-                    <label class="control-field"><span>LifecycleState</span><select id="analysis-lifecycle-filter"></select></label>
-                    <label class="control-field"><span>DataQualityFlag</span><select id="analysis-quality-filter"></select></label>
-                </div>
-            </section>
-
-            <section class="summary-grid analysis-summary-grid">
-                <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Work Orders</span><strong id="analysis-total-work-orders">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-red"><span class="summary-label">Total Downtime</span><strong id="analysis-total-downtime">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">Median Downtime</span><strong id="analysis-median-downtime">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Mean Downtime</span><strong id="analysis-mean-downtime">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">Median MTTR</span><strong id="analysis-median-mttr">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Mean MTTR</span><strong id="analysis-mean-mttr">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-purple"><span class="summary-label">Median MTBF</span><strong id="analysis-median-mtbf">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Mean MTBF</span><strong id="analysis-mean-mtbf">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Valid MTBF Intervals</span><strong id="analysis-valid-mtbf-count">--</strong></article>
-                <article class="summary-card summary-card-kpi summary-card-amber"><span class="summary-label">Missing Info</span><strong id="analysis-missing-info-count">--</strong></article>
-            </section>
-
-            <section class="analysis-grid analysis-grid-2">
-                <article class="card-shell analysis-card">
-                    <div class="section-head">
-                        <div><h2 id="analysis-pareto-downtime-title">Total Downtime by MachineName</h2><p class="section-subtitle" id="analysis-pareto-downtime-subtitle">Top 10 machine names by downtime with the full ranking below.</p></div>
-                        <label class="control-field compact-field"><span>Group By</span><select id="analysis-pareto-downtime-group"><option value="MachineName">MachineName</option><option value="MachineGroup">MachineGroup</option></select></label>
-                    </div>
-                    <div class="analysis-chart-wrap"><canvas id="analysis-pareto-machine-downtime"></canvas></div>
-                    <div id="analysis-pareto-machine-downtime-table" class="analysis-mini-table analysis-ranked-list"></div>
-                </article>
-                <article class="card-shell analysis-card">
-                    <div class="section-head">
-                        <div><h2 id="analysis-pareto-workorder-title">Work Orders by MachineName</h2><p class="section-subtitle" id="analysis-pareto-workorder-subtitle">Top 10 machine names by work-order count with the full ranking below.</p></div>
-                        <label class="control-field compact-field"><span>Group By</span><select id="analysis-pareto-workorder-group"><option value="MachineName">MachineName</option><option value="MachineGroup">MachineGroup</option></select></label>
-                    </div>
-                    <div class="analysis-chart-wrap"><canvas id="analysis-pareto-machine-count"></canvas></div>
-                    <div id="analysis-pareto-machine-count-table" class="analysis-mini-table analysis-ranked-list"></div>
-                </article>
-            </section>
-
-            <section class="analysis-grid analysis-grid-2">
-                <article class="card-shell analysis-card">
-                    <div class="section-head">
-                        <div><h2>Downtime Distribution</h2><p class="section-subtitle">Histogram of DowntimeHours. Log scale uses ln(DowntimeHours + 1).</p></div>
-                        <label class="control-field compact-field"><span>Scale</span><select id="analysis-distribution-scale"><option value="raw">Raw hours</option><option value="log">LogDowntimeHours</option></select></label>
-                    </div>
-                    <div class="analysis-chart-wrap"><canvas id="analysis-histogram-downtime"></canvas></div>
-                </article>
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>Downtime by SeverityLevel</h2><p class="section-subtitle">Boxplot of downtime by imported priority/severity.</p></div></div><div class="analysis-boxplot-wrap"><canvas id="analysis-boxplot-severity"></canvas></div><div id="analysis-boxplot-severity-table" class="analysis-mini-table analysis-ranked-list"></div></article>
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>Downtime by CriticalityGroup</h2><p class="section-subtitle">Boxplot of downtime by normalized criticality.</p></div></div><div class="analysis-boxplot-wrap"><canvas id="analysis-boxplot-criticality"></canvas></div><div id="analysis-boxplot-criticality-table" class="analysis-mini-table analysis-ranked-list"></div></article>
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>Severity Validation</h2><p class="section-subtitle">Kruskal-Wallis test is used because downtime is expected to be right-skewed.</p></div></div><div class="analysis-chart-wrap short"><canvas id="analysis-severity-summary-chart"></canvas></div><div id="analysis-severity-test" class="analysis-note"></div><div id="analysis-severity-table" class="analysis-mini-table"></div></article>
-            </section>
-
-            <section class="analysis-grid analysis-grid-2">
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>Median MTTR by MachineName</h2><p class="section-subtitle">Top 10 machines by median MTTR with the full ranking below.</p></div></div><div class="analysis-chart-wrap"><canvas id="analysis-mttr-median-machine"></canvas></div><div id="analysis-mttr-median-machine-table" class="analysis-mini-table analysis-ranked-list"></div></article>
-                <article class="card-shell analysis-card">
-                    <div class="section-head"><div><h2 id="analysis-mttr-boxplot-title">MTTR Boxplot</h2><p class="section-subtitle" id="analysis-mttr-boxplot-subtitle">Top 10 groups by count with the full list below.</p></div><label class="control-field compact-field"><span>Group By</span><select id="analysis-mttr-boxplot-group"><option value="MachineGroup">MachineGroup</option><option value="MachineName">MachineName</option></select></label></div>
-                    <div class="analysis-boxplot-wrap"><canvas id="analysis-boxplot-mttr"></canvas></div>
-                    <div id="analysis-boxplot-mttr-table" class="analysis-mini-table analysis-ranked-list"></div>
-                </article>
-                <article class="card-shell analysis-card analysis-card-full analysis-mttr-trend-card">
-                    <div class="section-head">
-                        <div><h2 id="analysis-mttr-trend-title">MTTR Trend</h2><p class="section-subtitle" id="analysis-mttr-trend-subtitle">Median MTTR over time.</p></div>
-                        <div class="analysis-trend-controls">
-                            <label class="control-field compact-field"><span>Compare</span><select id="analysis-mttr-compare-mode"><option value="">Timeline</option><option value="years">Years</option><option value="months">Months</option></select></label>
-                            <label class="control-field compact-field analysis-mttr-compare-control is-hidden"><span>A</span><select id="analysis-mttr-compare-a"></select></label>
-                            <label class="control-field compact-field analysis-mttr-compare-control is-hidden"><span>B</span><select id="analysis-mttr-compare-b"></select></label>
-                        </div>
-                    </div>
-                    <div class="analysis-chart-wrap"><canvas id="analysis-mttr-trend"></canvas></div>
-                </article>
-            </section>
-
-            <section class="analysis-grid analysis-grid-2 analysis-mtbf-grid">
-                <article class="card-shell analysis-card">
-                    <div class="section-head"><div><h2>MTBF Summary</h2><p class="section-subtitle">Valid MTBF intervals only. Higher MTBF indicates better reliability.</p></div></div>
-                    <div class="analysis-stat-grid">
-                        <div><span>Median by MachineName</span><strong id="analysis-mtbf-median-machine">--</strong></div>
-                        <div><span>Mean by MachineName</span><strong id="analysis-mtbf-mean-machine">--</strong></div>
-                        <div><span>Median by MachineGroup</span><strong id="analysis-mtbf-median-group">--</strong></div>
-                        <div><span>Median by CriticalityGroup</span><strong id="analysis-mtbf-median-criticality">--</strong></div>
-                    </div>
-                    <div class="analysis-chart-wrap short"><canvas id="analysis-mtbf-by-criticality"></canvas></div>
-                </article>
-                <article class="card-shell analysis-card analysis-mtbf-trend-card">
-                    <div class="section-head">
-                        <div><h2 id="analysis-mtbf-trend-title">MTBF Trend by MachineGroup</h2><p class="section-subtitle" id="analysis-mtbf-trend-subtitle">Comparative median MTBF per period, grouped by machine group.</p></div>
-                        <label class="control-field compact-field"><span>Group By</span><select id="analysis-mtbf-trend-group-by"><option value="MachineGroup">MachineGroup</option><option value="MachineName">MachineName</option></select></label>
-                    </div>
-                    <div class="analysis-chart-wrap"><canvas id="analysis-mtbf-trend-group"></canvas></div>
-                    <div id="analysis-mtbf-trend-group-table" class="analysis-mini-table analysis-ranked-list"></div>
-                </article>
-            </section>
-
-            <section class="analysis-grid analysis-grid-2">
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>PM Effectiveness</h2><p class="section-subtitle">Associations do not prove causation. Validate in Minitab before formal decisions.</p></div><label class="control-field compact-field"><span>Good MTBF Threshold</span><input id="analysis-pm-threshold" type="number" min="1" step="1" value="168"></label></div><div class="analysis-chart-wrap short"><canvas id="analysis-pm-category-chart"></canvas></div><div id="analysis-pm-test" class="analysis-note"></div><div id="analysis-pm-table" class="analysis-mini-table"></div></article>
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>I-MR Control Chart</h2><p class="section-subtitle">Select one asset or machine so unrelated machines are not mixed.</p></div></div><div class="analysis-control-row"><label class="control-field"><span>Asset / Machine</span><select id="analysis-control-asset"></select></label><label class="control-field"><span>Metric</span><select id="analysis-control-metric"><option value="DowntimeHours">DowntimeHours</option><option value="MTTRHours">MTTRHours</option><option value="MTBFHours">MTBFHours</option></select></label></div><div class="analysis-chart-wrap short"><canvas id="analysis-i-chart"></canvas></div><div class="analysis-chart-wrap short"><canvas id="analysis-mr-chart"></canvas></div><div id="analysis-control-alert" class="analysis-note"></div></article>
-            </section>
-
-            <section class="analysis-grid analysis-grid-2">
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>Capability / Target Check</h2><p class="section-subtitle">Dashboard-level MTTR target performance check.</p></div></div><div class="analysis-control-row"><label class="control-field"><span>Critical Target</span><input id="analysis-target-critical" type="number" min="1" value="24"></label><label class="control-field"><span>Support Target</span><input id="analysis-target-support" type="number" min="1" value="48"></label><label class="control-field"><span>Facility Target</span><input id="analysis-target-facility" type="number" min="1" value="72"></label></div><div class="analysis-chart-wrap short"><canvas id="analysis-target-chart"></canvas></div><div id="analysis-target-table" class="analysis-mini-table"></div></article>
-                <article class="card-shell analysis-card"><div class="section-head"><div><h2>Data Quality Analysis</h2><p class="section-subtitle">Incomplete records may affect MTTR, MTBF, and downtime accuracy.</p></div></div><div class="analysis-stat-grid"><div><span>Valid</span><strong id="analysis-quality-valid">--</strong></div><div><span>Review</span><strong id="analysis-quality-review">--</strong></div><div><span>Invalid</span><strong id="analysis-quality-invalid">--</strong></div><div><span>Missing Start</span><strong id="analysis-missing-start">--</strong></div><div><span>Missing End</span><strong id="analysis-missing-end">--</strong></div><div><span>Missing AssetID</span><strong id="analysis-missing-asset">--</strong></div><div><span>Missing WO ID</span><strong id="analysis-missing-wo">--</strong></div><div><span>MissingClassification</span><strong id="analysis-missing-classification">--</strong></div><div><span>Missing/Invalid TTR</span><strong id="analysis-missing-ttr">--</strong></div><div><span>Negative Duration</span><strong id="analysis-negative-duration">--</strong></div><div><span>Open No Start</span><strong id="analysis-open-no-start">--</strong></div></div><div class="analysis-chart-wrap analysis-quality-chart-wrap"><canvas id="analysis-quality-pareto"></canvas></div><div id="analysis-quality-table" class="analysis-mini-table"></div></article>
-            </section>
-
-            <section class="card-shell analysis-card">
-                <div class="section-head"><div><h2>Exploratory Regression</h2><p class="section-subtitle">Regression results are exploratory and should be validated in Minitab or another statistical package before formal decision-making.</p></div></div>
-                <div id="analysis-regression-note" class="analysis-note"></div>
-            </section>
         </section>
 
         <section id="downtime-view" class="maintenance-view hidden">
@@ -933,6 +1390,106 @@
         </section>
 
         <section id="utility-view" class="maintenance-view hidden">
+            <div id="pm-scope" class="pm-module" hidden>
+                <p id="pm-sc-context" class="pm-context-line">Preventive maintenance schedule tracking.</p>
+
+                <section class="summary-grid pm-kpi-grid">
+                    <article class="summary-card pm-kpi pm-kpi-amber">
+                        <span class="summary-label" id="pm-sc-total-label">PM Scheduled</span>
+                        <strong id="pm-sc-total">--</strong>
+                        <span class="pm-kpi-sub">selected period</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-blue">
+                        <span class="summary-label">Due This Month</span>
+                        <strong id="pm-sc-due-month">--</strong>
+                        <span class="pm-kpi-sub" id="pm-sc-due-month-sub">--</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-blue">
+                        <span class="summary-label">Due Soon</span>
+                        <strong id="pm-sc-due-soon">--</strong>
+                        <span class="pm-kpi-sub">next 30 days</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-green">
+                        <span class="summary-label">Completed</span>
+                        <strong id="pm-sc-completed">--</strong>
+                        <span class="pm-kpi-sub">inferred</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-red">
+                        <span class="summary-label">Overdue</span>
+                        <strong id="pm-sc-overdue">--</strong>
+                        <span class="pm-kpi-sub">past due, open</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-amber">
+                        <span class="summary-label">Backlog</span>
+                        <strong id="pm-sc-backlog">--</strong>
+                        <span class="pm-kpi-sub">due/overdue, open</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-teal">
+                        <span class="summary-label">Coverage</span>
+                        <strong id="pm-sc-coverage">--</strong>
+                        <span class="pm-kpi-sub" id="pm-sc-coverage-sub">assets with PM</span>
+                    </article>
+                    <article class="summary-card pm-kpi pm-kpi-slate">
+                        <span class="summary-label">Missing Mapping</span>
+                        <strong id="pm-sc-missing">--</strong>
+                        <span class="pm-kpi-sub">unmapped Asset IDs</span>
+                    </article>
+                </section>
+
+                <section class="pm-chart-grid">
+                    <article class="card-shell pm-chart-card">
+                        <div class="section-head"><div><h2 id="pm-sc-maingroup-title">PM by Main Asset Group</h2></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-sc-chart-maingroup"></canvas></div>
+                    </article>
+                    <article class="card-shell pm-chart-card">
+                        <div class="section-head"><div><h2 id="pm-sc-secondary-title">PM by Sub Asset Group</h2></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-sc-chart-secondary"></canvas></div>
+                    </article>
+                </section>
+
+                <section class="pm-chart-grid">
+                    <article class="card-shell pm-chart-card pm-chart-wide">
+                        <div class="section-head"><div><h2>PM by Month</h2></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-sc-chart-month"></canvas></div>
+                    </article>
+                    <article class="card-shell pm-chart-card">
+                        <div class="section-head"><div><h2>PM by Stage</h2></div></div>
+                        <div class="pm-chart-wrap"><canvas id="pm-sc-chart-stage"></canvas></div>
+                    </article>
+                </section>
+
+                <section class="card-shell pm-chart-card">
+                    <div class="section-head"><div><h2 id="pm-sc-top-title">Top assets by scheduled PM</h2></div></div>
+                    <div class="pm-chart-wrap pm-chart-tall"><canvas id="pm-sc-chart-top"></canvas></div>
+                </section>
+
+                <section class="card-shell pm-table-card">
+                    <div class="section-head pm-table-head">
+                        <div>
+                            <h2 id="pm-sc-table-title">PM Schedule Detail</h2>
+                            <p class="section-subtitle"><span id="pm-sc-table-count">0</span> tasks for the current filters</p>
+                        </div>
+                        <div class="pm-table-tabs" role="tablist">
+                            <button type="button" class="pm-tab active" data-pm-table="all">All</button>
+                            <button type="button" class="pm-tab" data-pm-table="overdue">Overdue</button>
+                            <button type="button" class="pm-tab" data-pm-table="dueSoon">Due Soon</button>
+                        </div>
+                    </div>
+                    <div class="table-wrap">
+                        <table class="pm-table">
+                            <thead id="pm-sc-table-head"></thead>
+                            <tbody id="pm-sc-table-body">
+                                <tr><td class="empty-row">Loading PM schedule.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
+                <details class="pm-legacy-toggle">
+                    <summary>Show legacy detailed schedule view (all stages, not stage-filtered)</summary>
+                </details>
+            </div>
+
             <section class="summary-grid" id="summary-grid">
                 <article class="summary-card summary-card-kpi summary-card-red" id="summary-card-1" data-summary-filter="due_this_week"><span class="summary-label" id="summary-label-1">Due This Week</span><strong id="summary-due-week">--</strong></article>
                 <article class="summary-card summary-card-kpi summary-card-amber" id="summary-card-2" data-summary-filter="due_this_month"><span class="summary-label" id="summary-label-2">Due This Month</span><strong id="summary-due-month">--</strong></article>
@@ -973,7 +1530,6 @@
                     <div class="section-head">
                         <div>
                             <h2 id="monthly-section-title">Monthly Maintenance</h2>
-                            <p class="section-subtitle" id="monthly-section-subtitle">Interactive month summary and maintenance status breakdown</p>
                         </div>
                         <label class="control-field compact-field">
                             <span>Month</span>
@@ -1031,7 +1587,6 @@
                 <div class="section-head">
                     <div>
                         <h2 id="maintenance-list-title">Maintenance List</h2>
-                        <p class="section-subtitle" id="maintenance-list-subtitle">Filter by month, status, category, location, and machine details</p>
                     </div>
                 </div>
                 <div class="filter-grid">
@@ -1099,7 +1654,7 @@
 
     <script src="/shared/navbar.js"></script>
     <script>
-        fetch('/shared/navbar.html')
+        fetch('/shared/navbar.html?v=20260604-ai-note-1')
             .then(res => {
                 if (!res.ok) throw new Error('Navbar failed to load');
                 return res.text();
@@ -1109,7 +1664,11 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/Maintenance/script.js?v=20260514-spare-part-drilldown-7" defer></script>
+    <script src="/shared/mira/mira-overview.js?v=20260608-mira-fast-5" defer></script>
+    <script src="/Maintenance/script.js?v=20260608-asset-excel-2" defer></script>
+    <script src="/Maintenance/pm-schedule.js?v=20260605-pm-header-filters-11" defer></script>
+    <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->
     <div id="pau-modal" class="pau-modal-overlay" hidden>

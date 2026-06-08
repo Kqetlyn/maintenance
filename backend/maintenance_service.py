@@ -14,12 +14,19 @@ import pandas as pd
 from openpyxl.styles.colors import COLOR_INDEX
 
 
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
 MAINTENANCE_WORKBOOK_PATH = Path(
     os.environ.get(
         "MAINTENANCE_WORKBOOK_PATH",
-        r"C:\Users\merri\Downloads\utility maintenance\FO-FC11-011 Preventive Maintenance Schedule 2025J 2025.xlsx",
+        r"C:\Users\merri\Downloads\utility maintenance\FO-FC11-011 Preventive Maintenance Schedule 2025J.xlsx",
     )
 )
+LEGACY_UTILITY_WORKBOOK_FALLBACK_PATH = Path(
+    r"C:\Users\merri\Downloads\utility maintenance\FO-FC11-011 Preventive Maintenance Schedule 2025J 2025.xlsx"
+)
+UTILITY_MAINTENANCE_SOURCE_PATH = DATA_DIR / "utility_maintenance_stage1_source.xlsx"
 
 EQUIPMENT_MAINTENANCE_WORKBOOK_PATH = Path(
     os.environ.get(
@@ -27,15 +34,16 @@ EQUIPMENT_MAINTENANCE_WORKBOOK_PATH = Path(
         r"C:\Users\merri\Downloads\FO-FC11-011 Preventive Maintenance Schedule 2025 stage 2.xlsx",
     )
 )
-EQUIPMENT_MAINTENANCE_COPY_PATH = Path(__file__).resolve().parent.parent / "data" / "equipment_maintenance_source_copy.xlsx"
-EQUIPMENT_MAINTENANCE_CACHE_PATH = Path(__file__).resolve().parent.parent / "data" / "equipment_maintenance_cache.json"
+EQUIPMENT_MAINTENANCE_SOURCE_PATH = DATA_DIR / "equipment_maintenance_schedule_source.xlsx"
+EQUIPMENT_MAINTENANCE_COPY_PATH = DATA_DIR / "equipment_maintenance_source_copy.xlsx"
+EQUIPMENT_MAINTENANCE_CACHE_PATH = DATA_DIR / "equipment_maintenance_cache.json"
 MONTHLY_WORK_ORDER_FILES = {
-    "2026-01": Path(__file__).resolve().parent.parent / "data" / "work_orders_january.csv",
-    "2026-02": Path(__file__).resolve().parent.parent / "data" / "work_orders_february.csv",
-    "2026-03": Path(__file__).resolve().parent.parent / "data" / "work_orders_march.csv",
+    "2026-01": DATA_DIR / "work_orders_january.csv",
+    "2026-02": DATA_DIR / "work_orders_february.csv",
+    "2026-03": DATA_DIR / "work_orders_march.csv",
 }
-UTILITY_MAINTENANCE_CACHE_VERSION = 2
-EQUIPMENT_MAINTENANCE_CACHE_VERSION = 4
+UTILITY_MAINTENANCE_CACHE_VERSION = 3
+EQUIPMENT_MAINTENANCE_CACHE_VERSION = 5
 ADDITIONAL_STEPS_LABEL = "Additional checks required beyond the normal checklist"
 INSPECTION_GROUP_LABEL = "Normal Checklist with Additional Checks"
 STANDARD_GROUP_LABEL = "Normal Checklist"
@@ -270,9 +278,39 @@ def write_json_cache(path: Path, payload):
         return
 
 
-def resolve_equipment_workbook_path() -> Path:
+def clear_maintenance_caches():
+    _MAINTENANCE_CACHE.clear()
+
+
+def resolve_utility_workbook_path() -> Path:
+    if UTILITY_MAINTENANCE_SOURCE_PATH.exists():
+        return UTILITY_MAINTENANCE_SOURCE_PATH
+    for candidate in (MAINTENANCE_WORKBOOK_PATH, LEGACY_UTILITY_WORKBOOK_FALLBACK_PATH):
+        candidate_path = Path(candidate)
+        if candidate_path.exists():
+            return candidate_path
+    return MAINTENANCE_WORKBOOK_PATH
+
+
+def resolve_equipment_stage1_workbook_path() -> Path | None:
     if EQUIPMENT_MAINTENANCE_COPY_PATH.exists():
         return EQUIPMENT_MAINTENANCE_COPY_PATH
+    return None
+
+
+def resolve_equipment_stage2_workbook_path() -> Path:
+    if EQUIPMENT_MAINTENANCE_SOURCE_PATH.exists():
+        return EQUIPMENT_MAINTENANCE_SOURCE_PATH
+    return EQUIPMENT_MAINTENANCE_WORKBOOK_PATH
+
+
+def resolve_equipment_workbook_path() -> Path:
+    stage2_path = resolve_equipment_stage2_workbook_path()
+    if Path(stage2_path).exists():
+        return Path(stage2_path)
+    stage1_path = resolve_equipment_stage1_workbook_path()
+    if stage1_path and stage1_path.exists():
+        return stage1_path
     return EQUIPMENT_MAINTENANCE_WORKBOOK_PATH
 
 
@@ -354,6 +392,11 @@ def find_maintenance_header_row(frame: pd.DataFrame) -> int | None:
 
 
 def parse_month_token(value) -> int | None:
+    if isinstance(value, datetime):
+        return int(value.month)
+    if isinstance(value, date):
+        return int(value.month)
+
     text = clean_text(value)
     if not text:
         return None
@@ -498,11 +541,32 @@ def derive_equipment_category(subcategory: str | None, risk_level: str | None) -
     return "Low Risk"
 
 
-def get_equipment_week_columns(worksheet) -> list[tuple[int, int]]:
+def find_equipment_header_row(worksheet) -> int | None:
+    """Locate the 1-based row that holds the 'Machine Code' / 'Machine Name' headers.
+
+    The Stage 2 schedule workbook adds leading summary rows, so the header is no
+    longer at a fixed offset. We scan the first rows and match the two column
+    labels in the first handful of columns.
+    """
+    max_row = min(12, worksheet.max_row)
+    max_col = min(6, worksheet.max_column)
+    for row_index in range(1, max_row + 1):
+        labels = {
+            (clean_text(worksheet.cell(row_index, col).value) or "").lower()
+            for col in range(1, max_col + 1)
+        }
+        if "machine code" in labels and "machine name" in labels:
+            return row_index
+    return None
+
+
+def get_equipment_week_columns(worksheet, week_row: int | None = None) -> list[tuple[int, int]]:
     week_columns = []
-    header_row = 4
+    if week_row is None:
+        header_row = find_equipment_header_row(worksheet)
+        week_row = (header_row + 1) if header_row else 4
     for column_index in range(5, worksheet.max_column + 1):
-        value = worksheet.cell(header_row, column_index).value
+        value = worksheet.cell(week_row, column_index).value
         try:
             week_number = int(float(value))
         except (TypeError, ValueError):
@@ -708,26 +772,38 @@ def utility_override_requires_inspection(asset_code: str, scheduled_date: date, 
 
 
 def extract_equipment_assets(worksheet, sheet_name: str, year: int):
-    week_columns = get_equipment_week_columns(worksheet)
+    header_row = find_equipment_header_row(worksheet)
+    week_row = (header_row + 1) if header_row else 4
+    data_start_row = (header_row + 2) if header_row else 5
+    week_columns = get_equipment_week_columns(worksheet, week_row)
     if not week_columns:
         return []
 
     assets = []
-    data_start_row = 5
     for row_index in range(data_start_row, worksheet.max_row + 1):
         asset_code = normalize_asset_code(worksheet.cell(row_index, 2).value)
         asset_name_raw = clean_text(worksheet.cell(row_index, 3).value)
         area_or_risk_raw = clean_text(worksheet.cell(row_index, 4).value)
 
-        if not asset_code or not asset_name_raw:
+        if not asset_code:
             continue
         if asset_code.startswith("UL-"):
             continue
+        if asset_code in {"MACHINE CODE", "MC.CODE"} or (asset_name_raw or "").strip().lower() == "machine name":
+            continue
+        # Some plans store the name as a VLOOKUP formula (workbook opened with
+        # data_only=False); fall back to the canonical name instead of the formula.
+        if asset_name_raw and asset_name_raw.startswith("="):
+            asset_name_raw = None
+        if not asset_name_raw:
+            asset_name_raw = get_canonical_equipment_name(asset_code) or asset_code
 
         due_templates = []
         for column_index, week_number in week_columns:
             cell = worksheet.cell(row_index, column_index)
-            if not is_schedule_cell_marked(cell):
+            # Stage 2 plan marks scheduled weeks with a text token (e.g. "A");
+            # older layouts use a coloured fill. Accept either as a PM slot.
+            if not (clean_text(cell.value) or is_schedule_cell_marked(cell)):
                 continue
             due_templates.append(
                 {
@@ -1410,13 +1486,14 @@ def copy_asset(asset):
 
 
 def load_utility_asset_source():
-    signature = (UTILITY_MAINTENANCE_CACHE_VERSION, get_file_signature(MAINTENANCE_WORKBOOK_PATH))
+    workbook_path = resolve_utility_workbook_path()
+    signature = (UTILITY_MAINTENANCE_CACHE_VERSION, get_file_signature(workbook_path))
     cached = _MAINTENANCE_CACHE.get("asset_source")
     if cached and cached["signature"] == signature:
         return cached["data"]
 
     data = {
-        "source_path": str(MAINTENANCE_WORKBOOK_PATH),
+        "source_path": str(workbook_path),
         "last_synced": None,
         "assets": [],
         "errors": [],
@@ -1427,15 +1504,15 @@ def load_utility_asset_source():
         return data
 
     try:
-        workbook = pd.ExcelFile(MAINTENANCE_WORKBOOK_PATH, engine="openpyxl")
-        workbook_styles = openpyxl.load_workbook(MAINTENANCE_WORKBOOK_PATH, data_only=False, keep_links=False)
+        workbook = pd.ExcelFile(workbook_path, engine="openpyxl")
+        workbook_styles = openpyxl.load_workbook(workbook_path, data_only=False, keep_links=False)
         merged_assets = {}
 
         for sheet_name in workbook.sheet_names:
             if not str(sheet_name).strip().upper().startswith("UL"):
                 continue
 
-            frame = pd.read_excel(MAINTENANCE_WORKBOOK_PATH, sheet_name=sheet_name, engine="openpyxl", header=None)
+            frame = pd.read_excel(workbook_path, sheet_name=sheet_name, engine="openpyxl", header=None)
             if not worksheet_is_utility_schedule(frame):
                 continue
 
@@ -1479,7 +1556,7 @@ def load_utility_asset_source():
             assets.append(asset)
 
         data["assets"] = assets
-        data["last_synced"] = datetime.fromtimestamp(MAINTENANCE_WORKBOOK_PATH.stat().st_mtime).isoformat()
+        data["last_synced"] = datetime.fromtimestamp(workbook_path.stat().st_mtime).isoformat()
     except Exception as exc:
         data["errors"].append(str(exc))
 
@@ -1586,7 +1663,7 @@ def build_utility_dataset(year: int | None = None):
     active_year = int(year or today.year)
     cache_key = f"utility_dataset:{active_year}"
     source_data = load_utility_asset_source()
-    signature = (UTILITY_MAINTENANCE_CACHE_VERSION, get_file_signature(MAINTENANCE_WORKBOOK_PATH), active_year)
+    signature = (UTILITY_MAINTENANCE_CACHE_VERSION, get_file_signature(resolve_utility_workbook_path()), active_year)
     cached = _MAINTENANCE_CACHE.get(cache_key)
     if cached and cached["signature"] == signature:
         return cached["data"]
@@ -2226,17 +2303,22 @@ def get_maintenance_last_synced():
     return load_utility_asset_source().get("last_synced")
 
 
-def load_equipment_asset_source():
-    workbook_path = resolve_equipment_workbook_path()
+def load_equipment_asset_source_from_path(
+    workbook_path: Path | None,
+    *,
+    cache_key: str = "equipment_asset_source",
+    disk_cache_path: Path | None = EQUIPMENT_MAINTENANCE_CACHE_PATH,
+):
+    workbook_path = Path(workbook_path) if workbook_path else None
     signature = get_file_signature(workbook_path)
-    cache_key = "equipment_asset_source"
     cached = _MAINTENANCE_CACHE.get(cache_key)
     if cached and cached["signature"] == signature:
         return cached["data"]
 
-    disk_cached = load_json_cache(EQUIPMENT_MAINTENANCE_CACHE_PATH)
+    disk_cached = load_json_cache(disk_cache_path) if disk_cache_path else None
     if (
         disk_cached
+        and disk_cache_path
         and disk_cached.get("cache_version") == EQUIPMENT_MAINTENANCE_CACHE_VERSION
         and tuple(disk_cached.get("signature", ())) == signature
         and isinstance(disk_cached.get("data"), dict)
@@ -2249,7 +2331,7 @@ def load_equipment_asset_source():
         return data
 
     data = {
-        "source_path": str(workbook_path),
+        "source_path": str(workbook_path) if workbook_path else None,
         "last_synced": None,
         "assets": [],
         "errors": [],
@@ -2327,15 +2409,24 @@ def load_equipment_asset_source():
         "signature": signature,
         "data": data,
     }
-    write_json_cache(
-        EQUIPMENT_MAINTENANCE_CACHE_PATH,
-        {
-            "cache_version": EQUIPMENT_MAINTENANCE_CACHE_VERSION,
-            "signature": list(signature) if signature else None,
-            "data": data,
-        },
-    )
+    if disk_cache_path:
+        write_json_cache(
+            disk_cache_path,
+            {
+                "cache_version": EQUIPMENT_MAINTENANCE_CACHE_VERSION,
+                "signature": list(signature) if signature else None,
+                "data": data,
+            },
+        )
     return data
+
+
+def load_equipment_asset_source():
+    return load_equipment_asset_source_from_path(
+        resolve_equipment_workbook_path(),
+        cache_key="equipment_asset_source",
+        disk_cache_path=EQUIPMENT_MAINTENANCE_CACHE_PATH,
+    )
 
 
 def build_equipment_occurrence(asset, template, today: date, year: int):
@@ -2364,12 +2455,23 @@ def build_equipment_occurrence(asset, template, today: date, year: int):
     return [occurrence]
 
 
-def build_equipment_dataset(year: int | None = None):
+def build_equipment_dataset_from_path(
+    workbook_path: Path | None,
+    year: int | None = None,
+    *,
+    cache_key_prefix: str = "equipment_dataset",
+    source_cache_key: str = "equipment_asset_source",
+    disk_cache_path: Path | None = EQUIPMENT_MAINTENANCE_CACHE_PATH,
+):
     today = datetime.now().date()
     active_year = int(year or today.year)
-    cache_key = f"equipment_dataset:{active_year}"
-    source_data = load_equipment_asset_source()
-    signature = (get_file_signature(resolve_equipment_workbook_path()), active_year)
+    cache_key = f"{cache_key_prefix}:{active_year}"
+    source_data = load_equipment_asset_source_from_path(
+        workbook_path,
+        cache_key=source_cache_key,
+        disk_cache_path=disk_cache_path,
+    )
+    signature = (get_file_signature(workbook_path), active_year)
     cached = _MAINTENANCE_CACHE.get(cache_key)
     if cached and cached["signature"] == signature:
         return cached["data"]
@@ -2400,6 +2502,16 @@ def build_equipment_dataset(year: int | None = None):
         "data": dataset,
     }
     return dataset
+
+
+def build_equipment_dataset(year: int | None = None):
+    return build_equipment_dataset_from_path(
+        resolve_equipment_workbook_path(),
+        year,
+        cache_key_prefix="equipment_dataset",
+        source_cache_key="equipment_asset_source",
+        disk_cache_path=EQUIPMENT_MAINTENANCE_CACHE_PATH,
+    )
 
 
 def _build_summary_payload_from_dataset(dataset, *, asset_label="utility"):
