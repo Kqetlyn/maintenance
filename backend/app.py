@@ -634,6 +634,10 @@ def _free_port(port):
 def _start_cache_warming():
     """Register the default heavy payloads and start the background refresher so
     user requests always hit a warm disk cache instead of a cold build."""
+    # Drop any cached responses from a previous run/code version so a restart
+    # always serves results built by the current code (the response cache survives
+    # restarts on disk, which otherwise serves stale results after a code change).
+    _invalidate_route_cache()
     _register_refresh(("downtime", None, None, None, None, False, None), build_downtime_payload)
     _register_refresh(("pm-schedule", "all", None, None), lambda: build_pm_schedule_payload(stage="all", year=None, month=None))
     _register_refresh(("spare-parts",), build_spare_parts_payload)
