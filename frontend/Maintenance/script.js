@@ -2442,7 +2442,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 : "";
             return `<Worksheet ss:Name="${escapeXml(name)}"><Table>${columns}${rows}</Table>${worksheetOptions}${autoFilter}</Worksheet>`;
         }).join("");
-        return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Top" ss:WrapText="1"/><Font ss:FontName="Calibri" ss:Size="11"/></Style><Style ss:ID="title"><Font ss:Bold="1" ss:Size="16" ss:Color="#FFFFFF"/><Interior ss:Color="#0F172A" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/></Style><Style ss:ID="subtitle"><Font ss:Italic="1" ss:Color="#475569"/><Alignment ss:WrapText="1"/></Style><Style ss:ID="metaLabel"><Font ss:Bold="1" ss:Color="#334155"/><Interior ss:Color="#E2E8F0" ss:Pattern="Solid"/></Style><Style ss:ID="metaValue"><Font ss:Color="#0F172A"/></Style><Style ss:ID="header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#1D4ED8" ss:Pattern="Solid"/><Alignment ss:Vertical="Center" ss:WrapText="1"/></Style><Style ss:ID="section"><Font ss:Bold="1" ss:Color="#0F172A"/><Interior ss:Color="#DBEAFE" ss:Pattern="Solid"/></Style><Style ss:ID="warning"><Interior ss:Color="#FEF3C7" ss:Pattern="Solid"/><Font ss:Color="#92400E"/></Style></Styles>${worksheetXml}</Workbook>`;
+        return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><DocumentProperties xmlns="urn:schemas-microsoft-com:office:office"><Version>16.00</Version></DocumentProperties><OfficeDocumentSettings xmlns="urn:schemas-microsoft-com:office:office"><AllowPNG/></OfficeDocumentSettings><ExcelWorkbook xmlns="urn:schemas-microsoft-com:office:excel"><WindowHeight>10116</WindowHeight><WindowWidth>23040</WindowWidth><ActiveSheet>0</ActiveSheet><ProtectStructure>False</ProtectStructure><ProtectWindows>False</ProtectWindows></ExcelWorkbook><Styles><Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Top" ss:WrapText="1"/><Font ss:FontName="Calibri" ss:Size="11"/></Style><Style ss:ID="title"><Font ss:Bold="1" ss:Size="16" ss:Color="#FFFFFF"/><Interior ss:Color="#0F172A" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/></Style><Style ss:ID="subtitle"><Font ss:Italic="1" ss:Color="#339966"/><Alignment ss:WrapText="1"/></Style><Style ss:ID="metaLabel"><Font ss:Bold="1" ss:Color="#334155"/><Interior ss:Color="#E2E8F0" ss:Pattern="Solid"/></Style><Style ss:ID="metaValue"><Font ss:Color="#0F172A"/></Style><Style ss:ID="header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#1D4ED8" ss:Pattern="Solid"/><Alignment ss:Vertical="Center" ss:WrapText="1"/></Style><Style ss:ID="section"><Font ss:Bold="1" ss:Color="#0F172A"/><Interior ss:Color="#DBEAFE" ss:Pattern="Solid"/></Style><Style ss:ID="warning"><Interior ss:Color="#FEF3C7" ss:Pattern="Solid"/><Font ss:Color="#92400E"/></Style></Styles>${worksheetXml}</Workbook>`;
     }
 
     function downloadBlob(blob, filename) {
@@ -2466,18 +2466,12 @@ document.addEventListener("DOMContentLoaded", () => {
             (selected.name || selected.assetName || selected.label)
             || state.assetPartsIntelQuery || "asset";
         const suppliers = (intel.supplierSummary || intel.suppliers || []);
-        const dataGaps = intel.dataGaps || [];
         const now = new Date();
         const generatedAt = formatSpareExcelDateTime(now);
-        const qualityCounts = {};
-        purchases.forEach((row) => {
-            const flag = row.data_quality_flag || "No data quality flag";
-            qualityCounts[flag] = (qualityCounts[flag] || 0) + 1;
-        });
 
         const purchaseRows = [
             { cells: [{ value: "Asset Parts Intelligence - Purchase History", styleId: "title", mergeAcross: 9 }], height: 24 },
-            { cells: [{ value: "Matched Gen PO spare-part purchases and suppliers. Export layout follows the Downtime organized workbook style.", styleId: "subtitle", mergeAcross: 9 }] },
+            { cells: [{ value: "Matched Gen PO spare-part purchases and suppliers.", styleId: "subtitle", mergeAcross: 9 }] },
             [],
             [
                 { value: "Selected Asset", styleId: "metaLabel" }, { value: assetName, styleId: "metaValue" },
@@ -2511,54 +2505,9 @@ document.addEventListener("DOMContentLoaded", () => {
                 ])
                 : [["No supplier summary rows found for this selection.", "", "", "", ""]]),
         ];
-        const summaryRows = [
-            { cells: [{ value: "Asset Parts Intelligence Export", styleId: "title", mergeAcross: 2 }], height: 24 },
-            { cells: [{ value: "Read-only relationship export for work orders, spare parts, suppliers, and data confidence notes.", styleId: "subtitle", mergeAcross: 2 }] },
-            [],
-            { styleId: "header", cells: ["Metric", "Value", "Notes"] },
-            ["Generated At", generatedAt, "Local browser export time in ISO format"],
-            ["Selected Asset", assetName, "Search result or selected asset/family label"],
-            ["Asset ID", selected.assetId || "", "Blank means matches were found without direct Asset ID coding"],
-            ["Asset Family", selected.assetFamily || "", "Detected or selected family"],
-            ["Machine Group", selected.machineGroup || "", "Detected or selected machine group"],
-            ["Related WO/MR", summary.relatedWorkOrderCount || 0, "All work orders and maintenance requests in the analysis context"],
-            ["Direct WO/MR Asset ID Matches", summary.directWorkOrderMatches || 0, "High-confidence direct asset ID matches"],
-            ["Description WO/MR Matches", summary.descriptionWorkOrderMatches || 0, "Alias, description, or translated-description matches"],
-            ["Store Transaction Rows", summary.sparePartTransactionCount || 0, "Actual project/store spare-part consumption rows"],
-            ["Matched PO Lines", purchases.length, "Purchase-history rows included in this workbook"],
-            ["Supplier Count", suppliers.length, "Unique suppliers in Supplier Summary"],
-            ["Possible Coding Mismatches", summary.possibleCodingMismatchCount || 0, "Records likely coded under a general area or different asset"],
-            ["Confidence", summary.confidence || "", `${summary.confidenceScore || 0}% confidence score`],
-        ];
-        const qualityRows = [
-            { cells: [{ value: "Data Quality Notes", styleId: "title", mergeAcross: 2 }], height: 24 },
-            { cells: [{ value: "These are not errors. They explain how the matches were found and where source-data gaps remain.", styleId: "subtitle", mergeAcross: 2 }] },
-            [],
-            { styleId: "header", cells: ["Type", "Count / Note", "Meaning"] },
-            ...Object.entries(qualityCounts).map(([flag, count]) => ["Purchase Data Quality Flag", count, flag]),
-            ...(dataGaps.length ? dataGaps.map((note) => ["Data Gap", "", note]) : [["Data Gap", "", "No data gap notes returned for this selection."]]),
-        ];
-        const dictionaryRows = [
-            { cells: [{ value: "Data Dictionary", styleId: "title", mergeAcross: 3 }], height: 24 },
-            [],
-            { styleId: "header", cells: ["Sheet", "Column", "Definition", "Source / Method"] },
-            ["Export_Summary", "Metric / Value / Notes", "High-level metrics for the selected asset intelligence context.", "Derived from Asset Parts Intelligence summary"],
-            ["Purchase_History", "PO Date / PO Number", "Purchase order date and identifier.", "Gen PO export"],
-            ["Purchase_History", "Supplier", "Vendor/supplier linked to the PO row.", "Gen PO export"],
-            ["Purchase_History", "Part / Item Description", "Purchased spare part or service description.", "Gen PO item description"],
-            ["Purchase_History", "Related Asset / Alias", "Asset, alias, family, or machine group that matched the PO row.", "Smart asset matching"],
-            ["Purchase_History", "Match Source", "Which field or resolver path found the match.", "Asset resolver"],
-            ["Purchase_History", "Match Confidence", "High, Medium, or Low confidence classification.", "Exact ID/name, alias, description, or broader group match"],
-            ["Purchase_History", "Data Quality", "Coding mismatch or missing-link note for the row.", "Asset Parts Intelligence data quality rules"],
-            ["Supplier_Summary", "Parts / Services Supplied", "Distinct parts/services supplied for the selected asset context.", "Aggregated from matched PO rows"],
-            ["Data_Quality_Notes", "Data Gap", "Missing or indirect relationship found in the source data.", "Generated as a confidence note, not an error"],
-        ];
         const workbook = buildExcelWorkbookXml([
-            { name: "Export_Summary", rows: summaryRows, widths: [30, 24, 78], autoFilterRow: 4, freezeAfterRow: 4 },
             { name: "Purchase_History", rows: purchaseRows, widths: [13, 18, 30, 52, 12, 14, 22, 22, 18, 70], autoFilterRow: 7, freezeAfterRow: 7 },
             { name: "Supplier_Summary", rows: supplierRows, widths: [34, 64, 18, 12, 18], autoFilterRow: 4, freezeAfterRow: 4 },
-            { name: "Data_Quality_Notes", rows: qualityRows, widths: [28, 16, 90], autoFilterRow: 4, freezeAfterRow: 4 },
-            { name: "Data_Dictionary", rows: dictionaryRows, widths: [24, 28, 70, 64], autoFilterRow: 3, freezeAfterRow: 3 },
         ]);
         const blob = new Blob([workbook], { type: "application/vnd.ms-excel;charset=utf-8" });
         const safeAsset = String(assetName).replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "asset";

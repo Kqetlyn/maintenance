@@ -1983,6 +1983,27 @@ canvas {
     box-shadow: 0 1px 0 var(--border);
 }
 
+.machine-history-wrapper.is-empty {
+    max-height: none;
+    overflow: visible;
+}
+
+.machine-history-wrapper.is-empty table {
+    height: auto;
+}
+
+.machine-history-wrapper.is-empty thead th {
+    position: static;
+    height: auto;
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+.machine-history-wrapper.is-empty .empty-cell {
+    height: auto;
+    padding: 10px 12px;
+}
+
 /* Machine Explorer WO/MR history should read as a fitted dashboard table, not a wide spreadsheet. */
 .machine-detail-panel .machine-history-wrapper,
 #refrig-history-wrapper {

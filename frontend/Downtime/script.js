@@ -5778,6 +5778,10 @@ function _applyHistorySearch(rows) {
 function renderMachineExplorerHistory(rows = [], assetRows = []) {
     const body = document.getElementById("machine-history-body");
     if (!body) return;
+    const wrapper = body.closest(".machine-history-wrapper");
+    const setHistoryEmpty = (isEmpty) => {
+        if (wrapper) wrapper.classList.toggle("is-empty", Boolean(isEmpty));
+    };
 
     const viewAll = machineHistoryViewMode === "all";
 
@@ -5796,9 +5800,11 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         setText("machine-explorer-meta", `Showing all ${fmtNumber(filtered.length)} WO/MR record${filtered.length === 1 ? "" : "s"} for current filters.`);
         setText("history-view-subtitle", "Showing all assets matching the current filters.");
         if (!filtered.length) {
+            setHistoryEmpty(true);
             body.innerHTML = `<tr><td colspan="16" class="empty-cell">No WO/MR records match the current filters.</td></tr>`;
             return;
         }
+        setHistoryEmpty(false);
         const shownHistoryRows = filtered.slice(0, MACHINE_HISTORY_RENDER_LIMIT);
         const hiddenCount = Math.max(0, filtered.length - shownHistoryRows.length);
         body.innerHTML = shownHistoryRows.map((row, index) => renderMachineHistoryRow(row, index)).join("") + (hiddenCount
@@ -5814,6 +5820,7 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         resetMachineExplorerKpis();
         setText("machine-explorer-title", "WO/MR History for Selected Asset");
         setText("machine-explorer-meta", "Select a machine/asset from step 2. The table stays empty until an asset is selected.");
+        setHistoryEmpty(true);
         body.innerHTML = `<tr><td colspan="16" class="empty-cell">Select an asset to view specific WO/MR history.</td></tr>`;
         return;
     }
@@ -5823,6 +5830,7 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
     const matched = getSelectedAssetMatchedRows(rows, selectedAsset.assetId);
     const filtered = _applyHistorySearch(filterMachineHistoryPeriodRows(matched).sort(compareMachineHistoryRows));
     renderMachineExplorerKpis(filtered);
+    setHistoryEmpty(!filtered.length);
     const refrigType = getRefrigAssetType(selectedAsset.assetId);
     const refrigEntry = refrigType ? getRefrigCondenserEntry(selectedAsset.assetId) : null;
     const refrigSubtext = refrigType
