@@ -389,8 +389,40 @@ def maintenance_import_project_transactions():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
+def _free_port(port):
+    """Best-effort: kill any process already holding the port before we bind, so
+    a fresh launch never collides with a stale/hung instance (the dev server gets
+    relaunched a lot and old python app.py processes pile up). Local dev only;
+    never raises."""
+    import subprocess
+    import signal
+    try:
+        my_pid = str(os.getpid())
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano"], capture_output=True, text=True).stdout
+            for line in out.splitlines():
+                if f":{port} " in line and "LISTENING" in line:
+                    parts = line.split()
+                    pid = parts[-1] if parts else ""
+                    if pid.isdigit() and pid not in (my_pid, "0"):
+                        subprocess.run(["taskkill", "/f", "/pid", pid], capture_output=True)
+        else:
+            out = subprocess.run(["lsof", "-ti", f"tcp:{port}"], capture_output=True, text=True).stdout
+            for pid in out.split():
+                if pid.isdigit() and pid != my_pid:
+                    try:
+                        os.kill(int(pid), signal.SIGKILL)
+                    except OSError:
+                        pass
+    except Exception:
+        pass
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5005))
     debug = os.environ.get("FLASK_DEBUG", "0") not in {"0", "false", "no"}
+    # Only the first (parent) run frees the port; the reloader child must not.
+    if not os.environ.get("WERKZEUG_RUN_MAIN"):
+        _free_port(port)
     print(f"Maintenance standalone server starting on http://localhost:{port}")
     app.run(host="0.0.0.0", port=port, debug=debug)
