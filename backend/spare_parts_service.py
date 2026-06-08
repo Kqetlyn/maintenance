@@ -4762,7 +4762,15 @@ def _asset_intel_match_record(
     record_asset_norm = normalize_spare_part_text(record_asset_id)
     selected_asset_ids = {normalize_spare_part_text(asset_id) for asset_id in (target.get("asset_ids") or set()) if asset_id}
     query_norm = target.get("query_norm") or ""
-    search_text = normalize_spare_part_text(record.get("_asset_intel_search_text") or _asset_intel_text(record))
+    # Memoise the normalised search text on the (cached) record: normalising every
+    # record's text was re-run on every query for thousands of rows — the main
+    # remaining hot spot. The record objects are reused across queries, so this
+    # runs once per record then is free.
+    search_text = record.get("_asset_intel_search_norm")
+    if search_text is None:
+        search_text = normalize_spare_part_text(record.get("_asset_intel_search_text") or _asset_intel_text(record))
+        if isinstance(record, dict):
+            record["_asset_intel_search_norm"] = search_text
 
     if mode == "search":
         if not query_norm or query_norm not in search_text:
@@ -4884,6 +4892,25 @@ def _asset_intel_normalize_work_order(rec: dict) -> dict:
     return normalized
 
 
+# Normalising every WO record (~4,600) is pure-CPU but heavy (many alias lookups
+# + regex), and it ran on every analysis — the ~21s hot spot. The records are
+# deterministic and _pt_load_wo_records() is cached, so we normalise once and
+# reuse, keyed on the cached records' identity (a new list = data changed).
+_ASSET_INTEL_WO_NORM_CACHE = {"key": None, "records": None}
+
+
+def _asset_intel_normalized_wo_records() -> list[dict]:
+    recs = _pt_load_wo_records()
+    key = id(recs)
+    cache = _ASSET_INTEL_WO_NORM_CACHE
+    if cache["key"] == key and cache["records"] is not None:
+        return cache["records"]
+    normalized = [_asset_intel_normalize_work_order(rec) for rec in recs]
+    cache["key"] = key
+    cache["records"] = normalized
+    return normalized
+
+
 def find_related_work_orders_for_asset(
     target: dict,
     date_from=None,
@@ -4892,8 +4919,7 @@ def find_related_work_orders_for_asset(
     include_low_confidence=False,
 ) -> list[dict]:
     rows: list[dict] = []
-    for rec in _pt_load_wo_records():
-        row = _asset_intel_normalize_work_order(rec)
+    for row in _asset_intel_normalized_wo_records():
         if not _asset_intel_date_in_range(row.get("date") or row.get("actual_start"), date_from, date_to):
             continue
         match = _asset_intel_match_record(row, target, "work_order", include_related_matches, include_low_confidence)
@@ -4937,6 +4963,38 @@ def _asset_intel_store_match_record(row: dict) -> dict:
     return record
 
 
+# Same idea as the WO cache: normalise store/PO rows once and reuse (keyed on the
+# cached source list's identity), instead of re-normalising thousands of rows on
+# every analysis. Returns (source_row, normalized_match_record) pairs.
+_ASSET_INTEL_STORE_NORM_CACHE = {"key": None, "pairs": None}
+_ASSET_INTEL_PO_NORM_CACHE = {"key": None, "pairs": None}
+
+
+def _asset_intel_normalized_store_rows():
+    payload = build_project_transactions_payload()
+    source_rows = payload.get("transactions") or payload.get("consumption_analysis", {}).get("records") or []
+    cache = _ASSET_INTEL_STORE_NORM_CACHE
+    key = id(source_rows)
+    if cache["key"] == key and cache["pairs"] is not None:
+        return cache["pairs"]
+    pairs = [(s, _asset_intel_store_match_record(s)) for s in source_rows]
+    cache["key"] = key
+    cache["pairs"] = pairs
+    return pairs
+
+
+def _asset_intel_normalized_po_rows():
+    source_rows = (build_spare_parts_payload().get("po_classification", {}) or {}).get("records") or []
+    cache = _ASSET_INTEL_PO_NORM_CACHE
+    key = id(source_rows)
+    if cache["key"] == key and cache["pairs"] is not None:
+        return cache["pairs"]
+    pairs = [(s, _asset_intel_po_match_record(s)) for s in source_rows]
+    cache["key"] = key
+    cache["pairs"] = pairs
+    return pairs
+
+
 def find_spare_part_transactions_for_asset(
     target: dict,
     date_from=None,
@@ -4944,13 +5002,10 @@ def find_spare_part_transactions_for_asset(
     include_related_matches=True,
     include_low_confidence=False,
 ) -> list[dict]:
-    payload = build_project_transactions_payload()
-    source_rows = payload.get("transactions") or payload.get("consumption_analysis", {}).get("records") or []
     rows: list[dict] = []
-    for source in source_rows:
+    for source, record in _asset_intel_normalized_store_rows():
         if not _asset_intel_date_in_range(source.get("project_date"), date_from, date_to):
             continue
-        record = _asset_intel_store_match_record(source)
         match = _asset_intel_match_record(record, target, "store", include_related_matches, include_low_confidence)
         if not match:
             continue
@@ -5009,20 +5064,17 @@ def find_purchase_orders_for_asset(
     include_related_matches=True,
     include_low_confidence=False,
 ) -> list[dict]:
-    spare_payload = build_spare_parts_payload()
-    source_rows = spare_payload.get("po_classification", {}).get("records") or []
     rows: list[dict] = []
-    for source in source_rows:
-        # Match EVERY PO row by alias/description — do not pre-filter by spare
-        # classification. Many real purchase rows (e.g. Robot Coupe / CL50 motors
-        # and OPTIBELT timing belts) are classified "Manual Review", and the old
-        # classification gate dropped them before alias matching could run, so the
-        # card showed 0 purchases / 0 suppliers. Relevance is decided by the
-        # alias matcher + confidence below, not by classification.
+    # Match EVERY PO row by alias/description — do not pre-filter by spare
+    # classification. Many real purchase rows (e.g. Robot Coupe / CL50 motors and
+    # OPTIBELT timing belts) are classified "Manual Review", and the old
+    # classification gate dropped them before alias matching could run, so the
+    # card showed 0 purchases / 0 suppliers. Relevance is decided by the alias
+    # matcher + confidence below, not by classification.
+    for source, record in _asset_intel_normalized_po_rows():
         po_date = source.get("po_date") or source.get("goods_received_date")
         if not _asset_intel_date_in_range(po_date, date_from, date_to):
             continue
-        record = _asset_intel_po_match_record(source)
         match = _asset_intel_match_record(record, target, "po", include_related_matches, include_low_confidence)
         if not match:
             continue
