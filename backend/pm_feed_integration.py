@@ -49,6 +49,12 @@ ASSET_ID_RE = re.compile(r"^EN[A-Z]{2}-", re.IGNORECASE)
 PRODUCTION_FEED = "production"
 UTILITY_FEED = "utility"
 
+# The D365 PM feed is the Stage 2 PM source. Stage is read from the master
+# (Asset_Master / PM_Feed_Map, which are all Stage 2); this is only the safety
+# fallback used when a resolved line leaves Stage blank, so a feed task is never
+# stage-less. It is NOT a hard override of workbook values.
+DEFAULT_FEED_STAGE = "Stage 2"
+
 # Canonical filenames in DATA_DIR (swap data, not code: a new machine/code is an
 # Excel edit to the feed + Asset_Master, never a code change).
 PRODUCTION_FEED_FILENAME = "PM_template_filled production machines.xlsx"
@@ -562,8 +568,9 @@ def build_feed_tasks_internal(feeds: list[dict], master: dict, opts: dict | None
     year = int(opts.get("year") or today.year)
     win_start = opts.get("win_start") or date(year, 1, 1)
     win_end = opts.get("win_end") or date(year, 12, 31)
-    # The D365 PM feed is the Stage 2 source: callers force Stage 2 on every feed
-    # task (Scope/System-Area/Location/PIC still come from the workbook).
+    # Stage is driven by the master (Asset_Master / PM_Feed_Map). stage_override is
+    # an optional hard override (normally unset); DEFAULT_FEED_STAGE is the blank
+    # fallback. Scope/System-Area/Location/PIC always come from the workbook.
     stage_override = opts.get("stage_override")
 
     out: list[dict] = []
@@ -591,7 +598,7 @@ def build_feed_tasks_internal(feeds: list[dict], master: dict, opts: dict | None
                 out.append({
                     "pmTaskId": f"feed-{line['source']}-{line['planId']}-{iso}",
                     "planId": line["planId"],
-                    "stage": stage_override or res["stage"],
+                    "stage": stage_override or res["stage"] or DEFAULT_FEED_STAGE,
                     "assetId": res["assetCode"],
                     "assetName": res["assetName"],
                     "mainAssetGroup": main_group,

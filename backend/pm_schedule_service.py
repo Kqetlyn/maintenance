@@ -390,10 +390,10 @@ def _build_tasks(year, today):
 
     # Stage 2 = live D365 PM feed (production + utility workbooks). This replaces
     # the old hard-coded Stage 2 generators (week-token equipment workbook + the
-    # S2U "modern utility" fabricator). The feed is the Stage 2 source, so every
-    # feed task is forced to Stage 2; Scope / System-Area / Location / PIC are
-    # resolved from Asset_Master + PM_Feed_Map (nothing hard-coded). Stage 1
-    # (utility_stage1 + equipment_stage1) is left untouched.
+    # S2U "modern utility" fabricator). Stage / Scope / System-Area / Location /
+    # PIC are all resolved from Asset_Master + PM_Feed_Map (nothing hard-coded);
+    # both sheets classify every feed line as Stage 2. Stage 1 (utility_stage1 +
+    # equipment_stage1) is left untouched.
     feed_master = pm_feed.read_master(pm_feed.default_master_path(DATA_DIR))
     feed_tasks = pm_feed.build_feed_tasks_internal(
         pm_feed.default_feeds(DATA_DIR),
@@ -403,7 +403,6 @@ def _build_tasks(year, today):
             "today": today,
             "win_start": date(year, 1, 1),
             "win_end": date(year, 12, 31),
-            "stage_override": "Stage 2",
         },
     )
     tasks.extend(feed_tasks)
