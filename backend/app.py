@@ -552,19 +552,20 @@ def maintenance_external_po():
 
 @app.route("/api/maintenance/asset-parts-intelligence")
 def maintenance_asset_parts_intelligence():
-    return jsonify(
-        build_asset_parts_intelligence_context(
-            query=request.args.get("query"),
-            asset_id=request.args.get("assetId"),
-            asset_name=request.args.get("assetName"),
-            asset_family=request.args.get("assetFamily"),
-            machine_group=request.args.get("machineGroup"),
-            date_from=request.args.get("dateFrom"),
-            date_to=request.args.get("dateTo"),
-            include_related_matches=request.args.get("includeRelatedMatches", "true"),
-            include_low_confidence=request.args.get("includeLowConfidence", "false"),
-        )
-    )
+    a = request.args
+    query = a.get("query"); asset_id = a.get("assetId"); asset_name = a.get("assetName")
+    asset_family = a.get("assetFamily"); machine_group = a.get("machineGroup")
+    date_from = a.get("dateFrom"); date_to = a.get("dateTo")
+    include_related = a.get("includeRelatedMatches", "true"); include_low = a.get("includeLowConfidence", "false")
+    key = ("asset-parts-intel", query, asset_id, asset_name, asset_family, machine_group,
+           date_from, date_to, include_related, include_low)
+    # Cache the (deterministic) analysis per search so re-running the same query is
+    # instant; the first run still does the heavy build.
+    return _cached_json(key, lambda: build_asset_parts_intelligence_context(
+        query=query, asset_id=asset_id, asset_name=asset_name, asset_family=asset_family,
+        machine_group=machine_group, date_from=date_from, date_to=date_to,
+        include_related_matches=include_related, include_low_confidence=include_low,
+    ))
 
 
 @app.route("/api/maintenance/import-status")
