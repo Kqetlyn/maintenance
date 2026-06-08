@@ -25,13 +25,13 @@ from pathlib import Path
 
 from maintenance_service import DATA_DIR, build_equipment_dataset_from_path, build_utility_dataset
 from pm_schedule_sources import (
-    build_stage2_utility_dataset,
     get_pm_schedule_source_status,
     summarize_pm_schedule_sources,
 )
 from asset_mapping import load_asset_mapping
 from pm_schedule_overrides import apply_overrides_and_autodone
 from pm_planner_store import list_manual_tasks
+import pm_feed_integration as pm_feed
 
 # ── Functional-location mapping (Asset_Master: Asset Installation + Functional Locations) ──
 # The "Asset Installation" sheet only holds D365 functional-location CODES for the
@@ -262,7 +262,7 @@ def _normalize_occurrence(occ, *, domain, source_file, source_slot, source_label
         if not asset_id_raw:
             stage = "Needs Stage Review"
             mapping_status = "Missing Asset ID"
-        elif source_slot in {"utility_stage1", "utility_stage2"}:
+        elif source_slot == "utility_stage1":
             stage = default_stage if default_stage in STAGE_VALUES else "Stage 1"
             mapping_status = "Schedule-defined"
         else:
@@ -350,8 +350,6 @@ def _build_tasks(year, today):
     source_status = get_pm_schedule_source_status()
     utility_stage1_source = source_status["utility_stage1"]
     equipment_stage1_source = source_status["equipment_stage1"]
-    utility_stage2_source = source_status["utility_stage2"]
-    equipment_stage2_source = source_status["equipment_stage2"]
 
     def source_path(source_entry):
         path_value = source_entry.get("path")
@@ -390,37 +388,25 @@ def _build_tasks(year, today):
             today=today,
         ))
 
-    utility_stage2 = build_stage2_utility_dataset(year)
-    for occ in utility_stage2.get("occurrences", []):
-        tasks.append(_normalize_occurrence(
-            occ,
-            domain="utility",
-            source_file=utility_stage2_source.get("file_name") or "",
-            source_slot="utility_stage2",
-            source_label=utility_stage2_source.get("label"),
-            default_stage=utility_stage2_source.get("default_stage"),
-            asset_map=asset_map,
-            today=today,
-        ))
-
-    equipment_stage2 = build_equipment_dataset_from_path(
-        source_path(equipment_stage2_source),
-        year,
-        cache_key_prefix="equipment_stage2_dataset",
-        source_cache_key="equipment_stage2_asset_source",
-        disk_cache_path=None,
+    # Stage 2 = live D365 PM feed (production + utility workbooks). This replaces
+    # the old hard-coded Stage 2 generators (week-token equipment workbook + the
+    # S2U "modern utility" fabricator). The feed is the Stage 2 source, so every
+    # feed task is forced to Stage 2; Scope / System-Area / Location / PIC are
+    # resolved from Asset_Master + PM_Feed_Map (nothing hard-coded). Stage 1
+    # (utility_stage1 + equipment_stage1) is left untouched.
+    feed_master = pm_feed.read_master(pm_feed.default_master_path(DATA_DIR))
+    feed_tasks = pm_feed.build_feed_tasks_internal(
+        pm_feed.default_feeds(DATA_DIR),
+        feed_master,
+        {
+            "year": year,
+            "today": today,
+            "win_start": date(year, 1, 1),
+            "win_end": date(year, 12, 31),
+            "stage_override": "Stage 2",
+        },
     )
-    for occ in equipment_stage2.get("occurrences", []):
-        tasks.append(_normalize_occurrence(
-            occ,
-            domain="equipment",
-            source_file=equipment_stage2_source.get("file_name") or "",
-            source_slot="equipment_stage2",
-            source_label=equipment_stage2_source.get("label"),
-            default_stage=equipment_stage2_source.get("default_stage"),
-            asset_map=asset_map,
-            today=today,
-        ))
+    tasks.extend(feed_tasks)
 
     tracked_counts = Counter(task.get("sourceSlot") for task in tasks if task.get("sourceSlot"))
     source_summary = summarize_pm_schedule_sources(source_status, tracked_counts)
@@ -429,15 +415,14 @@ def _build_tasks(year, today):
         "utilityLastSynced": utility_stage1.get("meta", {}).get("last_synced"),
         "utilityStage1LastSynced": utility_stage1.get("meta", {}).get("last_synced"),
         "equipmentStage1LastSynced": equipment_stage1.get("meta", {}).get("last_synced"),
-        "utilityStage2LastSynced": utility_stage2.get("meta", {}).get("last_synced"),
-        "equipmentLastSynced": equipment_stage2.get("meta", {}).get("last_synced"),
-        "equipmentStage2LastSynced": equipment_stage2.get("meta", {}).get("last_synced"),
         "utilitySource": utility_stage1_source.get("file_name"),
         "utilityStage1Source": utility_stage1_source.get("file_name"),
         "equipmentStage1Source": equipment_stage1_source.get("file_name"),
-        "utilityStage2Source": utility_stage2_source.get("file_name"),
-        "equipmentSource": equipment_stage2_source.get("file_name"),
-        "equipmentStage2Source": equipment_stage2_source.get("file_name"),
+        # Stage 2 now comes from the D365 PM feed (production + utility workbooks).
+        "stage2Source": "D365 PM feed",
+        "feedFiles": [Path(f["path"]).name for f in pm_feed.default_feeds(DATA_DIR)],
+        "feedTaskCount": len(feed_tasks),
+        "feedMasterErrors": feed_master.get("errors", []),
         "scheduleSources": list(source_status.values()),
         "sourceSummary": source_summary,
         "assetMasterAvailable": mapping.get("available", False),
@@ -445,8 +430,7 @@ def _build_tasks(year, today):
         "errors": (
             (utility_stage1.get("meta", {}).get("errors") or [])
             + (equipment_stage1.get("meta", {}).get("errors") or [])
-            + (utility_stage2.get("meta", {}).get("errors") or [])
-            + (equipment_stage2.get("meta", {}).get("errors") or [])
+            + list(feed_master.get("errors", []))
         ),
     }
     return tasks, asset_map, meta

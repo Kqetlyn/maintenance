@@ -24,7 +24,6 @@ import openpyxl
 from maintenance_service import (
     DATA_DIR,
     EQUIPMENT_MAINTENANCE_COPY_PATH,
-    EQUIPMENT_MAINTENANCE_SOURCE_PATH,
     UTILITY_MAINTENANCE_SOURCE_PATH,
     clean_text,
     clear_maintenance_caches,
@@ -37,7 +36,6 @@ from maintenance_service import (
     parse_month_token,
     parse_week_token,
     resolve_equipment_stage1_workbook_path,
-    resolve_equipment_stage2_workbook_path,
     resolve_utility_workbook_path,
 )
 from downtime_service import translate_maintenance_description
@@ -45,7 +43,6 @@ from downtime_service import translate_maintenance_description
 PM_SCHEDULE_UPLOAD_EXTENSIONS = {".xlsx", ".xls"}
 PM_SCHEDULE_SOURCE_REGISTRY_PATH = DATA_DIR / "pm_schedule_source_registry.json"
 PM_SCHEDULE_SOURCE_ARCHIVE_DIR = DATA_DIR / "pm_schedule_imports"
-UTILITY_STAGE2_MAINTENANCE_SOURCE_PATH = DATA_DIR / "utility_maintenance_schedule_source.xlsx"
 
 PM_SCHEDULE_SOURCE_SPECS = OrderedDict(
     [
@@ -81,38 +78,9 @@ PM_SCHEDULE_SOURCE_SPECS = OrderedDict(
                 "supports_manual_activation": False,
             },
         ),
-        (
-            "utility_stage2",
-            {
-                "label": "Stage 2 Utility",
-                "scope": "utility",
-                "default_stage": "Stage 2",
-                "template": "modern_utility",
-                "template_label": "Editable utility PM layout",
-                "template_hint": "Schedule (PM) workbook layout with week markers and optional 'Group Seperate' asset lookup sheet.",
-                "description": "Confirmed Stage 2 utility PM schedule workbook.",
-                "canonical_path": UTILITY_STAGE2_MAINTENANCE_SOURCE_PATH,
-                "resolver": None,
-                "default_active": True,
-                "supports_manual_activation": False,
-            },
-        ),
-        (
-            "equipment_stage2",
-            {
-                "label": "Stage 2 Production Equipment",
-                "scope": "equipment",
-                "default_stage": "Stage 2",
-                "template": "modern_equipment",
-                "template_label": "Production equipment PM layout",
-                "template_hint": "Workbook sheets with 'Machine Code' / 'Machine Name' headers and week-number schedule columns.",
-                "description": "Confirmed Stage 2 production equipment PM schedule workbook.",
-                "canonical_path": EQUIPMENT_MAINTENANCE_SOURCE_PATH,
-                "resolver": resolve_equipment_stage2_workbook_path,
-                "default_active": True,
-                "supports_manual_activation": False,
-            },
-        ),
+        # Stage 2 PM is now produced from the live D365 PM feed
+        # (see pm_feed_integration), not from a registry source slot. The old
+        # Stage 2 utility/equipment slots and their generators were removed.
     ]
 )
 
@@ -131,7 +99,6 @@ _UTILITY_GROUP_KEYWORDS = (
     ("lift", "Lift"),
 )
 _SOURCE_STATUS_CACHE = {"signature": None, "value": None}
-_STAGE2_UTILITY_CACHE = {"signature": None, "value": None}
 
 
 def _spec(slot_key: str) -> dict:
@@ -555,8 +522,6 @@ def import_pm_schedule_source_file(file_storage, slot_key: str, activate: bool |
         clear_maintenance_caches()
         _SOURCE_STATUS_CACHE["signature"] = None
         _SOURCE_STATUS_CACHE["value"] = None
-        _STAGE2_UTILITY_CACHE["signature"] = None
-        _STAGE2_UTILITY_CACHE["value"] = None
         return {
             "ok": True,
             "message": f"{spec['label']} schedule uploaded.",
@@ -591,8 +556,6 @@ def set_pm_schedule_source_active(slot_key: str, active: bool) -> dict:
         clear_maintenance_caches()
         _SOURCE_STATUS_CACHE["signature"] = None
         _SOURCE_STATUS_CACHE["value"] = None
-        _STAGE2_UTILITY_CACHE["signature"] = None
-        _STAGE2_UTILITY_CACHE["value"] = None
         return {
             "ok": True,
             "message": f"{spec['label']} {'activated' if active else 'kept staged'} for PM tracking.",
@@ -637,154 +600,6 @@ def _frequency_label_from_times_per_year(value) -> str:
     return f"{count}x / year"
 
 
-def _derive_modern_utility_category(*values) -> str:
-    blob = " ".join(clean_text(value) or "" for value in values).lower()
-    for keyword, category in _UTILITY_GROUP_KEYWORDS:
-        if keyword in blob:
-            return category
-    return "Utilities"
-
-
-def _translate_pm_label(value) -> str:
-    text = clean_text(value) or ""
-    if not text or not contains_thai(text):
-        return text
-    try:
-        translated = clean_text(translate_maintenance_description(text))
-    except Exception:
-        translated = None
-    return translated or text
-
-
-def _extract_modern_utility_occurrences(path: Path, year: int) -> list[dict]:
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    group_lookup = _load_modern_utility_group_lookup(workbook)
-    occurrences = {}
-
-    for sheet_name in workbook.sheetnames:
-        worksheet = workbook[sheet_name]
-        schedule_columns = _extract_modern_utility_columns(worksheet)
-        if not schedule_columns:
-            continue
-
-        current_group = ""
-        current_location = ""
-        for row_index, row in enumerate(worksheet.iter_rows(min_row=6, values_only=True), start=6):
-            code_text = clean_text(row[1] if len(row) > 1 else None)
-            name_text = clean_text(row[2] if len(row) > 2 else None)
-            frequency_value = clean_text(row[3] if len(row) > 3 else None)
-            action_text = clean_text(row[4] if len(row) > 4 else None)
-            provider_text = clean_text(row[5] if len(row) > 5 else None)
-
-            if code_text and not _looks_like_schedule_code(code_text):
-                current_group = code_text
-                current_location = name_text or current_location
-
-            if not code_text and not name_text:
-                continue
-
-            marked_columns = [
-                item
-                for item in schedule_columns
-                if len(row) >= item["column_index"] and is_schedule_marker(row[item["column_index"] - 1])
-            ]
-            if not marked_columns:
-                continue
-
-            lookup_entry = group_lookup.get(normalize_asset_code(code_text)) if _looks_like_schedule_code(code_text) else None
-            if lookup_entry:
-                asset_code = lookup_entry.get("asset_id") or normalize_asset_code(code_text)
-                asset_name = lookup_entry.get("asset_name") or name_text or code_text
-                group_name = lookup_entry.get("group") or current_group
-                location_name = lookup_entry.get("location") or current_location
-            elif _looks_like_schedule_code(code_text):
-                asset_code = normalize_asset_code(code_text)
-                asset_name = name_text or code_text
-                group_name = current_group
-                location_name = current_location
-            else:
-                label_text = code_text or name_text or f"Row {row_index}"
-                asset_code = _safe_schedule_identifier("S2U", label_text, row_index)
-                asset_name = label_text
-                group_name = current_group or label_text
-                location_name = current_location
-
-            asset_name = _translate_pm_label(asset_name) or asset_name
-            group_name = _translate_pm_label(group_name) or group_name
-            location_name = _translate_pm_label(location_name) or location_name
-            category = _derive_modern_utility_category(group_name, asset_name, location_name, sheet_name)
-            subcategory = group_name or category
-            frequency_label = _frequency_label_from_times_per_year(frequency_value)
-
-            for column_info in marked_columns:
-                due_dates = get_sheet_due_dates(year, column_info["month"], column_info["target_week"])
-                if not due_dates:
-                    continue
-                scheduled_date = due_dates[0]
-                scheduled_week_end = scheduled_date + timedelta(days=6)
-                occurrence_key = (asset_code, scheduled_date.isoformat(), sheet_name)
-                if occurrence_key in occurrences:
-                    continue
-                occurrences[occurrence_key] = {
-                    "asset_code": asset_code,
-                    "asset_name": asset_name,
-                    "category": category,
-                    "subcategory": subcategory,
-                    "location_raw": location_name or group_name or category,
-                    "location_display": location_name or group_name or category,
-                    "frequency_type": "scheduled",
-                    "frequency_value": frequency_value,
-                    "frequency_label": frequency_label,
-                    "scheduled_date": scheduled_date.isoformat(),
-                    "scheduled_date_label": scheduled_date.strftime("%d %b %Y"),
-                    "scheduled_week_end": scheduled_week_end.isoformat(),
-                    "assigned_technician": action_text or provider_text or "",
-                    "remarks": provider_text or "",
-                    "source_sheet": sheet_name,
-                }
-
-    return sorted(occurrences.values(), key=lambda item: (item.get("scheduled_date") or "", item.get("asset_code") or ""))
-
-
-def build_stage2_utility_dataset(year: int | None = None) -> dict:
-    active_year = int(year or datetime.now().year)
-    source = get_pm_schedule_source_status().get("utility_stage2") or {}
-    source_path_value = source.get("path")
-    cache_signature = (
-        active_year,
-        bool(source.get("active")),
-        get_file_signature(Path(source_path_value)) if source_path_value else None,
-    )
-    if _STAGE2_UTILITY_CACHE["signature"] == cache_signature and _STAGE2_UTILITY_CACHE["value"] is not None:
-        return copy.deepcopy(_STAGE2_UTILITY_CACHE["value"])
-    data = {
-        "meta": {
-            "source_path": source.get("path"),
-            "last_synced": source.get("last_modified"),
-            "year": active_year,
-            "asset_count": 0,
-            "occurrence_count": 0,
-            "domain": "utility",
-            "errors": [],
-            "active": bool(source.get("active")),
-        },
-        "occurrences": [],
-    }
-
-    if not source.get("available") or not source.get("active"):
-        _STAGE2_UTILITY_CACHE["signature"] = cache_signature
-        _STAGE2_UTILITY_CACHE["value"] = copy.deepcopy(data)
-        return data
-
-    source_path = Path(source["path"])
-    try:
-        occurrences = _extract_modern_utility_occurrences(source_path, active_year)
-        data["occurrences"] = occurrences
-        data["meta"]["asset_count"] = len({row.get("asset_code") for row in occurrences if row.get("asset_code")})
-        data["meta"]["occurrence_count"] = len(occurrences)
-    except Exception as exc:
-        data["meta"]["errors"].append(str(exc))
-
-    _STAGE2_UTILITY_CACHE["signature"] = cache_signature
-    _STAGE2_UTILITY_CACHE["value"] = copy.deepcopy(data)
-    return data
+# NOTE: the Stage 2 utility generator (build_stage2_utility_dataset and its
+# _extract_modern_utility_occurrences fabricator) was removed. Stage 2 PM now
+# comes from the live D365 PM feed (see pm_feed_integration).
