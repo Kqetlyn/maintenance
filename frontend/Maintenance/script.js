@@ -431,6 +431,7 @@ document.addEventListener("DOMContentLoaded", () => {
         document.getElementById("asset-intel-analyse")?.addEventListener("click", () => {
             loadAssetPartsIntelligence();
         });
+        document.getElementById("asset-intel-export-po")?.addEventListener("click", exportAssetPartsPurchases);
         document.querySelectorAll("[data-spare-panel]").forEach((button) => {
             button.addEventListener("click", () => {
                 state.spareActivePanel = button.dataset.sparePanel || "external";
@@ -2359,6 +2360,211 @@ document.addEventListener("DOMContentLoaded", () => {
         return `"${text.replace(/"/g, '""')}"`;
     }
 
+    function xmlCell(cell, defaultStyleId = "") {
+        const options = cell && typeof cell === "object" && Object.prototype.hasOwnProperty.call(cell, "value")
+            ? cell
+            : { value: cell };
+        const raw = options.value === null || options.value === undefined ? "" : options.value;
+        const text = raw instanceof Date ? raw.toISOString() : String(raw);
+        const numberValue = Number(raw);
+        const styleId = options.styleId || defaultStyleId || "";
+        const attrs = [
+            styleId ? `ss:StyleID="${escapeXml(styleId)}"` : "",
+            options.mergeAcross ? `ss:MergeAcross="${Number(options.mergeAcross)}"` : "",
+        ].filter(Boolean).join(" ");
+        const attrText = attrs ? ` ${attrs}` : "";
+        if (text !== "" && Number.isFinite(numberValue) && !/^0\d+/.test(text)) {
+            return `<Cell${attrText}><Data ss:Type="Number">${numberValue}</Data></Cell>`;
+        }
+        return `<Cell${attrText}><Data ss:Type="String">${escapeXml(text)}</Data></Cell>`;
+    }
+
+    function xmlRow(row) {
+        const config = row && typeof row === "object" && Array.isArray(row.cells)
+            ? row
+            : { cells: row };
+        const styleId = config.styleId || "";
+        const heightAttr = config.height ? ` ss:Height="${Number(config.height)}"` : "";
+        return `<Row${heightAttr}>${(config.cells || []).map((cell) => xmlCell(cell, styleId)).join("")}</Row>`;
+    }
+
+    function formatSpareExcelDateTime(value) {
+        const date = value instanceof Date ? value : new Date(value);
+        if (Number.isNaN(date.getTime())) return String(value || "");
+        const y = date.getFullYear();
+        const mo = String(date.getMonth() + 1).padStart(2, "0");
+        const d = String(date.getDate()).padStart(2, "0");
+        const h = String(date.getHours()).padStart(2, "0");
+        const mi = String(date.getMinutes()).padStart(2, "0");
+        return `${y}-${mo}-${d} ${h}:${mi}`;
+    }
+
+    function escapeXml(value) {
+        return String(value ?? "").replace(/[<>&'"]/g, (match) => ({
+            "<": "&lt;",
+            ">": "&gt;",
+            "&": "&amp;",
+            "'": "&apos;",
+            '"': "&quot;",
+        }[match]));
+    }
+
+    function excelSheetName(value, fallback) {
+        const cleaned = String(value || fallback || "Sheet")
+            .replace(/[\[\]:*?/\\]/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        return (cleaned || fallback || "Sheet").slice(0, 31);
+    }
+
+    function buildExcelWorkbookXml(sheets) {
+        const worksheetXml = sheets.map((sheet, index) => {
+            const name = excelSheetName(sheet.name, `Sheet ${index + 1}`);
+            const rowList = sheet.rows || [];
+            const widths = sheet.widths || [];
+            const columnCount = Math.max(
+                sheet.columnCount || 0,
+                widths.length,
+                ...rowList.map((row) => {
+                    const cells = row && typeof row === "object" && Array.isArray(row.cells) ? row.cells : row;
+                    return Array.isArray(cells) ? cells.length : 0;
+                })
+            );
+            const columns = widths.map((wch) => `<Column ss:AutoFitWidth="0" ss:Width="${Math.max(8, Number(wch) || 12) * 7}"/>`).join("");
+            const rows = rowList.map(xmlRow).join("");
+            const freezeRow = Number(sheet.freezeAfterRow || 0);
+            const worksheetOptions = freezeRow
+                ? `<WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel"><FreezePanes/><FrozenNoSplit/><SplitHorizontal>${freezeRow}</SplitHorizontal><TopRowBottomPane>${freezeRow}</TopRowBottomPane><ActivePane>2</ActivePane></WorksheetOptions>`
+                : "";
+            const filterRow = Number(sheet.autoFilterRow || 0);
+            const autoFilter = filterRow && columnCount
+                ? `<AutoFilter x:Range="R${filterRow}C1:R${Math.max(filterRow, rowList.length)}C${columnCount}" xmlns="urn:schemas-microsoft-com:office:excel"/>`
+                : "";
+            return `<Worksheet ss:Name="${escapeXml(name)}"><Table>${columns}${rows}</Table>${worksheetOptions}${autoFilter}</Worksheet>`;
+        }).join("");
+        return `<?xml version="1.0" encoding="UTF-8"?><?mso-application progid="Excel.Sheet"?><Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"><Styles><Style ss:ID="Default" ss:Name="Normal"><Alignment ss:Vertical="Top" ss:WrapText="1"/><Font ss:FontName="Calibri" ss:Size="11"/></Style><Style ss:ID="title"><Font ss:Bold="1" ss:Size="16" ss:Color="#FFFFFF"/><Interior ss:Color="#0F172A" ss:Pattern="Solid"/><Alignment ss:Vertical="Center"/></Style><Style ss:ID="subtitle"><Font ss:Italic="1" ss:Color="#475569"/><Alignment ss:WrapText="1"/></Style><Style ss:ID="metaLabel"><Font ss:Bold="1" ss:Color="#334155"/><Interior ss:Color="#E2E8F0" ss:Pattern="Solid"/></Style><Style ss:ID="metaValue"><Font ss:Color="#0F172A"/></Style><Style ss:ID="header"><Font ss:Bold="1" ss:Color="#FFFFFF"/><Interior ss:Color="#1D4ED8" ss:Pattern="Solid"/><Alignment ss:Vertical="Center" ss:WrapText="1"/></Style><Style ss:ID="section"><Font ss:Bold="1" ss:Color="#0F172A"/><Interior ss:Color="#DBEAFE" ss:Pattern="Solid"/></Style><Style ss:ID="warning"><Interior ss:Color="#FEF3C7" ss:Pattern="Solid"/><Font ss:Color="#92400E"/></Style></Styles>${worksheetXml}</Workbook>`;
+    }
+
+    function downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+    }
+
+    function exportAssetPartsPurchases() {
+        const intel = state.assetPartsIntelligence;
+        const purchases = (intel && intel.purchaseParts) || [];
+        if (!purchases.length) return;
+        const selected = intel.selectedAsset || {};
+        const summary = intel.summary || {};
+        const assetName =
+            (selected.name || selected.assetName || selected.label)
+            || state.assetPartsIntelQuery || "asset";
+        const suppliers = (intel.supplierSummary || intel.suppliers || []);
+        const dataGaps = intel.dataGaps || [];
+        const now = new Date();
+        const generatedAt = formatSpareExcelDateTime(now);
+        const qualityCounts = {};
+        purchases.forEach((row) => {
+            const flag = row.data_quality_flag || "No data quality flag";
+            qualityCounts[flag] = (qualityCounts[flag] || 0) + 1;
+        });
+
+        const purchaseRows = [
+            { cells: [{ value: "Asset Parts Intelligence - Purchase History", styleId: "title", mergeAcross: 9 }], height: 24 },
+            { cells: [{ value: "Matched Gen PO spare-part purchases and suppliers. Export layout follows the Downtime organized workbook style.", styleId: "subtitle", mergeAcross: 9 }] },
+            [],
+            [
+                { value: "Selected Asset", styleId: "metaLabel" }, { value: assetName, styleId: "metaValue" },
+                { value: "Asset ID", styleId: "metaLabel" }, { value: selected.assetId || "", styleId: "metaValue" },
+                { value: "Asset Family", styleId: "metaLabel" }, { value: selected.assetFamily || "", styleId: "metaValue" },
+            ],
+            [
+                { value: "Generated At", styleId: "metaLabel" }, { value: generatedAt, styleId: "metaValue" },
+                { value: "Matched PO Lines", styleId: "metaLabel" }, { value: purchases.length, styleId: "metaValue" },
+                { value: "Data Confidence", styleId: "metaLabel" }, { value: summary.confidence || "", styleId: "metaValue" },
+            ],
+            [],
+            { styleId: "header", cells: ["PO Date", "PO Number", "Supplier", "Part / Item Description", "Quantity", "Value", "Related Asset / Alias", "Match Source", "Match Confidence", "Data Quality"] },
+            ...purchases.map((r) => [
+                formatShortDate(r.po_date), r.po_number, r.supplier, r.part_description, r.quantity, r.value,
+                r.related_asset_alias, r.match_source, r.match_confidence, r.data_quality_flag,
+            ]),
+        ];
+        const supplierRows = [
+            { cells: [{ value: "Supplier Summary", styleId: "title", mergeAcross: 4 }], height: 24 },
+            { cells: [{ value: "Suppliers linked to the selected asset by purchase description, alias, family, machine group, or direct reference.", styleId: "subtitle", mergeAcross: 4 }] },
+            [],
+            { styleId: "header", cells: ["Supplier", "Parts / Services Supplied", "Total PO Value", "PO Lines", "Latest Purchase Date"] },
+            ...(suppliers.length
+                ? suppliers.map((s) => [
+                    s.supplier,
+                    s.parts_supplied_text || (s.parts_supplied || []).join("; "),
+                    s.total_po_value,
+                    s.po_line_count,
+                    formatShortDate(s.latest_purchase_date),
+                ])
+                : [["No supplier summary rows found for this selection.", "", "", "", ""]]),
+        ];
+        const summaryRows = [
+            { cells: [{ value: "Asset Parts Intelligence Export", styleId: "title", mergeAcross: 2 }], height: 24 },
+            { cells: [{ value: "Read-only relationship export for work orders, spare parts, suppliers, and data confidence notes.", styleId: "subtitle", mergeAcross: 2 }] },
+            [],
+            { styleId: "header", cells: ["Metric", "Value", "Notes"] },
+            ["Generated At", generatedAt, "Local browser export time in ISO format"],
+            ["Selected Asset", assetName, "Search result or selected asset/family label"],
+            ["Asset ID", selected.assetId || "", "Blank means matches were found without direct Asset ID coding"],
+            ["Asset Family", selected.assetFamily || "", "Detected or selected family"],
+            ["Machine Group", selected.machineGroup || "", "Detected or selected machine group"],
+            ["Related WO/MR", summary.relatedWorkOrderCount || 0, "All work orders and maintenance requests in the analysis context"],
+            ["Direct WO/MR Asset ID Matches", summary.directWorkOrderMatches || 0, "High-confidence direct asset ID matches"],
+            ["Description WO/MR Matches", summary.descriptionWorkOrderMatches || 0, "Alias, description, or translated-description matches"],
+            ["Store Transaction Rows", summary.sparePartTransactionCount || 0, "Actual project/store spare-part consumption rows"],
+            ["Matched PO Lines", purchases.length, "Purchase-history rows included in this workbook"],
+            ["Supplier Count", suppliers.length, "Unique suppliers in Supplier Summary"],
+            ["Possible Coding Mismatches", summary.possibleCodingMismatchCount || 0, "Records likely coded under a general area or different asset"],
+            ["Confidence", summary.confidence || "", `${summary.confidenceScore || 0}% confidence score`],
+        ];
+        const qualityRows = [
+            { cells: [{ value: "Data Quality Notes", styleId: "title", mergeAcross: 2 }], height: 24 },
+            { cells: [{ value: "These are not errors. They explain how the matches were found and where source-data gaps remain.", styleId: "subtitle", mergeAcross: 2 }] },
+            [],
+            { styleId: "header", cells: ["Type", "Count / Note", "Meaning"] },
+            ...Object.entries(qualityCounts).map(([flag, count]) => ["Purchase Data Quality Flag", count, flag]),
+            ...(dataGaps.length ? dataGaps.map((note) => ["Data Gap", "", note]) : [["Data Gap", "", "No data gap notes returned for this selection."]]),
+        ];
+        const dictionaryRows = [
+            { cells: [{ value: "Data Dictionary", styleId: "title", mergeAcross: 3 }], height: 24 },
+            [],
+            { styleId: "header", cells: ["Sheet", "Column", "Definition", "Source / Method"] },
+            ["Export_Summary", "Metric / Value / Notes", "High-level metrics for the selected asset intelligence context.", "Derived from Asset Parts Intelligence summary"],
+            ["Purchase_History", "PO Date / PO Number", "Purchase order date and identifier.", "Gen PO export"],
+            ["Purchase_History", "Supplier", "Vendor/supplier linked to the PO row.", "Gen PO export"],
+            ["Purchase_History", "Part / Item Description", "Purchased spare part or service description.", "Gen PO item description"],
+            ["Purchase_History", "Related Asset / Alias", "Asset, alias, family, or machine group that matched the PO row.", "Smart asset matching"],
+            ["Purchase_History", "Match Source", "Which field or resolver path found the match.", "Asset resolver"],
+            ["Purchase_History", "Match Confidence", "High, Medium, or Low confidence classification.", "Exact ID/name, alias, description, or broader group match"],
+            ["Purchase_History", "Data Quality", "Coding mismatch or missing-link note for the row.", "Asset Parts Intelligence data quality rules"],
+            ["Supplier_Summary", "Parts / Services Supplied", "Distinct parts/services supplied for the selected asset context.", "Aggregated from matched PO rows"],
+            ["Data_Quality_Notes", "Data Gap", "Missing or indirect relationship found in the source data.", "Generated as a confidence note, not an error"],
+        ];
+        const workbook = buildExcelWorkbookXml([
+            { name: "Export_Summary", rows: summaryRows, widths: [30, 24, 78], autoFilterRow: 4, freezeAfterRow: 4 },
+            { name: "Purchase_History", rows: purchaseRows, widths: [13, 18, 30, 52, 12, 14, 22, 22, 18, 70], autoFilterRow: 7, freezeAfterRow: 7 },
+            { name: "Supplier_Summary", rows: supplierRows, widths: [34, 64, 18, 12, 18], autoFilterRow: 4, freezeAfterRow: 4 },
+            { name: "Data_Quality_Notes", rows: qualityRows, widths: [28, 16, 90], autoFilterRow: 4, freezeAfterRow: 4 },
+            { name: "Data_Dictionary", rows: dictionaryRows, widths: [24, 28, 70, 64], autoFilterRow: 3, freezeAfterRow: 3 },
+        ]);
+        const blob = new Blob([workbook], { type: "application/vnd.ms-excel;charset=utf-8" });
+        const safeAsset = String(assetName).replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "asset";
+        downloadBlob(blob, `asset_parts_purchase_history_${safeAsset}_${new Date().toISOString().slice(0, 10)}.xls`);
+    }
+
     function hydrateFilterOptions(payload) {
         populateSelect("month-selector", payload?.months || [], true);
         populateSelect(
@@ -2906,6 +3112,15 @@ document.addEventListener("DOMContentLoaded", () => {
             const gaps = payload?.dataGaps || ["Data confidence notes will appear after analysis."];
             gapsNode.innerHTML = gaps.map((gap) => `<span>${escapeHtml(gap)}</span>`).join("");
         }
+        const exportButton = document.getElementById("asset-intel-export-po");
+        if (exportButton) {
+            const exportCount = (payload?.purchaseParts || []).length;
+            exportButton.disabled = !exportCount;
+            exportButton.textContent = exportCount ? `Export Excel (${formatInteger(exportCount)})` : "Export Excel";
+            exportButton.title = exportCount
+                ? "Download matched purchase history and supplier summary as an Excel workbook."
+                : "Analyse an asset with matched purchase records before exporting.";
+        }
 
         renderSpareTable("asset-intel-supplier-body", payload?.supplierSummary || [], 5, (row) => [
             row.supplier || "--",
@@ -2961,7 +3176,8 @@ document.addEventListener("DOMContentLoaded", () => {
         } catch (error) {
             console.error("Spare import status load failed:", error);
             payload = {
-                sources: {},
+                sources: state.spareImportStatus?.sources || {},
+                statusUnavailable: true,
                 flags: [{ level: "error", title: "Import status unavailable", message: String(error?.message || error) }],
             };
         }
@@ -3011,6 +3227,10 @@ document.addEventListener("DOMContentLoaded", () => {
         };
         Object.entries(sourceMap).forEach(([key, statusId]) => {
             const source = payload?.sources?.[key] || {};
+            if (payload?.statusUnavailable && !Object.keys(source).length) {
+                setSpareImportStatus(statusId, "Status unavailable - imported file state was not changed.", "error");
+                return;
+            }
             const message = source.available
                 ? `${source.file_name || source.label || key}${formatSpareImportValidation(source.validation) ? ` | ${formatSpareImportValidation(source.validation)}` : ""}`
                 : (source.message || "File not loaded");

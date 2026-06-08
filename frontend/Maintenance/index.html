@@ -626,7 +626,10 @@
                     </article>
 
                     <article class="spare-panel-table asset-intel-panel">
-                        <div class="spare-panel-head"><h3>Suppliers / Purchase History</h3><p>Gen PO spare-part purchases and services found through asset references, aliases, descriptions, and suppliers.</p></div>
+                        <div class="spare-panel-head" style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap;">
+                            <div><h3>Suppliers / Purchase History</h3><p>Gen PO spare-part purchases and services found through asset references, aliases, descriptions, and suppliers.</p></div>
+                            <button type="button" class="toggle-btn" id="asset-intel-export-po" disabled title="Export the matched purchase history + supplier summary to an Excel-ready file">Export Excel</button>
+                        </div>
                         <div class="table-wrap spare-table-wrap">
                             <table>
                                 <thead><tr><th>PO date</th><th>PO number</th><th>Supplier</th><th>Part / item description</th><th>Quantity</th><th>Value</th><th>Related asset / alias matched</th><th>Match source</th><th>Match confidence</th></tr></thead>
@@ -1662,7 +1665,7 @@
             .catch(err => console.error(err));
     </script>
     <script src="/shared/mira/mira-overview.js?v=20260608-mira-fast-5" defer></script>
-    <script src="/Maintenance/script.js?v=20260608-mira-fast-1" defer></script>
+    <script src="/Maintenance/script.js?v=20260608-asset-excel-1" defer></script>
     <script src="/Maintenance/pm-schedule.js?v=20260605-pm-header-filters-11" defer></script>
     <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
