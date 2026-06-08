@@ -27,6 +27,7 @@ from spare_parts_service import (
     build_project_transactions_payload,
     build_all_years_transactions_payload,
     build_external_po_payload,
+    build_asset_parts_intelligence_context,
     import_spare_inventory_file,
     import_external_po_file,
     import_project_transactions_file,
@@ -100,8 +101,47 @@ def frontend_files(path):
 
 # ── Asset list (shared by Maintenance Analysis tab and Downtime) ──────────────
 from asset_mapping import load_asset_mapping, build_refrigeration_tree, get_asset_mapping_meta
+import asset_resolver
 
 # ── Downtime routes (needed by Maintenance "Analysis" tab) ───────────────────
+
+# Smart-matching asset profiles are built once from the asset master and cached
+# (rebuilt only when the master changes). The slim profile is what the frontend
+# matcher needs for live search + selected-asset matching.
+_ASSET_PROFILE_CACHE = {"signature": None, "profiles": None}
+
+
+def _slim_profile(profile):
+    return {
+        "assetId": profile["assetId"],
+        "canonicalName": profile["canonicalName"],
+        "nameTokens": profile["nameTokens"],
+        "number": profile["number"],
+        "aliases": profile["aliases"],
+        "relatedKeywords": profile["relatedKeywords"],
+        "functionalLocation": profile["functionalLocation"],
+        "machineGroup": profile["machineGroup"],
+    }
+
+
+def get_cached_asset_profiles(mapping, signature):
+    if _ASSET_PROFILE_CACHE["signature"] == signature and _ASSET_PROFILE_CACHE["profiles"] is not None:
+        return _ASSET_PROFILE_CACHE["profiles"]
+    inputs = []
+    for group in mapping.get("groups", []):
+        for entry in group.get("asset_entries", []):
+            inputs.append({
+                "asset_id": entry.get("asset_id"),
+                "name": entry.get("mappedAssetName") or entry.get("asset_display_name"),
+                "machine_group": entry.get("mappedMainAssetGroup") or group.get("machine_group"),
+                "functional_location": entry.get("mappedLocation") or entry.get("mappedSystemArea") or group.get("location"),
+            })
+    full = asset_resolver.build_all_asset_profiles(inputs)
+    profiles = {aid: _slim_profile(p) for aid, p in full.items()}
+    _ASSET_PROFILE_CACHE["signature"] = signature
+    _ASSET_PROFILE_CACHE["profiles"] = profiles
+    return profiles
+
 
 @app.route("/api/asset-list")
 def asset_list_api():
@@ -141,10 +181,12 @@ def asset_list_api():
                 "assets": assets,
             })
 
+        meta = get_asset_mapping_meta(DATA_DIR)
         return jsonify({
             "machines": machines,
             "refrigeration_tree": build_refrigeration_tree(mapping),
-            "meta": get_asset_mapping_meta(DATA_DIR),
+            "asset_profiles": get_cached_asset_profiles(mapping, meta.get("last_synced")),
+            "meta": meta,
         })
     except Exception as exc:
         return jsonify({"machines": [], "error": str(exc)}), 500
@@ -294,6 +336,23 @@ def maintenance_project_transactions_all():
 @app.route("/api/maintenance/external_po")
 def maintenance_external_po():
     return jsonify(build_external_po_payload())
+
+
+@app.route("/api/maintenance/asset-parts-intelligence")
+def maintenance_asset_parts_intelligence():
+    return jsonify(
+        build_asset_parts_intelligence_context(
+            query=request.args.get("query"),
+            asset_id=request.args.get("assetId"),
+            asset_name=request.args.get("assetName"),
+            asset_family=request.args.get("assetFamily"),
+            machine_group=request.args.get("machineGroup"),
+            date_from=request.args.get("dateFrom"),
+            date_to=request.args.get("dateTo"),
+            include_related_matches=request.args.get("includeRelatedMatches", "true"),
+            include_low_confidence=request.args.get("includeLowConfidence", "false"),
+        )
+    )
 
 
 @app.route("/api/maintenance/import-status")

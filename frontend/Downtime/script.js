@@ -149,6 +149,8 @@ function wireDashboardTopicControls() {
 
 // Machine Explorer state
 let assetListData = [];
+let assetProfiles = {};            // {assetId: slim profile} from /api/asset-list for smart matching
+let includeRelatedMatches = false; // "Include possible related matches" toggle (low-confidence)
 let openWorkOrdersData = [];
 let openWorkOrdersLoaded = false;
 let selectedMachineName = null;
@@ -8962,6 +8964,7 @@ async function loadAssetList() {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
         assetListData = data.machines || [];
+        assetProfiles = data.asset_profiles || {};
         renderMachineNameList();
         renderActivityStatusCharts();
         if (openWorkOrdersData.length) renderCurrentDowntimeKpi();
