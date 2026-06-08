@@ -5013,8 +5013,12 @@ def find_purchase_orders_for_asset(
     source_rows = spare_payload.get("po_classification", {}).get("records") or []
     rows: list[dict] = []
     for source in source_rows:
-        if not _is_spare_purchase_classification(source.get("classification")) and source.get("classification") != "Non-Spare Part / Service":
-            continue
+        # Match EVERY PO row by alias/description — do not pre-filter by spare
+        # classification. Many real purchase rows (e.g. Robot Coupe / CL50 motors
+        # and OPTIBELT timing belts) are classified "Manual Review", and the old
+        # classification gate dropped them before alias matching could run, so the
+        # card showed 0 purchases / 0 suppliers. Relevance is decided by the
+        # alias matcher + confidence below, not by classification.
         po_date = source.get("po_date") or source.get("goods_received_date")
         if not _asset_intel_date_in_range(po_date, date_from, date_to):
             continue
