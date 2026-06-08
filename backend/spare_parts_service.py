@@ -2609,6 +2609,35 @@ def build_asset_family_profiles(asset_rows: list[dict]) -> dict:
     }
 
 
+def _pt_brand_model_from_remarks(remarks) -> str:
+    """Pull the manufacturer/model out of an Asset_Master remark such as
+    'Mfr/Model: Rational / iCombi Pro; Stage 2 import …' -> 'Rational / iCombi Pro'."""
+    m = re.search(r"mfr\s*/?\s*model\s*:\s*([^;]+)", str(remarks or ""), re.IGNORECASE)
+    return m.group(1).strip() if m else ""
+
+
+def _pt_brand_aliases(brand_model: str) -> list[str]:
+    out = []
+    for part in re.split(r"[/,]", brand_model or ""):
+        nb = normalize_asset_text(part)
+        if nb and len(nb) >= 3 and not nb.isdigit():
+            out.append(nb)
+    return out
+
+
+def _pt_augment_profiles_with_brand(asset_profiles: dict, asset_rows: list[dict]) -> None:
+    """Add each asset's manufacturer/model as profile aliases so PO lines that
+    reference the asset by brand (e.g. 'Rational' / 'iCombi') match — generally,
+    for every asset, not just known ones."""
+    for row in asset_rows:
+        prof = asset_profiles.get(row.get("asset_id"))
+        if not prof:
+            continue
+        brand_aliases = _pt_brand_aliases(row.get("brand_model"))
+        if brand_aliases:
+            prof["aliases"] = sorted(set(prof.get("aliases") or []) | set(brand_aliases))
+
+
 def build_spare_part_asset_profiles() -> dict:
     sig = (_file_signature(ASSET_MASTER_PATH),)
     if _PT_ASSET_CATALOG_CACHE["result"] is not None and _PT_ASSET_CATALOG_CACHE["sig"] == sig:
@@ -2634,6 +2663,7 @@ def build_spare_part_asset_profiles() -> dict:
                     "criticality": criticality,
                     "asset_family": family_name,
                     "asset_family_id": _pt_slug(family_name),
+                    "brand_model": _pt_brand_model_from_remarks(entry.get("remarks")),
                 }
             )
     except Exception:
@@ -2653,6 +2683,7 @@ def build_spare_part_asset_profiles() -> dict:
             )
 
     asset_profiles = build_all_asset_profiles(asset_rows)
+    _pt_augment_profiles_with_brand(asset_profiles, asset_rows)
     family_payload = build_asset_family_profiles(asset_rows)
     result = {
         "assets": asset_rows,
