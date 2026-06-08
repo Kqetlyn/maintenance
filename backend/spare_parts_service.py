@@ -5064,21 +5064,57 @@ def find_purchase_orders_for_asset(
     include_related_matches=True,
     include_low_confidence=False,
 ) -> list[dict]:
-    rows: list[dict] = []
-    # Match EVERY PO row by alias/description — do not pre-filter by spare
-    # classification. Many real purchase rows (e.g. Robot Coupe / CL50 motors and
-    # OPTIBELT timing belts) are classified "Manual Review", and the old
-    # classification gate dropped them before alias matching could run, so the
-    # card showed 0 purchases / 0 suppliers. Relevance is decided by the alias
-    # matcher + confidence below, not by classification.
+    # Match EVERY PO row by alias/description (no spare-classification pre-filter:
+    # many real rows — Robot Coupe / CL50 motors, OPTIBELT belts — are "Manual
+    # Review"). Two stages so a whole purchase order is captured, not just the one
+    # line whose text names the asset:
+    #   1) line-level: a PO line directly matches the asset alias/description.
+    #   2) PO-level propagation: every OTHER line under a PO number that had a
+    #      matched line is included as a "Same PO asset-context match".
+    candidates = []          # (source, record, po_date)
+    direct_match = {}        # id(source) -> match dict
+    matched_po_numbers = set()
     for source, record in _asset_intel_normalized_po_rows():
         po_date = source.get("po_date") or source.get("goods_received_date")
         if not _asset_intel_date_in_range(po_date, date_from, date_to):
             continue
+        candidates.append((source, record, po_date))
         match = _asset_intel_match_record(record, target, "po", include_related_matches, include_low_confidence)
-        if not match:
+        if match:
+            direct_match[id(source)] = match
+            po_num = clean_text(source.get("po_number"))
+            if po_num:
+                matched_po_numbers.add(po_num)
+
+    # For PO-level propagation, exclude lines that clearly belong to a DIFFERENT
+    # specific asset (e.g. a shared cleaning PO that also lists "Bratt Pan No.1"
+    # or "Combi Oven No.2-3" — those lines are not this asset's history). Only the
+    # lines on already-matched POs are checked, so this stays cheap.
+    _all_profiles = list((build_spare_part_asset_profiles().get("asset_profiles") or {}).values())
+    _selected_ids = {normalize_spare_part_text(a) for a in (target.get("asset_ids") or set()) if a}
+
+    rows: list[dict] = []
+    for source, record, po_date in candidates:
+        match = direct_match.get(id(source))
+        po_num = clean_text(source.get("po_number"))
+        if match:
+            source_label = match.get("matchSource") or "PO description match"
+        elif po_num and po_num in matched_po_numbers:
+            # Another line on this PO matched the asset. Include this line too —
+            # unless it clearly names a different specific asset (number-aware).
+            other = match_record_to_asset_profiles(record, _all_profiles, {"include_related": False, "limit": 1}) if _all_profiles else []
+            if other:
+                other_id = normalize_spare_part_text(other[0].get("matchedAssetId") or "")
+                if other_id and other_id not in _selected_ids:
+                    continue
+            match = {
+                "confidence": "Medium",
+                "possibleAssetCodingMismatch": _asset_intel_general_area_or_missing(
+                    source.get("asset_id") or source.get("pd_machine")),
+            }
+            source_label = "Same PO asset-context match"
+        else:
             continue
-        source_label = match.get("matchSource") or "PO description match"
         flags = _asset_intel_data_quality_flags(record, match, source_label, "po")
         supplier = clean_text(source.get("vendor_name") or source.get("supplier")) or "Unmatched"
         part_description = clean_text(source.get("translated_description") or source.get("clean_description") or source.get("original_description") or source.get("description"))
@@ -5097,7 +5133,8 @@ def find_purchase_orders_for_asset(
             "data_quality_flag": _asset_intel_public_flag(flags),
             "data_quality_flags": flags,
             "possible_asset_coding_mismatch": bool(match.get("possibleAssetCodingMismatch")),
-            "is_direct_match": source_label == "Asset ID match",
+            "is_direct_match": source_label in ("Asset ID match", "PO description match", "Supplier match"),
+            "is_same_po_match": source_label == "Same PO asset-context match",
         })
     return sorted(rows, key=lambda row: str(row.get("po_date") or ""), reverse=True)
 
