@@ -2505,9 +2505,38 @@ document.addEventListener("DOMContentLoaded", () => {
                 ])
                 : [["No supplier summary rows found for this selection.", "", "", "", ""]]),
         ];
+        const workOrders = (intel.relatedWorkOrders || []);
+        const storeUsage = (intel.sparePartsUsed || []);
+        const woRows = [
+            { cells: [{ value: "Related WO/MR", styleId: "title", mergeAcross: 9 }], height: 24 },
+            { cells: [{ value: "Work orders / maintenance requests matched to the selected asset.", styleId: "subtitle", mergeAcross: 9 }] },
+            [],
+            { styleId: "header", cells: ["Date", "MR Number", "WO Number", "Recorded Asset ID", "Asset / Location", "Description", "Status", "Match Source", "Match Confidence", "Data Quality"] },
+            ...(workOrders.length
+                ? workOrders.map((r) => [
+                    formatShortDate(r.date), r.mr_number, r.wo_number, r.recorded_asset_id,
+                    r.recorded_asset_name || r.functional_location, r.description, r.status,
+                    r.match_source, r.match_confidence, r.data_quality_flag,
+                ])
+                : [["No related WO/MR records found for this selection.", "", "", "", "", "", "", "", "", ""]]),
+        ];
+        const storeRows = [
+            { cells: [{ value: "Store Consumption", styleId: "title", mergeAcross: 9 }], height: 24 },
+            { cells: [{ value: "Project / store spare-part consumption matched to the selected asset.", styleId: "subtitle", mergeAcross: 9 }] },
+            [],
+            { styleId: "header", cells: ["Date", "Item Code", "Part Name", "Quantity", "Value", "Recorded Asset / Project", "Related WO/MR", "Match Source", "Match Confidence", "Data Quality"] },
+            ...(storeUsage.length
+                ? storeUsage.map((r) => [
+                    formatShortDate(r.date), r.item_code, r.part_name, r.quantity, r.value,
+                    r.recorded_asset_project, r.related_wo_mr, r.match_source, r.match_confidence, r.data_quality_flag,
+                ])
+                : [["No store consumption found for this selection.", "", "", "", "", "", "", "", "", ""]]),
+        ];
         const workbook = buildExcelWorkbookXml([
             { name: "Purchase_History", rows: purchaseRows, widths: [13, 18, 30, 52, 12, 14, 22, 22, 18, 70], autoFilterRow: 7, freezeAfterRow: 7 },
             { name: "Supplier_Summary", rows: supplierRows, widths: [34, 64, 18, 12, 18], autoFilterRow: 4, freezeAfterRow: 4 },
+            { name: "Related_WO_MR", rows: woRows, widths: [13, 16, 16, 22, 30, 60, 16, 24, 18, 40], autoFilterRow: 4, freezeAfterRow: 4 },
+            { name: "Store_Consumption", rows: storeRows, widths: [13, 18, 40, 12, 14, 30, 18, 24, 18, 40], autoFilterRow: 4, freezeAfterRow: 4 },
         ]);
         const blob = new Blob([workbook], { type: "application/vnd.ms-excel;charset=utf-8" });
         const safeAsset = String(assetName).replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "asset";
