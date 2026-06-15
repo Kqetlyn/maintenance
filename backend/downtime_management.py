@@ -9,6 +9,7 @@ from asset_mapping import (
     load_asset_mapping,
     classify_work_order,
     get_asset_mapping_meta,
+    group_to_category,
     MACHINE_GROUPS,
 )
 
@@ -32,6 +33,18 @@ CRITICAL_HIGH_DOWNTIME_THRESHOLD_HOURS = 120.0
 REPEATED_WORK_ORDER_THRESHOLD = 3
 LOW_MTBF_THRESHOLD_HOURS = 168.0
 HIGH_MTBF_THRESHOLD_HOURS = 720.0
+# MTBF gap must exceed this floor (1 minute); ≤ this value is treated as a data
+# artefact (duplicate/related WOs stamped within seconds of each other).
+MTBF_MIN_GAP_HOURS = 1 / 60
+# Gaps shorter than this are valid but suspicious and are flagged in the output.
+MTBF_SUSPICIOUS_GAP_HOURS = 1.0
+# Asset names / groups that represent physical areas, not specific machines.
+# MTBF between area-level WOs is not meaningful.
+_MTBF_GENERAL_AREA_RE = re.compile(
+    r"\b(risk\s*area|work\s*area|high\s+risk|low\s+risk|medium\s+risk"
+    r"|general\s+area|production\s+area)\b",
+    re.IGNORECASE,
+)
 
 YEAR_START_MONTH = 1
 YEAR_START_DAY = 1
@@ -98,6 +111,20 @@ def _parse_timestamp(value):
 
 def _normalize_status(value):
     return _clean_text(value).lower()
+
+
+def _is_mtbf_general_area(row: dict) -> bool:
+    """True when the row represents a physical area/location rather than a
+    specific machine — MTBF between area-level WOs is not meaningful."""
+    name_fields = [
+        row.get("machine_name") or "",
+        row.get("asset_display_name") or "",
+        row.get("machine_name_display") or "",
+        row.get("machine_group") or "",
+        row.get("raw_functional_location") or "",
+    ]
+    combined = " ".join(name_fields)
+    return bool(_MTBF_GENERAL_AREA_RE.search(combined))
 
 
 def _is_unresolved_status(value):
@@ -203,6 +230,9 @@ def enrich_work_order_records(records, data_dir):
             **row,
             "asset_id": asset_id or _clean_text(row.get("asset_id") or row.get("machine_code")),
             "machine_group": machine_group,
+            # Shared Production-Equipment / Utilities / Unclassified category (same
+            # classifier the Spare-Parts page uses) — drives the downtime category filter.
+            "equipment_category": group_to_category(machine_group),
             "machine_name_display": classified["machine_name_display"],
             "asset_label": classified.get("asset_label") or asset_id or _clean_text(row.get("asset_id") or row.get("machine_code")),
             "asset_display_name": classified.get("asset_display_name") or machine_name or classified["machine_name_display"],
@@ -492,6 +522,8 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
         actual_end = _get_work_order_end(row)
         if not row.get("asset_id"):
             continue
+        if _is_mtbf_general_area(row):   # skip area/location placeholders
+            continue
         if actual_start is None or actual_end is None:
             continue
         if actual_end <= actual_start:
@@ -522,8 +554,14 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
         mtbf_gaps = []
         invalid_gap_count = 0
         for prev_item, next_item in zip(asset_items, asset_items[1:]):
+            # Strictly end-to-start: Next Actual Start − Previous Actual End.
+            # Both dates are guaranteed present (eligible_rows filter above).
             gap_hours = (next_item["_actual_start"] - prev_item["_actual_end"]).total_seconds() / 3600
             if gap_hours <= 0:
+                invalid_gap_count += 1
+                continue
+            # Exclude artefact gaps (≤ 1 minute) — not a real between-failure interval.
+            if gap_hours < MTBF_MIN_GAP_HOURS:
                 invalid_gap_count += 1
                 continue
             mtbf_gaps.append(
@@ -1145,6 +1183,7 @@ def build_management_downtime_payload(records, status_events, period_start, peri
             "request_id": row.get("maintenance_order_id") or "--",
             "asset_id": asset_id,
             "machine_group": row.get("machine_group") or row.get("machine_name_display") or "--",
+            "equipment_category": row.get("equipment_category") or group_to_category(row.get("machine_group")),
             "machine_name": row.get("machine_name_display") or row.get("machine_group") or "--",
             "asset_display_name": row.get("asset_display_name") or row.get("raw_machine_name") or row.get("machine_name_display") or "--",
             "machine_equipment_name": row.get("machine_equipment_name") or row.get("raw_machine_name") or row.get("asset_display_name") or "--",

@@ -403,7 +403,11 @@ def _build_tasks(year, today):
         year,
         cache_key_prefix="equipment_stage1_dataset",
         source_cache_key="equipment_stage1_asset_source",
-        disk_cache_path=None,
+        # Persist the parsed workbook (~87s to read the 4.4MB / 84-sheet file) to a
+        # signature-keyed disk cache so it survives process restarts. It auto-rebuilds
+        # only when the source file changes; a separate file from the 17MB equipment
+        # cache so the two never collide.
+        disk_cache_path=DATA_DIR / "equipment_stage1_maintenance_cache.json",
     )
     for occ in equipment_stage1.get("occurrences", []):
         tasks.append(_normalize_occurrence(

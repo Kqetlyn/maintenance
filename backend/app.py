@@ -184,6 +184,7 @@ _MUTATION_PREFIXES = (
     "/api/maintenance/pm-schedule/",
     "/api/downtime/import",
     "/api/maintenance/import",
+    "/api/spare-parts/import",
 )
 
 
@@ -277,6 +278,26 @@ def apply_cache_headers(response):
     if request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "no-store"
     return response
+
+
+@app.route("/api/refresh-data", methods=["POST", "GET"])
+def api_refresh_data():
+    """Clear cached responses + payload caches so the next load reflects newly
+    dropped or replaced data files. The heavy data caches are file-signature
+    keyed and pick up changes on their own; this also drops the short-lived
+    response cache (keyed only by request params), which is the one thing that
+    can otherwise serve stale data for a few minutes after a raw file drop."""
+    _invalidate_route_cache()
+    try:
+        from maintenance_service import clear_maintenance_caches
+        clear_maintenance_caches()
+    except Exception:
+        pass
+    return jsonify({
+        "ok": True,
+        "message": "Caches cleared. Fresh data will be loaded on the next request.",
+        "clearedAt": datetime.now().isoformat(),
+    })
 
 
 # ── Frontend routes ───────────────────────────────────────────────────────────
@@ -410,6 +431,130 @@ def downtime_data():
         ("downtime", period, month, start, end, work_orders_only, stage),
         lambda: build_downtime_payload(period, month, start, end, work_orders_only=work_orders_only, stage=stage),
     )
+
+
+# ── Spare-parts views: Overview / Goods Received / Goods Issued ────────────────
+# Pluggable by import (files discovered in data/ by spare_parts_views) and cached
+# by filter params (the underlying parsers are cached by file signature).
+def _spare_filters():
+    return (
+        request.args.get("stage"),
+        request.args.get("equipmentCategory") or request.args.get("category"),
+        request.args.get("year"),
+        request.args.get("month"),
+    )
+
+
+@app.route("/api/spare-parts/overview")
+def spare_parts_overview():
+    stage, category, year, month = _spare_filters()
+    import spare_parts_views as spv
+    return _cached_json(
+        ("spare-overview", stage, category, year, month),
+        lambda: spv.build_overview(stage, category, year, month),
+    )
+
+
+@app.route("/api/spare-parts/goods-received")
+def spare_parts_goods_received():
+    stage, category, year, month = _spare_filters()
+    import spare_parts_views as spv
+    return _cached_json(
+        ("spare-goods-received", stage, category, year, month),
+        lambda: spv.build_goods_received(stage, category, year, month),
+    )
+
+
+@app.route("/api/spare-parts/goods-issued")
+def spare_parts_goods_issued():
+    stage, category, year, month = _spare_filters()
+    import spare_parts_views as spv
+    return _cached_json(
+        ("spare-goods-issued", stage, category, year, month),
+        lambda: spv.build_goods_issued(stage, category, year, month),
+    )
+
+
+@app.route("/api/spare-parts/item-vendor-analysis")
+def spare_parts_item_vendor_analysis():
+    stage, category, year, month = _spare_filters()
+    import spare_parts_views as spv
+    return _cached_json(
+        ("spare-item-vendor", stage, category, year, month),
+        lambda: spv.build_item_vendor_analysis(stage, category, year, month),
+    )
+
+
+@app.route("/api/spare-parts/import-status")
+def spare_parts_import_status():
+    import spare_parts_views as spv
+    return jsonify(spv.get_import_status())
+
+
+def _do_gen_po_import(stage):
+    import spare_parts_views as spv
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "stage": stage, "message": "No file uploaded."}), 400
+    result = spv.import_gen_po(stage, upload)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/spare-parts/import-stage-1-gen-po", methods=["POST"])
+def spare_parts_import_stage1():
+    return _do_gen_po_import("Stage 1")
+
+
+@app.route("/api/spare-parts/import-stage-2-gen-po", methods=["POST"])
+def spare_parts_import_stage2():
+    return _do_gen_po_import("Stage 2")
+
+
+@app.route("/api/spare-parts/import-consumption", methods=["POST"])
+def spare_parts_import_consumption():
+    """Goods Issued / Consumption source — Project Actual Transactions export."""
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "message": "No consumption file uploaded."}), 400
+    result = import_project_transactions_file(upload)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/spare-parts/import-inventory", methods=["POST"])
+def spare_parts_import_inventory():
+    """Inventory / stock master import."""
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "message": "No inventory file uploaded."}), 400
+    result = import_spare_inventory_file(upload)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/spare-parts/import-gen-po", methods=["POST"])
+def spare_parts_import_gen_po():
+    """Multi-file Gen PO import. Stage may be given explicitly (form field `stage`)
+    or detected from each filename; undetectable files are reported, not guessed."""
+    import spare_parts_views as spv
+    uploads = request.files.getlist("file") or request.files.getlist("files")
+    if not uploads:
+        single = request.files.get("file")
+        uploads = [single] if single and single.filename else []
+    if not uploads:
+        return jsonify({"ok": False, "message": "No files uploaded."}), 400
+    forced_stage = (request.form.get("stage") or "").strip() or None
+    results, any_ok = [], False
+    for up in uploads:
+        if not up or not up.filename:
+            continue
+        stage = forced_stage or spv.detect_stage_from_name(up.filename)
+        if stage not in ("Stage 1", "Stage 2"):
+            results.append({"ok": False, "file_name": up.filename,
+                            "message": "Could not detect stage from filename — import via the Stage 1 / Stage 2 slot instead."})
+            continue
+        res = spv.import_gen_po(stage, up)
+        any_ok = any_ok or res.get("ok")
+        results.append(res)
+    return jsonify({"ok": any_ok, "results": results}), (200 if any_ok else 400)
 
 
 @app.route("/api/downtime/import-work-orders", methods=["GET", "POST"])
@@ -640,7 +785,14 @@ def _start_cache_warming():
     _invalidate_route_cache()
     _register_refresh(("downtime", None, None, None, None, False, None), build_downtime_payload)
     _register_refresh(("pm-schedule", "all", None, None), lambda: build_pm_schedule_payload(stage="all", year=None, month=None))
-    _register_refresh(("spare-parts",), build_spare_parts_payload)
+    # Spare parts is the slowest cold build (the all-years project-transactions
+    # parse can take minutes) and its CPU-bound work holds the GIL, starving the
+    # web server so it can't even return the fast "warming" placeholder. Keep it
+    # OUT of the startup warmer by default so PM + downtime warm quickly and the
+    # page stays responsive; spare builds lazily on first Spare-Parts request.
+    # Set MIRA_WARM_SPARE=1 to restore eager spare warming.
+    if os.environ.get("MIRA_WARM_SPARE", "0") not in {"0", "false", "no"}:
+        _register_refresh(("spare-parts",), build_spare_parts_payload)
     _background_refresher()
 
 
@@ -654,6 +806,13 @@ if __name__ == "__main__":
     # or the single process when debug is off).
     if os.environ.get("WERKZEUG_RUN_MAIN") or not debug:
         _start_cache_warming()
+        # Daily MR triage scheduler (scope-aware, local-Ollama). Precomputes each
+        # configured scope's verdict every morning; serves via GET /api/mira/verdict.
+        try:
+            import mr_triage_service
+            mr_triage_service.start_scheduler()
+        except Exception as _triage_exc:
+            print(f"MR triage scheduler not started: {_triage_exc}")
 
     # Prefer the production WSGI server (waitress) when available and not in
     # debug — the Flask dev server is single-process and very slow at serving the

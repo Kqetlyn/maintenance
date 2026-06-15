@@ -34,6 +34,11 @@ MACHINE_GROUPS = [
 
 CRITICALITIES = ["Critical", "Non-Critical", "Facility", "Unmapped"]
 
+# Machine groups that are treated as Critical (operational / production-critical).
+# Any asset whose Main Asset Group falls in this set is labelled Critical so that
+# the MTTR / MTBF dashboards filter correctly when the user selects "Critical".
+_CRITICAL_MACHINE_GROUPS = {"Production Equipment", "Utilities", "Utilities / Support", "Refrigeration"}
+
 REFRIGERATION_ROLES = [
     "Condenser", "Evaporator", "Freezer", "Chiller",
     "Cold Room", "Ice Maker", "Other",
@@ -204,8 +209,18 @@ def load_asset_mapping(data_dir):
         remarks = _clean(cell(row, "Remarks", fallback_index=7), "")
 
         raw_criticality = ""
-        criticality = "Unmapped" if mapping_status != "Mapped" else "Non-Critical"
-        criticality_rank = 999 if mapping_status != "Mapped" else 2
+        if mapping_status != "Mapped":
+            criticality = "Unmapped"
+            criticality_rank = 999
+        elif machine_group in _CRITICAL_MACHINE_GROUPS:
+            # Production Equipment, Utilities, and Refrigeration are operational-
+            # critical assets; they must appear under the "Critical" filter in the
+            # MTTR / MTBF sections.
+            criticality = "Critical"
+            criticality_rank = 1
+        else:
+            criticality = "Non-Critical"
+            criticality_rank = 2
         refrigeration_role = "Other" if machine_group == "Refrigeration" else ""
         parent_asset_id = None
         refrigeration_subgroup = sub_asset_group or None
@@ -351,6 +366,51 @@ def load_asset_mapping(data_dir):
     }
     _CACHE.update(sig=sig, payload=payload)
     return payload
+
+
+# ── Shared Production-Equipment / Utilities / Unclassified classifier ─────────
+# Maps a Main Asset Group (from Asset_Master) to the two operational categories the
+# Downtime and Spare-Parts pages filter by. Anything that is not clearly production
+# or utility/support is Unclassified (per the brief — never guess-map).
+_GROUP_TO_CATEGORY = {
+    "Production Equipment": "Production Equipment",
+    "Utilities / Support": "Utilities",
+    "Utilities": "Utilities",
+    "Refrigeration": "Utilities",          # cooling/refrigeration = support utility
+    "Facility / Building": "Unclassified",  # facility (lighting/doors/CCTV) — neither
+    "Unknown / Review": "Unclassified",
+}
+ASSET_CATEGORIES = ["Production Equipment", "Utilities", "Unclassified"]
+
+
+def group_to_category(machine_group: str) -> str:
+    return _GROUP_TO_CATEGORY.get(str(machine_group or "").strip(), "Unclassified")
+
+
+def classify_asset_category(asset_id=None, asset_name=None, functional_location=None, mapping=None):
+    """Classify an asset/item into Production Equipment | Utilities | Unclassified.
+
+    Asset Master first (by asset_id); keyword fallback (asset_name / functional
+    location) only when the asset_id isn't mapped — matching the brief's rule
+    "first use the Asset Master; keyword fallback only if asset master is missing".
+    Returns "Unclassified" for anything that can't be mapped to a real category."""
+    if mapping is None:
+        try:
+            mapping = load_asset_mapping(str(Path(__file__).resolve().parents[1] / "data"))
+        except Exception:
+            return "Unclassified"
+    record = {
+        "asset_id": asset_id or "",
+        "machine_name": asset_name or "",
+        "raw_machine_name": asset_name or "",
+        "raw_functional_location": functional_location or "",
+    }
+    try:
+        result = classify_work_order(record, mapping)
+    except Exception:
+        return "Unclassified"
+    group = result.get("machine_group") or result.get("mappedMainAssetGroup") or ""
+    return group_to_category(group)
 
 
 def classify_work_order(record, mapping):

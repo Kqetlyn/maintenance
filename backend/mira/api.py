@@ -628,6 +628,40 @@ def _get_dashboard_summary(
     return data, warnings, False
 
 
+def _core_payloads_warm() -> bool:
+    """True when the FAST payloads (PM schedule + downtime) are cached.
+
+    Spare parts is deliberately excluded — its cold build (the all-years project-
+    transactions parse) can take minutes, so we must NOT make the whole Overview
+    wait for it. The page shows PM + downtime KPIs as soon as these two are ready
+    (~60s on a cold start) and spare fills in separately once warm."""
+    try:
+        import pm_schedule_service as _pm
+        import downtime_service as _dt
+        if not getattr(_pm, "_PM_PAGE_PAYLOAD_CACHE", None):
+            return False
+        if not getattr(_dt, "_DOWNTIME_CACHE", None):
+            return False
+        return True
+    except Exception:
+        return True
+
+
+def _spare_warm() -> bool:
+    """True when the spare-parts payload is cached (separate, slower build)."""
+    try:
+        import spare_parts_service as _sp
+        return bool(getattr(_sp, "_SPARE_PARTS_CACHE", None))
+    except Exception:
+        return True
+
+
+def _dashboard_payloads_warm() -> bool:
+    """All three payloads warm (PM + downtime + spare). Kept for any caller that
+    needs the strict check; the Overview uses _core_payloads_warm instead."""
+    return _core_payloads_warm() and _spare_warm()
+
+
 def _health_routes() -> list[str]:
     try:
         return sorted(
@@ -1495,6 +1529,196 @@ def _summary_response(intent: str, data: dict, *, filters: dict | None = None, r
     })
 
 
+@mira_bp.route("/fast-kpis", methods=["GET", "POST"])
+def fast_kpis():
+    """Lightweight KPI snapshot — returns in < 200 ms whether or not the heavy
+    payloads are warm.
+
+    Priority order:
+    1. Read from the in-memory _SUMMARY_CACHE (sub-millisecond if present).
+    2. Build a partial summary from the three service-level in-memory caches
+       (pm_schedule_service, downtime_service, spare_parts_service) without
+       triggering any Ollama call or heavy rebuild.
+    3. Return the warming-placeholder values with warming=True so the frontend
+       knows to keep polling /overview for the full numbers.
+
+    The frontend calls this first to populate KPI chips quickly, then calls
+    /overview in parallel for the full verified payload.
+    """
+    raw = _read_filters()
+    filters = ctx.normalize_filters(raw)
+    now = time.time()
+
+    # ── Try _SUMMARY_CACHE first (zero-build path) ──────────────────────────
+    for include_sp in (True, False):
+        key = _normalised_cache_key(filters, include_sp)
+        cached = _SUMMARY_CACHE.get(key)
+        if cached and (now - cached.get("created_at", 0)) <= MIRA_SUMMARY_CACHE_TTL_SECONDS:
+            data = cached["data"]
+            return jsonify({
+                "ok": True,
+                "warming": False,
+                "cache_hit": True,
+                "kpis": _extract_flat_kpis(data),
+                "sections": _extract_sections_for_kpi_chips(data),
+                "filters": filters,
+                "data_availability": data.get("data_availability") or {"complete": True},
+            })
+
+    # ── Try partial build from service-level in-memory caches ───────────────
+    try:
+        partial_kpis = _build_fast_kpis_from_service_caches(filters)
+        if partial_kpis:
+            return jsonify({
+                "ok": True,
+                "warming": False,
+                "cache_hit": False,
+                "partial": True,
+                "kpis": partial_kpis,
+                "sections": _fast_sections_from_partial(partial_kpis),
+                "filters": filters,
+                "data_availability": {"complete": True},
+            })
+    except Exception:
+        pass
+
+    # ── Nothing warm yet — return placeholder immediately ───────────────────
+    _start_summary_warmup(
+        _normalised_cache_key(filters, True), filters, include_spare_parts=True
+    )
+    return jsonify({
+        "ok": True,
+        "warming": True,
+        "cache_hit": False,
+        "kpis": {},
+        "sections": {},
+        "filters": filters,
+        "data_availability": {"complete": False, "warming": True},
+    })
+
+
+def _extract_flat_kpis(data: dict) -> dict:
+    """Pull a compact flat KPI dict from a full dashboard summary."""
+    pm = data.get("pm_schedule") or {}
+    wo = data.get("work_orders") or {}
+    dt = data.get("downtime_summary") or {}
+    sp = data.get("spare_parts") or {}
+    return {
+        "pm_total_scheduled": pm.get("total_scheduled"),
+        "pm_completed": pm.get("completed"),
+        "pm_overdue": pm.get("overdue"),
+        "pm_compliance_pct": pm.get("compliance_pct"),
+        "pm_backlog": pm.get("backlog"),
+        "wo_total": wo.get("total"),
+        "wo_open": wo.get("open"),
+        "wo_closed": wo.get("closed"),
+        "wo_closure_rate_pct": wo.get("closure_rate_pct"),
+        "mttr_hours": data.get("mttr_hours"),
+        "mtbf_hours": data.get("mtbf_hours"),
+        "late_wo": dt.get("late_count"),
+        "open_overdue_wo": dt.get("open_overdue_count"),
+        "sla_pct": dt.get("sla_compliance_pct"),
+        "data_completeness_pct": dt.get("data_completeness_pct"),
+        "missing_data_count": dt.get("missing_data_count"),
+        "spare_low_stock": sp.get("items_below_minimum"),
+        "spare_high_usage": sp.get("high_usage_item_count"),
+        "spare_pending_po": sp.get("pending_po_count"),
+        "performance_status": data.get("performance_status"),
+    }
+
+
+def _extract_sections_for_kpi_chips(data: dict) -> dict:
+    """Convert a full summary into the presentation.sections format the frontend
+    already knows how to render."""
+    try:
+        pres = presentation.build_presentation("monthly_summary", data,
+                                               data.get("filters") or {}, provider_name="mira")
+        return pres.get("sections") or {}
+    except Exception:
+        return {}
+
+
+def _build_fast_kpis_from_service_caches(filters: dict) -> dict | None:
+    """Read directly from the three service-level in-memory caches.
+
+    Returns a flat KPI dict when enough cached data is available, or None if
+    the caches are empty. Never blocks on a heavy rebuild.
+    """
+    try:
+        import pm_schedule_service as _pm
+        import downtime_service as _dt
+        pm_cache = getattr(_pm, "_PM_PAGE_PAYLOAD_CACHE", {})
+        dt_cache = getattr(_dt, "_DOWNTIME_CACHE", {})
+        if not pm_cache and not dt_cache:
+            return None
+
+        # Pull the first matching PM payload (any key, we only need top-level totals)
+        pm_payload = {}
+        for v in pm_cache.values():
+            if isinstance(v, dict) and ("overview" in v or "meta" in v):
+                pm_payload = v; break
+
+        pm_ov = (pm_payload.get("overview") or {})
+        pm_kpis = (pm_ov.get("kpis") or pm_ov.get("periodKpis") or {})
+
+        # Pull the first matching downtime payload
+        dt_payload = {}
+        for v in dt_cache.values():
+            if isinstance(v, dict) and ("management" in v or "management_summary" in v):
+                dt_payload = v; break
+
+        mgmt = dt_payload.get("management") or {}
+        mgmt_sum = mgmt.get("summary") or {}
+
+        kpis = {
+            "pm_total_scheduled": pm_kpis.get("yearTaskCount"),
+            "pm_completed": pm_kpis.get("completedInMonth"),
+            "pm_overdue": pm_kpis.get("overdue") or pm_kpis.get("overdueInMonth"),
+            "pm_compliance_pct": pm_kpis.get("compliancePct"),
+            "pm_backlog": pm_kpis.get("backlogInMonth") or pm_kpis.get("backlog"),
+            "wo_total": mgmt_sum.get("total_work_orders"),
+            "wo_open": mgmt_sum.get("open_work_orders"),
+            "wo_closed": mgmt_sum.get("closed_work_orders"),
+            "wo_closure_rate_pct": mgmt_sum.get("closure_rate_pct"),
+            "mttr_hours": (mgmt.get("mtbf") or {}).get("summary") and
+                          mgmt.get("summary", {}).get("overall_mttr_hours"),
+        }
+        # Only return if we got something useful
+        if any(v is not None for v in kpis.values()):
+            return kpis
+    except Exception:
+        pass
+    return None
+
+
+def _fast_sections_from_partial(kpis: dict) -> dict:
+    """Build minimal chip sections from the flat KPI dict."""
+    def chip(label, value, tone="neutral", note=None):
+        c = {"label": label, "value": str(value) if value is not None else "--", "tone": tone}
+        if note: c["note"] = note
+        return c
+
+    def fmt(v, suffix=""):
+        if v is None: return "--"
+        if isinstance(v, float): return f"{round(v, 1)}{suffix}"
+        return f"{v}{suffix}"
+
+    pm = {"metrics": [
+        chip("PM Scheduled", fmt(kpis.get("pm_total_scheduled"))),
+        chip("PM Completed", fmt(kpis.get("pm_completed"))),
+        chip("PM Overdue", fmt(kpis.get("pm_overdue")), tone="warn" if kpis.get("pm_overdue") else "good"),
+        chip("Compliance", fmt(kpis.get("pm_compliance_pct"), "%")),
+    ]}
+    dt = {"metrics": [
+        chip("Total MR", fmt(kpis.get("wo_total"))),
+        chip("Open MR", fmt(kpis.get("wo_open"))),
+        chip("Closure Rate", fmt(kpis.get("wo_closure_rate_pct"), "%")),
+        chip("MTTR", fmt(kpis.get("mttr_hours"), " h") if kpis.get("mttr_hours") is not None else "--"),
+    ]}
+    sp = {"metrics": [chip("Data", "Loading…", "neutral")]}
+    return {"pm_schedule_summary": pm, "downtime_work_order_summary": dt, "spare_parts_summary": sp}
+
+
 @mira_bp.route("/overview", methods=["GET", "POST"])
 def overview():
     """FAST verified-metrics overview (NO LLM) — renders KPI cards immediately.
@@ -1504,12 +1728,30 @@ def overview():
     """
     raw = _read_filters()
     filters = ctx.normalize_filters(raw)
+    # On the first load(s) after a restart the source workbooks are still being
+    # parsed by the background warm-up. Blocking on that cold build would blow past
+    # the frontend fetch timeout and surface as "backend unreachable". When the
+    # payloads are not warm yet, return a fast placeholder and kick the warm-up so
+    # the next (auto-retried) request gets the real verified KPIs.
+    # Gate the page only on PM + downtime (the fast payloads). Spare parts builds
+    # separately (slow all-years parse) and is included only once IT is warm, so a
+    # cold spare build never holds back the rest of the page.
+    payloads_warm = _core_payloads_warm()
+    spare_warm = _spare_warm()
+    include_spare = payloads_warm and spare_warm
     data, load_warnings, cache_hit = _get_dashboard_summary(
         filters,
-        include_spare_parts=True,
-        allow_blocking_build=True,
-        start_warmup=False,
+        include_spare_parts=include_spare,
+        allow_blocking_build=payloads_warm,
+        start_warmup=True,
     )
+    warming = (not cache_hit) and (not payloads_warm)
+    # Spare is still building — tell the frontend to show the spare card as "still
+    # loading". We do NOT eagerly kick the spare warm-up here: its CPU-bound build
+    # holds the GIL and would re-starve the web server right after PM + downtime
+    # became responsive. Spare warms lazily on the first Spare-Parts request (or
+    # when MIRA_WARM_SPARE=1 enables the startup warmer).
+    spare_warming = payloads_warm and not spare_warm
     status = _fast_provider_status("Verified KPI cards loaded. AI wording loads separately.")
     pres = presentation.build_presentation(
         "monthly_summary", data, filters, provider_name="mira",
@@ -1525,14 +1767,19 @@ def overview():
         "rolling7DayMrCount": None,
         "descriptionsIncluded": None,
     }
-    try:
-        _filtered_rows, _selected_rows, _recent_context, debug = _collect_mira_debug_snapshot(filters)
-    except Exception as exc:
-        snapshot_warning = f"MIRA overview debug snapshot failed: {exc}"
-        load_warnings = _unique_strings(load_warnings + [snapshot_warning])
-        pres.setdefault("data_notes", []).extend([snapshot_warning])
-        pres.setdefault("view_data_used", {}).setdefault("data_warnings", []).extend([snapshot_warning])
-        debug["debugError"] = str(exc)
+    # The debug snapshot reads/filters the full WO dataset (a cold parse on first
+    # load). Skip it while warming so the placeholder returns fast and never trips
+    # the frontend fetch timeout; it is logging-only and the real load runs the
+    # snapshot on the next (warm) request.
+    if not warming:
+        try:
+            _filtered_rows, _selected_rows, _recent_context, debug = _collect_mira_debug_snapshot(filters)
+        except Exception as exc:
+            snapshot_warning = f"MIRA overview debug snapshot failed: {exc}"
+            load_warnings = _unique_strings(load_warnings + [snapshot_warning])
+            pres.setdefault("data_notes", []).extend([snapshot_warning])
+            pres.setdefault("view_data_used", {}).setdefault("data_warnings", []).extend([snapshot_warning])
+            debug["debugError"] = str(exc)
     _log_mira_event(
         "overview",
         **debug,
@@ -1543,6 +1790,9 @@ def overview():
         fallbackReason="; ".join(load_warnings) if load_warnings else None,
     )
     guarded = guard.guard_summary(data, mode="kpi_summary")
+    availability = data.get("data_availability") or {"complete": not warming, "warnings": load_warnings}
+    if warming:
+        availability = {**availability, "complete": False, "warming": True}
     return jsonify({
         "ok": True,
         "filters": filters,
@@ -1551,7 +1801,9 @@ def overview():
         "provider_status": status,
         "backend_version": MIRA_BACKEND_VERSION,
         "cache_hit": cache_hit,
-        "data_availability": data.get("data_availability") or {"complete": True, "warnings": load_warnings},
+        "warming": warming,
+        "spare_warming": spare_warming,
+        "data_availability": availability,
         "draft_label": config.DRAFT_LABEL,
     })
 
@@ -1789,3 +2041,204 @@ def work_orders():
 def report_draft():
     """Monthly maintenance report draft (structured + markdown)."""
     return jsonify(report_draft_service.generate_monthly_maintenance_summary(_read_filters()))
+
+
+# ── AI Tech Notes / Early-Warning Scanner ─────────────────────────────────────
+
+_TECH_NOTE_SYSTEM_PROMPT = """You are MIRA, a local maintenance AI assistant for SATS Thailand.
+
+Your task is to scan maintenance notes and identify early warning signs or possible equipment issues.
+
+Rules:
+- Only flag issues that are clearly mentioned or reasonably implied in the note.
+- Do not exaggerate the issue.
+- Do not assign official D365 severity levels.
+- Do not create or close work orders.
+- Do not recommend bypassing safety, food safety, machine guarding, alarms, or interlocks.
+- Keep recommended actions practical and inspection-focused.
+- If the note is too vague, mark risk_level as "low" and recommend verification.
+- If no issues are found, return an empty items array.
+- Return only valid JSON in the required schema — no extra text.
+
+Required JSON schema:
+{
+  "items": [
+    {
+      "equipment_id": "string (asset ID if identifiable, else empty string)",
+      "equipment_name": "string (equipment or asset name from the note)",
+      "risk_level": "low | medium | high",
+      "detected_issue": "string (brief description of the possible issue)",
+      "recommended_action": "string (practical inspection or follow-up action)",
+      "source_note": "string (exact or close excerpt from the note that triggered this flag)"
+    }
+  ]
+}"""
+
+_TECH_NOTE_SCHEMA_KEYS = {"equipment_id", "equipment_name", "risk_level", "detected_issue", "recommended_action", "source_note"}
+_VALID_RISK_LEVELS = {"low", "medium", "high"}
+
+
+def _parse_tech_note_response(raw_text: str) -> list[dict]:
+    """Extract and validate the items array from the Ollama response."""
+    text = raw_text.strip()
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(l for l in lines if not l.strip().startswith("```"))
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        # Try to find the first JSON object in the text
+        import re as _re
+        match = _re.search(r"\{.*\}", text, _re.DOTALL)
+        if not match:
+            return []
+        try:
+            parsed = json.loads(match.group())
+        except (json.JSONDecodeError, ValueError):
+            return []
+    items = parsed.get("items") if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+    if not isinstance(items, list):
+        return []
+    clean = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        risk = str(item.get("risk_level") or "low").lower().strip()
+        if risk not in _VALID_RISK_LEVELS:
+            risk = "low"
+        clean.append({
+            "equipment_id": str(item.get("equipment_id") or "").strip(),
+            "equipment_name": str(item.get("equipment_name") or "").strip(),
+            "risk_level": risk,
+            "detected_issue": str(item.get("detected_issue") or "").strip(),
+            "recommended_action": str(item.get("recommended_action") or "").strip(),
+            "source_note": str(item.get("source_note") or "").strip(),
+        })
+    return clean
+
+
+@mira_bp.route("/scan-tech-notes", methods=["POST"])
+def scan_tech_notes():
+    """Scan raw technician / MR notes for early-warning maintenance signals.
+
+    POST body: { "notes": "<freetext>" }
+    Returns:   { "ok": true, "items": [...], "provider": "ollama|rule_based",
+                 "disclaimer": "..." }
+
+    Uses local Ollama when available; falls back to a simple keyword scanner so
+    the feature remains useful even when Ollama is not running.
+    """
+    body = request.get_json(silent=True) or {}
+    notes_text = str(body.get("notes") or "").strip()
+    if not notes_text:
+        return jsonify({"ok": False, "error": "No notes provided.", "items": []}), 400
+    if len(notes_text) > 12_000:
+        notes_text = notes_text[:12_000] + "\n[truncated]"
+
+    # ── Try Ollama ────────────────────────────────────────────────────────────
+    try:
+        from .providers.ollama_provider import generate_with_ollama
+        raw = generate_with_ollama(
+            _TECH_NOTE_SYSTEM_PROMPT,
+            f"Scan the following maintenance notes and return structured JSON:\n\n{notes_text}",
+            format_json=True,
+            timeout=45,
+        )
+        items = _parse_tech_note_response(raw)
+        return jsonify({
+            "ok": True,
+            "items": items,
+            "provider": "ollama",
+            "note_count_chars": len(notes_text),
+            "disclaimer": "AI-detected issues are for review only. Technician/Engineer verification is required before any action.",
+        })
+    except Exception as ollama_error:
+        current_app.logger.debug("scan-tech-notes: Ollama unavailable (%s), using keyword fallback", ollama_error)
+
+    # ── Keyword fallback ─────────────────────────────────────────────────────
+    import re as _re
+    EARLY_WARNING_PATTERNS = [
+        (r"\bvibrat\w*\b", "Possible vibration issue", "Inspect mounting, bearings, and alignment.", "medium"),
+        (r"\brunning\s+warm\b|\boverheating\b|\btemperature.*high\b|\bhigh.*temp\b", "Possible overheating", "Check cooling, filters, and load.", "medium"),
+        (r"\babnormal\s+sound\b|\bunusual\s+sound\b|\bstrange\s+noise\b|\bnoisy\b", "Unusual sound detected", "Inspect for mechanical wear or looseness.", "medium"),
+        (r"\bleak\w*\b|\bleaking\b|\bseepage\b", "Possible leakage", "Inspect seals, joints, and pipework.", "high"),
+        (r"\bintermittent\s+trip\b|\btripping\b|\bnuisance\s+trip\b", "Intermittent tripping", "Check electrical connections and protection settings.", "medium"),
+        (r"\btemperature\s+drift\w*\b|\bdrift\w*\s+temp\w*\b", "Temperature drifting", "Verify sensor calibration and control loop.", "medium"),
+        (r"\bslow\s+start\b|\bdifficult\s+start\b|\bhard\s+start\b", "Slow or difficult start", "Check motor, capacitors, and starter.", "medium"),
+        (r"\bweak\s+cooling\b|\bcooling.*not.*sufficient\b|\bpoor\s+cooling\b", "Weak cooling performance", "Check refrigerant, condenser, and airflow.", "medium"),
+        (r"\bunusual\s+smell\b|\bburning\s+smell\b|\bsmell\s+burn\w*\b", "Unusual or burning smell", "Inspect electrical components and insulation.", "high"),
+        (r"\bpressure\s+unstable\b|\bpressure.*fluctuat\w*\b|\bfluctuat\w*.*pressure\b", "Pressure instability", "Inspect pressure controls, valves, and leaks.", "medium"),
+        (r"\bslightly\s+(off|wrong|unusual)\b|\bminor\s+issue\b", "Minor anomaly noted", "Monitor and schedule inspection.", "low"),
+    ]
+    items = []
+    for pattern, issue, action, risk in EARLY_WARNING_PATTERNS:
+        matches = _re.findall(pattern, notes_text, _re.IGNORECASE)
+        if matches:
+            excerpt = ""
+            for line in notes_text.split("\n"):
+                if _re.search(pattern, line, _re.IGNORECASE):
+                    excerpt = line.strip()[:120]
+                    break
+            items.append({
+                "equipment_id": "",
+                "equipment_name": "See note",
+                "risk_level": risk,
+                "detected_issue": issue,
+                "recommended_action": action,
+                "source_note": excerpt or str(matches[0]),
+            })
+    return jsonify({
+        "ok": True,
+        "items": items,
+        "provider": "keyword_fallback",
+        "note_count_chars": len(notes_text),
+        "disclaimer": "AI-detected issues are for review only. Technician/Engineer verification is required before any action.",
+    })
+
+
+# ── Daily MR triage verdict (scope-aware; precomputed by the morning scheduler) ─
+@mira_bp.route("/verdict", methods=["GET"])
+def mr_triage_verdict():
+    """Return the latest stored daily MR triage verdict for the selected scope.
+
+    Scope is a runtime parameter (?scope=Stage 1 | Stage 2 | All). Single scopes
+    return only their own assets; 'All' merges the stored single-scope verdicts.
+    The verdict is precomputed each morning and read from disk here (no model call
+    on the request path). Returns a Green "no data yet" verdict if nothing stored,
+    so the widget always receives valid JSON. Same-origin (served by this app)."""
+    scope = request.args.get("scope") or request.args.get("stage") or "All"
+    try:
+        import mr_triage_service as triage
+        verdict = triage.get_verdict(scope)
+    except Exception as exc:
+        current_app.logger.warning("MR triage verdict read failed: %s", exc)
+        from datetime import date as _d
+        verdict = {
+            "scope": str(scope), "date_reviewed": _d.today().isoformat(),
+            "overall_verdict": "Green", "summary": "Triage data is not available yet.",
+            "items": [], "watchlist": [],
+        }
+    resp = jsonify(verdict)
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@mira_bp.route("/verdict/run", methods=["POST"])
+def mr_triage_run():
+    """Manually trigger a triage run for a scope (admin/testing). Optional body:
+    {"scope": "...", "date": "YYYY-MM-DD"}. Local-only convenience; the scheduler
+    runs this automatically each morning."""
+    body = request.get_json(silent=True) or {}
+    scope = body.get("scope") or request.args.get("scope") or "Stage 1"
+    date_str = body.get("date") or request.args.get("date")
+    try:
+        import mr_triage_service as triage
+        review_date = None
+        if date_str:
+            from datetime import date as _d
+            review_date = _d.fromisoformat(str(date_str)[:10])
+        verdict = triage.run_triage_for_scope(scope, review_date)
+        return jsonify({"ok": True, "verdict": verdict})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500

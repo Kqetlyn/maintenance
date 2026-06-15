@@ -1316,6 +1316,7 @@ def _build_po_records(path: Path | None, source_status, master_codes):
             total_cost = round(float(quantity) * float(unit_cost), 2)
         work_order_id = clean_text(_value_from_row(row, lookup, "work_order_id"))
         asset_id = _clean_code(_value_from_row(row, lookup, "asset_id"))
+        supplier_name = clean_text(_value_from_row(row, lookup, "supplier"))
         clean_description = _normalize_part_name(translated_description or description)
         keyword_text = _combined_keyword_text(
             translated_description or description,
@@ -1336,7 +1337,11 @@ def _build_po_records(path: Path | None, source_status, master_codes):
         has_spare_keyword = any(keyword in keyword_text for keyword in SPARE_PART_KEYWORDS)
         has_non_spare_keyword = any(keyword in keyword_text for keyword in NON_SPARE_PART_KEYWORDS)
         hints_spare_context = any(term in keyword_text for term in (" spare part", " mechanical part", " electrical part", " refrigerant", " cooling part", " consumable part"))
-        hints_service_context = any(term in keyword_text for term in (" service", " labour", " labor", " inspection", " rental", " contractor", " civil", " training", " stationnary", " office", " annual cost"))
+        hints_service_context = any(term in keyword_text for term in (
+            " service", " labour", " labor", " inspection", " rental", " contractor",
+            " civil", " training", " stationnary", " office", " annual cost",
+            " maintenance", " repair", " cleaning", " installation", " calibration",
+        ))
 
         if inventory_match_status == "Exact Item Code Match":
             classification = "Stocked Spare Part Purchase"
@@ -1358,6 +1363,10 @@ def _build_po_records(path: Path | None, source_status, master_codes):
             classification = "Non-Spare Part / Service"
             confidence = "Medium"
             reason = "Cost context suggests service, civil work, or another non-spare purchase"
+        elif clean_description and (group_of_cost or pd_machine or supplier_name or total_cost is not None):
+            classification = "Non-Stock Spare Part / Direct Purchase"
+            confidence = "Low"
+            reason = "Purchase context is present, but no inventory match or service keyword was found"
         else:
             classification = "Manual Review"
             confidence = "Manual Review"
@@ -1377,8 +1386,8 @@ def _build_po_records(path: Path | None, source_status, master_codes):
             "unit": clean_text(_value_from_row(row, lookup, "unit")),
             "unit_cost": unit_cost,
             "total_cost": total_cost,
-            "supplier": clean_text(_value_from_row(row, lookup, "supplier")) or "Unmatched",
-            "vendor_name": clean_text(_value_from_row(row, lookup, "supplier")) or "Unmatched",
+            "supplier": supplier_name or "Unmatched",
+            "vendor_name": supplier_name or "Unmatched",
             "work_order_id": work_order_id,
             "asset_id": asset_id,
             "group_of_cost": group_of_cost,
@@ -1428,16 +1437,6 @@ def _refine_po_records_with_inventory(po_records, inventory_records):
             row["classification"] = "Stocked Spare Part Purchase"
             row["confidence"] = match.get("confidence") or row.get("confidence")
             row["classification_reason"] = match.get("reason") or row.get("classification_reason")
-        elif (
-            row.get("classification") == "Non-Stock Spare Part / Direct Purchase"
-            and row.get("inventory_match_status") == "No Inventory Match"
-            and row.get("confidence") == "Low"
-        ):
-            row["classification"] = "Manual Review"
-            row["confidence"] = "Manual Review"
-            row["classification_reason"] = (
-                "Weak spare-part keyword match without an inventory master match; manual review is required"
-            )
         elif row.get("classification") == "Manual Review" and row.get("inventory_match_status") == "No Inventory Match":
             row["confidence"] = "Manual Review"
 
