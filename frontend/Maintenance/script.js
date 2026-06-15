@@ -211,6 +211,27 @@ document.addEventListener("DOMContentLoaded", () => {
         console.error("Maintenance initialization failed:", error);
     });
 
+    // Clear the backend response caches (so freshly dropped source files show up)
+    // then hard-reload so every view re-fetches the latest data.
+    async function refreshDashboardData() {
+        const btn = document.getElementById("refresh-data-btn");
+        const label = btn ? btn.querySelector(".refresh-data-label") : null;
+        if (btn) {
+            if (btn.disabled) return;
+            btn.disabled = true;
+            btn.classList.add("is-refreshing");
+        }
+        if (label) label.textContent = "Refreshing…";
+        try {
+            await fetch("/api/refresh-data", { method: "POST", cache: "no-store" });
+        } catch (error) {
+            console.error("Refresh data request failed:", error);
+        }
+        // Reload regardless — the caches are cleared server-side and a fresh load
+        // re-reads whatever source files are currently in place.
+        window.location.reload();
+    }
+
     async function initialize() {
         bindControls();
         bindPtInsightTabs();
@@ -268,7 +289,7 @@ document.addEventListener("DOMContentLoaded", () => {
         setText(
             "maintenance-page-title",
             isMiraOverview
-                ? "MIRA Daily Maintenance Overview"
+                ? "Overview"
                 : isOverview
                 ? "Preventive Maintenance Schedule"
                 : isSpareParts
@@ -432,6 +453,7 @@ document.addEventListener("DOMContentLoaded", () => {
             loadAssetPartsIntelligence();
         });
         document.getElementById("asset-intel-export-po")?.addEventListener("click", exportAssetPartsPurchases);
+        document.getElementById("refresh-data-btn")?.addEventListener("click", refreshDashboardData);
         document.querySelectorAll("[data-spare-panel]").forEach((button) => {
             button.addEventListener("click", () => {
                 state.spareActivePanel = button.dataset.sparePanel || "external";
@@ -3938,7 +3960,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const key = row?.classification || "Unclassified";
             grouped.set(key, (grouped.get(key) || 0) + getSpareMetricValue(row, metric));
         });
-        const rows = [...grouped.entries()].map(([label, value]) => ({ label, value: metric === "price" ? spConvert(value) : value }));
+        const rows = [...grouped.entries()].map(([label, value]) => ({ label: spareDisplayLabel(label), value: metric === "price" ? spConvert(value) : value }));
         renderSparePieChart("spare-po-classification-chart", rows, "Gen PO file not uploaded.");
     }
 
@@ -3970,7 +3992,7 @@ document.addEventListener("DOMContentLoaded", () => {
             data: {
                 labels: months.map(formatSpareMonthLabel),
                 datasets: classifications.map((label, index) => ({
-                    label,
+                    label: spareDisplayLabel(label),
                     data: months.map((month) => {
                         const value = buckets.get(month)?.[label] || 0;
                         return metric === "price" ? spConvert(value) : value;
@@ -4339,9 +4361,19 @@ document.addEventListener("DOMContentLoaded", () => {
         return `<div class="spare-status-stack">${spareStatusBadge(row.stock_health_status)}${warnings}</div>`;
     }
 
-    function spareStatusBadge(value) {
+    function spareDisplayLabel(value) {
         const text = String(value || "Unclassified");
-        const cls = text.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+        const labels = {
+            "Non-Spare Part / Service": "Services / Labour / Repair / Cleaning",
+            "Manual Review": "Manual Review / Unclassified",
+        };
+        return labels[text] || text;
+    }
+
+    function spareStatusBadge(value) {
+        const raw = String(value || "Unclassified");
+        const text = spareDisplayLabel(raw);
+        const cls = raw.toLowerCase().replace(/[^a-z0-9]+/g, "-");
         return `<span class="status-pill spare-status-${escapeHtml(cls)}">${escapeHtml(text)}</span>`;
     }
 

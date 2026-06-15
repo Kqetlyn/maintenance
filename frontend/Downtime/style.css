@@ -995,18 +995,45 @@ html.downtime-embed .dashboard-content {
 .wo-response-summary-grid {
     align-items: start;
     margin-top: 18px;
+    /* Side stack removed — always single-column so the main stack fills the row */
+    grid-template-columns: 1fr !important;
 }
 
-.wo-response-section:not(.analysis-open) .wo-response-summary-grid {
-    grid-template-columns: 1fr;
-}
-
-.wo-response-main-stack,
-.wo-response-side-stack {
+.wo-response-main-stack {
     display: grid;
     gap: 18px;
     align-content: start;
     min-width: 0;
+}
+
+/* The side stack is hidden (response-time card removed); keep the rule so any
+   leftover references don't break layout if the stack element is still in DOM. */
+.wo-response-side-stack {
+    display: none;
+}
+
+/* MTTR card sits inline in the main stack.
+   On wide screens give it a two-column layout so SLA table + MTTR table sit
+   side-by-side within the single main column, keeping the section compact. */
+@media (min-width: 900px) {
+    .wo-response-main-stack {
+        grid-template-columns: minmax(0, 1.6fr) minmax(260px, 0.9fr);
+        grid-template-rows: auto auto;
+    }
+    /* SLA Compliance table spans only its column */
+    .wo-response-table-card:not(.wo-completion-card) {
+        grid-column: 1;
+        grid-row: 1;
+    }
+    /* MTTR card sits in the second column, same row as SLA table */
+    .wo-completion-card {
+        grid-column: 2;
+        grid-row: 1;
+    }
+    /* Drill-down (Late / Overdue) spans both columns */
+    .wo-response-drilldown-card {
+        grid-column: 1 / -1;
+    }
 }
 
 .wo-response-table-card,
@@ -1017,6 +1044,19 @@ html.downtime-embed .dashboard-content {
 .wo-response-table-wrapper {
     max-height: 320px;
     overflow: auto;
+}
+
+/* The severity SUMMARY tables (SLA Compliance, Average Response, Average
+   Completion) only have a handful of rows — show them in full so every severity
+   is visible in a single screenshot instead of scrolling inside a 320px box. The
+   313-row Late/Overdue drill-down below uses the non-compact wrapper and keeps a
+   (taller) scroll window. */
+.compact-table-wrapper.wo-response-table-wrapper {
+    max-height: none;
+}
+
+.wo-response-drilldown-card .wo-response-table-wrapper {
+    max-height: clamp(360px, 64vh, 760px);
 }
 
 .wo-response-table-wrapper thead th {
@@ -1114,6 +1154,200 @@ html.downtime-embed .dashboard-content {
 .wo-response-metric.missing {
     color: #64748b;
     font-weight: 700;
+}
+
+/* ── SLA summary clarifications + Missing Data Drill-down ─────────────────── */
+.sla-summary-subtitle {
+    margin: 2px 0 12px;
+    font-size: 0.8rem;
+    line-height: 1.45;
+}
+
+.sla-missing-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    border: 1px solid #fca5a5;
+    background: #fef2f2;
+    color: #b91c1c;
+    font-weight: 800;
+    font-size: 0.78rem;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.sla-missing-link::after {
+    content: "\2197"; /* up-right arrow → drill in */
+    font-size: 0.7rem;
+    opacity: 0.7;
+}
+
+.sla-missing-link:hover {
+    background: #fee2e2;
+    border-color: #ef4444;
+}
+
+.missing-data-card {
+    margin-top: 18px;
+}
+
+.missing-data-summary {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.missing-data-summary::-webkit-details-marker {
+    display: none;
+}
+
+.missing-data-summary::before {
+    content: "\25B8"; /* ▸ collapsed */
+    color: var(--text-muted);
+    font-size: 0.9rem;
+    transition: transform 0.15s ease;
+}
+
+.missing-data-card[open] .missing-data-summary::before {
+    transform: rotate(90deg);
+}
+
+.missing-data-count-badge {
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: #eef2ff;
+    color: #3730a3;
+    font-weight: 800;
+    font-size: 0.74rem;
+    white-space: nowrap;
+}
+
+.missing-data-summary-hint {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    margin-left: auto;
+}
+
+.missing-data-toolbar {
+    margin-top: 10px;
+    margin-bottom: 12px;
+}
+
+.filter-group-grow {
+    grid-column: span 2;
+}
+
+.missing-data-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+}
+
+.secondary-btn {
+    padding: 8px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border, #e2e8f0);
+    background: #fff;
+    color: #1e293b;
+    font-weight: 700;
+    font-size: 0.82rem;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.secondary-btn:hover {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+}
+
+.missing-data-export-status {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.missing-data-export-status.success {
+    color: #15803d;
+}
+
+.missing-data-export-status.error {
+    color: #b91c1c;
+}
+
+.missing-data-table-wrapper {
+    max-height: clamp(360px, 60vh, 720px);
+    overflow: auto;
+}
+
+.missing-data-table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--card);
+    white-space: nowrap;
+}
+
+.missing-data-table td {
+    vertical-align: top;
+}
+
+.missing-field-tag {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: #fef3c7;
+    color: #92400e;
+    font-size: 0.72rem;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.cleansing-desc-cell {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.cleansing-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--border, #e2e8f0);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font: inherit;
+    font-size: 0.8rem;
+    color: var(--text-dark, #1e293b);
+    background: #fff;
+}
+
+.cleansing-status-select {
+    min-width: 140px;
+    font-weight: 700;
+}
+
+.cleansing-text {
+    min-width: 150px;
+}
+
+.cleansing-input:focus {
+    outline: none;
+    border-color: #6366f1;
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18);
+}
+
+.cleansing-cleared-row {
+    background: #f0fdf4;
+}
+
+.cleansing-cleared-row .cell-title,
+.cleansing-cleared-row td {
+    color: #166534;
 }
 
 .wo-response-severity-label {
@@ -1965,7 +2199,7 @@ canvas {
 }
 
 .machine-history-wrapper {
-    max-height: clamp(420px, 58vh, 640px);
+    max-height: clamp(360px, 52vh, 560px);
     overflow: auto;
     border: 1px solid var(--border);
     border-radius: 12px;
@@ -2004,79 +2238,87 @@ canvas {
     padding: 10px 12px;
 }
 
-/* Machine Explorer WO/MR history should read as a fitted dashboard table, not a wide spreadsheet. */
+/* Machine Explorer WO/MR history — horizontal-scroll so headers never word-wrap. */
 .machine-detail-panel .machine-history-wrapper,
 #refrig-history-wrapper {
-    overflow-x: hidden;
+    overflow-x: auto;
     overflow-y: auto;
 }
 
 .machine-detail-panel .machine-history-wrapper table,
 #refrig-history-wrapper table {
-    width: 100%;
-    min-width: 0;
-    table-layout: fixed;
+    width: max-content;
+    min-width: 100%;
+    table-layout: auto;
+    border-collapse: collapse;
 }
 
 .machine-detail-panel .machine-history-wrapper th,
 .machine-detail-panel .machine-history-wrapper td,
 #refrig-history-wrapper th,
 #refrig-history-wrapper td {
-    padding: 8px 7px;
-    font-size: 0.68rem;
-    line-height: 1.25;
-    white-space: normal;
-    overflow-wrap: anywhere;
-    word-break: break-word;
+    padding: 7px 10px;
+    font-size: 0.72rem;
+    line-height: 1.3;
+    white-space: nowrap;        /* headers stay on one line */
     vertical-align: top;
 }
 
-.machine-detail-panel .machine-history-wrapper .asset-id-cell,
-.machine-detail-panel .machine-history-wrapper .description-cell,
-#refrig-history-wrapper .asset-id-cell,
-#refrig-history-wrapper .description-cell {
-    min-width: 0;
+/* Only data cells with long text wrap — not headers. */
+.machine-detail-panel .machine-history-wrapper td,
+#refrig-history-wrapper td {
+    white-space: nowrap;
 }
+
+/* Description columns clip long text with ellipsis instead of wrapping. */
+.machine-detail-panel .machine-history-wrapper .description-cell,
+#refrig-history-wrapper .description-cell {
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* Short/fixed-width identity columns */
+.machine-detail-panel .machine-history-wrapper th:nth-child(1),
+.machine-detail-panel .machine-history-wrapper td:nth-child(1) { min-width: 110px; }   /* MR ID */
+.machine-detail-panel .machine-history-wrapper th:nth-child(2),
+.machine-detail-panel .machine-history-wrapper td:nth-child(2) { min-width: 80px; }    /* WO */
+.machine-detail-panel .machine-history-wrapper th:nth-child(3),
+.machine-detail-panel .machine-history-wrapper td:nth-child(3) { min-width: 70px; }    /* Match */
+.machine-detail-panel .machine-history-wrapper th:nth-child(4),
+.machine-detail-panel .machine-history-wrapper td:nth-child(4) { min-width: 76px; }    /* Status */
+.machine-detail-panel .machine-history-wrapper th:nth-child(5),
+.machine-detail-panel .machine-history-wrapper td:nth-child(5) { min-width: 60px; }    /* Service Level */
+.machine-detail-panel .machine-history-wrapper th:nth-child(6),
+.machine-detail-panel .machine-history-wrapper td:nth-child(6) { min-width: 80px; }    /* Type */
+.machine-detail-panel .machine-history-wrapper th:nth-child(7),
+.machine-detail-panel .machine-history-wrapper td:nth-child(7) { min-width: 220px; max-width: 260px; }  /* Description */
+.machine-detail-panel .machine-history-wrapper th:nth-child(8),
+.machine-detail-panel .machine-history-wrapper td:nth-child(8) { min-width: 220px; max-width: 260px; }  /* Translated Desc */
+.machine-detail-panel .machine-history-wrapper th:nth-child(9),
+.machine-detail-panel .machine-history-wrapper td:nth-child(9) { min-width: 100px; }   /* Started By */
+.machine-detail-panel .machine-history-wrapper th:nth-child(10),
+.machine-detail-panel .machine-history-wrapper td:nth-child(10) { min-width: 100px; }  /* Created By */
+.machine-detail-panel .machine-history-wrapper th:nth-child(11),
+.machine-detail-panel .machine-history-wrapper td:nth-child(11) { min-width: 120px; }  /* Created Date */
+.machine-detail-panel .machine-history-wrapper th:nth-child(12),
+.machine-detail-panel .machine-history-wrapper td:nth-child(12) { min-width: 120px; }  /* Actual Start */
+.machine-detail-panel .machine-history-wrapper th:nth-child(13),
+.machine-detail-panel .machine-history-wrapper td:nth-child(13) { min-width: 120px; }  /* Actual End */
+.machine-detail-panel .machine-history-wrapper th:nth-child(14),
+.machine-detail-panel .machine-history-wrapper td:nth-child(14) { min-width: 100px; }  /* Age/Duration */
+.machine-detail-panel .machine-history-wrapper th:nth-child(15),
+.machine-detail-panel .machine-history-wrapper td:nth-child(15) { min-width: 130px; }  /* Ack Status */
+.machine-detail-panel .machine-history-wrapper th:nth-child(16),
+.machine-detail-panel .machine-history-wrapper td:nth-child(16) { min-width: 100px; }  /* Data Quality */
 
 .machine-detail-panel .machine-history-wrapper .status-pill,
 #refrig-history-wrapper .status-pill {
-    max-width: 100%;
-    padding: 3px 7px;
-    font-size: 0.61rem;
-    line-height: 1.12;
-    white-space: normal;
+    padding: 3px 8px;
+    font-size: 0.65rem;
+    white-space: nowrap;
 }
-
-.machine-detail-panel .machine-history-wrapper th:nth-child(1),
-.machine-detail-panel .machine-history-wrapper td:nth-child(1) { width: 6.2%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(2),
-.machine-detail-panel .machine-history-wrapper td:nth-child(2) { width: 6%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(3),
-.machine-detail-panel .machine-history-wrapper td:nth-child(3) { width: 5.2%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(4),
-.machine-detail-panel .machine-history-wrapper td:nth-child(4) { width: 4%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(5),
-.machine-detail-panel .machine-history-wrapper td:nth-child(5) { width: 3.5%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(6),
-.machine-detail-panel .machine-history-wrapper td:nth-child(6) { width: 11.5%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(7),
-.machine-detail-panel .machine-history-wrapper td:nth-child(7) { width: 11.5%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(8),
-.machine-detail-panel .machine-history-wrapper td:nth-child(8) { width: 6.5%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(9),
-.machine-detail-panel .machine-history-wrapper td:nth-child(9) { width: 6.8%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(10),
-.machine-detail-panel .machine-history-wrapper td:nth-child(10) { width: 6%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(11),
-.machine-detail-panel .machine-history-wrapper td:nth-child(11) { width: 5.6%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(12),
-.machine-detail-panel .machine-history-wrapper td:nth-child(12) { width: 5.6%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(13),
-.machine-detail-panel .machine-history-wrapper td:nth-child(13) { width: 5%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(14),
-.machine-detail-panel .machine-history-wrapper td:nth-child(14) { width: 7%; }
-.machine-detail-panel .machine-history-wrapper th:nth-child(15),
-.machine-detail-panel .machine-history-wrapper td:nth-child(15) { width: 9.6%; }
 
 .machine-drill-section {
     margin-top: 16px;
@@ -3976,17 +4218,117 @@ tr:hover td {
     flex-shrink: 0;
 }
 
+.kdi-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(7, minmax(120px, 1fr));
+    gap: 10px;
+    margin-bottom: 12px;
+}
+
+.kdi-summary-card {
+    position: relative;
+    min-width: 0;
+    padding: 13px 14px;
+    border: 1px solid rgba(148, 163, 184, 0.28);
+    border-radius: 14px;
+    background:
+        linear-gradient(140deg, rgba(255,255,255,0.96), rgba(248,250,252,0.92)),
+        radial-gradient(circle at top right, rgba(20,184,166,0.11), transparent 48%);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.05);
+}
+
+.kdi-summary-card-mttr {
+    border-color: rgba(124, 58, 237, 0.22);
+    background:
+        linear-gradient(140deg, rgba(255,255,255,0.97), rgba(250,245,255,0.9)),
+        radial-gradient(circle at top right, rgba(124,58,237,0.12), transparent 50%);
+}
+
+.kdi-summary-card-mtbf {
+    border-color: rgba(37, 99, 235, 0.22);
+    background:
+        linear-gradient(140deg, rgba(255,255,255,0.97), rgba(239,246,255,0.9)),
+        radial-gradient(circle at top right, rgba(37,99,235,0.12), transparent 50%);
+}
+
+.kdi-summary-card-note {
+    border-color: rgba(245, 158, 11, 0.3);
+}
+
+.kdi-summary-label {
+    color: var(--text-muted);
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    line-height: 1.15;
+    text-transform: uppercase;
+}
+
+.kdi-summary-value {
+    color: var(--text-dark);
+    font-size: clamp(1.05rem, 1.8vw, 1.42rem);
+    font-weight: 850;
+    line-height: 1.08;
+    margin-top: 7px;
+    white-space: nowrap;
+}
+
+.kdi-summary-sub {
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    font-weight: 650;
+    line-height: 1.2;
+    margin-top: 5px;
+}
+
+.kdi-data-note {
+    margin: 0 0 16px;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+}
+
+.kdi-data-note summary {
+    cursor: pointer;
+    display: inline-flex;
+    font-weight: 800;
+    list-style: none;
+}
+
+.kdi-data-note summary::-webkit-details-marker { display: none; }
+
+.kdi-data-note summary::before {
+    content: "\25B6";
+    margin-right: 6px;
+    transform-origin: center;
+    transition: transform 0.14s ease;
+}
+
+.kdi-data-note[open] summary::before {
+    transform: rotate(90deg);
+}
+
+.kdi-data-note span {
+    display: inline-flex;
+    gap: 4px;
+    margin: 8px 14px 0 0;
+}
+
 .kdi-kpi-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 20px;
+    gap: 18px;
     align-items: start;
 }
 
 .kdi-kpi-card-wrap {
     display: grid;
-    grid-template-rows: minmax(356px, auto) auto;
+    grid-template-rows: auto;
     align-content: start;
+}
+
+#kdi-mttr-card,
+#kdi-mtbf-card {
+    display: none;
 }
 
 /* Keep the KPI cards aligned at a shared desktop height without letting the
@@ -4073,11 +4415,12 @@ tr:hover td {
 }
 
 .kdi-analysis-panel {
-    background: #f8fafc;
+    background:
+        linear-gradient(180deg, rgba(255,255,255,0.96), rgba(248,250,252,0.98));
     border: 1px solid var(--border);
-    border-top: none;
-    border-radius: 0 0 16px 16px;
-    padding: 20px;
+    border-radius: 18px;
+    padding: 18px;
+    box-shadow: 0 14px 34px rgba(15, 23, 42, 0.06);
 }
 
 .kdi-analysis-panel.hidden { display: none; }
@@ -4086,6 +4429,38 @@ tr:hover td {
     display: flex;
     flex-direction: column;
     gap: 20px;
+}
+
+.kdi-analysis-card-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding-bottom: 2px;
+}
+
+.kdi-section-kicker {
+    color: #0f766e;
+    font-size: 0.68rem;
+    font-weight: 900;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.kdi-analysis-card-title {
+    color: var(--text-dark);
+    font-size: 1.05rem;
+    font-weight: 850;
+    line-height: 1.2;
+    margin-top: 2px;
+}
+
+.kdi-analysis-card-subtitle {
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    line-height: 1.35;
+    margin: 4px 0 0;
+    max-width: 560px;
 }
 
 .kdi-analysis-filter-bar {
@@ -4247,6 +4622,52 @@ tr:hover td {
     background: #f0f9f8;
 }
 
+.kdi-number-cell {
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.kdi-drill-row {
+    cursor: pointer;
+    transition: background 0.14s ease, box-shadow 0.14s ease;
+}
+
+.kdi-drill-row:hover,
+.kdi-drill-row:focus {
+    background: #eff6ff;
+    outline: none;
+}
+
+.kdi-drill-row td:first-child {
+    font-weight: 800;
+    color: #0f172a;
+}
+
+.kdi-drill-row td:first-child::after {
+    content: "View assets";
+    display: inline-flex;
+    margin-left: 8px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #e0f2fe;
+    color: #0369a1;
+    font-size: 0.62rem;
+    font-weight: 850;
+    letter-spacing: 0.02em;
+    vertical-align: middle;
+}
+
+.kdi-attention-row {
+    background: #fff7ed;
+    box-shadow: inset 4px 0 0 #f97316;
+}
+
+.kdi-attention-row:hover,
+.kdi-attention-row:focus {
+    background: #ffedd5;
+}
+
 .kdi-asset-drilldown {
     background: var(--card);
     border: 1px solid var(--border);
@@ -4335,7 +4756,16 @@ details.kdi-asset-drilldown[open] > .kdi-drilldown-summary::before {
     margin-top: 2px;
 }
 
+@media (max-width: 1280px) {
+    .kdi-summary-grid {
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+}
+
 @media (max-width: 960px) {
+    .kdi-summary-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
     .kdi-kpi-grid {
         grid-template-columns: 1fr;
     }
@@ -4348,12 +4778,29 @@ details.kdi-asset-drilldown[open] > .kdi-drilldown-summary::before {
 }
 
 @media (max-width: 640px) {
+    .kdi-summary-grid {
+        grid-template-columns: 1fr;
+    }
+    .kdi-summary-value {
+        white-space: normal;
+    }
     .kdi-filter-bar {
         width: 100%;
     }
     .reliability-focus-header {
         flex-direction: column;
         align-items: flex-start;
+    }
+    .kdi-analysis-card-head {
+        flex-direction: column;
+    }
+    .kdi-table-title-row,
+    .kdi-asset-drilldown-filter-row {
+        align-items: stretch;
+        flex-direction: column;
+    }
+    .kdi-table-search {
+        width: 100%;
     }
     .kdi-analysis-filter-control {
         width: 100%;
@@ -4362,3 +4809,158 @@ details.kdi-asset-drilldown[open] > .kdi-drilldown-summary::before {
         width: 100%;
     }
 }
+
+/* ── Review section tabs (Records | Edit History) ──────────────────────────── */
+.review-tab-bar {
+    display: flex;
+    gap: 0;
+    border-bottom: 2px solid var(--border, #e2e8f0);
+    margin: 12px 0 0;
+}
+
+.review-tab-btn {
+    padding: 8px 18px;
+    background: none;
+    border: none;
+    border-bottom: 3px solid transparent;
+    margin-bottom: -2px;
+    cursor: pointer;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: var(--text-muted, #475569);
+    transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.review-tab-btn:hover {
+    color: #1e293b;
+}
+
+.review-tab-btn.active {
+    color: #4f46e5;
+    border-bottom-color: #4f46e5;
+}
+
+/* ── Pagination bar ──────────────────────────────────────────────────────────── */
+.pagination-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 2px;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+}
+
+.page-btn {
+    padding: 5px 12px;
+    border-radius: 8px;
+    border: 1px solid var(--border, #e2e8f0);
+    background: #fff;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.page-btn:hover:not(:disabled) {
+    background: #f1f5f9;
+}
+
+.page-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+}
+
+.page-info {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+}
+
+/* ── Section-level edit history panel ───────────────────────────────────────── */
+.section-edit-history {
+    max-height: clamp(200px, 35vh, 420px);
+    overflow-y: auto;
+    padding: 4px 0;
+    margin: 8px 0;
+}
+
+.eh-item {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border, #e2e8f0);
+    font-size: 0.78rem;
+}
+
+.eh-item:last-child {
+    border-bottom: none;
+}
+
+.eh-time {
+    color: var(--text-muted);
+    white-space: nowrap;
+    font-size: 0.7rem;
+}
+
+.eh-who {
+    font-weight: 700;
+    color: #1e293b;
+}
+
+.eh-field {
+    background: #ede9fe;
+    color: #4c1d95;
+    padding: 1px 7px;
+    border-radius: 5px;
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.eh-from {
+    color: #991b1b;
+    text-decoration: line-through;
+    font-size: 0.78rem;
+}
+
+.eh-arrow {
+    color: var(--text-muted);
+}
+
+.eh-to {
+    color: #166534;
+    font-weight: 700;
+    font-size: 0.78rem;
+}
+
+.eh-equip {
+    color: var(--text-muted);
+    font-size: 0.7rem;
+}
+
+/* ── Global edit history table ───────────────────────────────────────────────── */
+.eh-type-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: 0.7rem;
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.eh-type-missing-data { background: #fee2e2; color: #991b1b; }
+.eh-type-work-type    { background: #fef3c7; color: #92400e; }
+.eh-type-data-reliability { background: #e0f2fe; color: #075985; }
+
+.eh-prev { color: #991b1b; text-decoration: line-through; font-size: 0.78rem; }
+.eh-next { color: #166534; font-weight: 700; }
+.eh-time-cell { color: var(--text-muted); font-size: 0.75rem; white-space: nowrap; }
+
+.global-history-details > summary {
+    list-style: none;
+}
+
+/* ── Export Data Cleansing Tracker button ────────────────────────────────────── */
+/* Reuses .export-btn; the text content describes the single unified export */

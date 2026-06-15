@@ -575,8 +575,469 @@
     .mira-ov-status-split,
     .mira-ov-rec-grid,
     .mira-ov-kpi-grid,
+    .mira-ov-kpi-row,
+    .mira-ov-ai-sub-grid,
     .mira-ov-data-grid,
     .mira-ov-forecast-grid { grid-template-columns: 1fr; }
     .mira-ov-tabs { grid-template-columns: 1fr 1fr; }
     .mira-ov-select { min-width: 100%; }
+}
+
+/* ── Skeleton loading state ──────────────────────────────────────────────── */
+@keyframes mira-shimmer {
+    0%   { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+.mira-ov-skeleton {
+    background: linear-gradient(90deg, #f1f5f9 25%, #e2e8f0 50%, #f1f5f9 75%);
+    background-size: 200% 100%;
+    animation: mira-shimmer 1.4s ease infinite;
+    border-radius: 6px;
+}
+
+.mira-sk-line { height: 12px; margin: 6px 0; display: block; }
+.mira-sk-sm   { width: 55%; }
+.mira-sk-md   { width: 75%; }
+.mira-sk-lg   { width: 90%; }
+
+.mira-sk-chips {
+    height: 28px;
+    width: 100%;
+    border-radius: 8px;
+}
+
+/* ── New flat-layout sections ─────────────────────────────────────────────── */
+.mira-ov-section-label {
+    font-size: 0.7rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--mira-muted, #94a3b8);
+    margin: 0 0 10px;
+}
+
+/* § 2 — KPI row */
+.mira-ov-kpi-row-section { margin-bottom: 16px; }
+.mira-ov-kpi-row {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+}
+.mira-ov-kpi-row .mira-ov-kpi-card { min-height: 0; }
+
+/* § 3 — AI Tech Notes section */
+.mira-ov-tech-section {
+    margin-bottom: 16px;
+}
+
+.mira-ov-disclaimer {
+    font-size: 0.72rem;
+    color: var(--mira-muted, #94a3b8);
+    background: #f8fafc;
+    border-left: 3px solid #e2e8f0;
+    padding: 6px 10px;
+    border-radius: 0 6px 6px 0;
+    margin-bottom: 12px;
+}
+
+.mira-ov-ai-sub-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-bottom: 14px;
+}
+
+.mira-ov-ai-sub-card {
+    background: var(--mira-card, #fff);
+    border: 1px solid var(--mira-border, #e2e8f0);
+    border-radius: 10px;
+    padding: 14px;
+}
+
+.mira-ov-sub-card-title {
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--mira-text, #1e293b);
+    margin-bottom: 8px;
+}
+
+.mira-ov-sub-card-body { font-size: 0.8rem; }
+
+/* Tech-note scanner card */
+.mira-ov-scanner-card {
+    background: var(--mira-card, #fff);
+    border: 1px solid var(--mira-border, #e2e8f0);
+    border-radius: 10px;
+    padding: 14px;
+}
+
+.mira-ov-scan-input {
+    width: 100%;
+    box-sizing: border-box;
+    border: 1px solid var(--mira-border, #e2e8f0);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font: inherit;
+    font-size: 0.8rem;
+    resize: vertical;
+    color: var(--mira-text, #1e293b);
+    background: #f8fafc;
+    margin: 8px 0;
+}
+
+.mira-ov-scan-btn-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.mira-ov-btn-secondary {
+    padding: 7px 16px;
+    border-radius: 8px;
+    border: 1px solid #6366f1;
+    background: #fff;
+    color: #6366f1;
+    font-weight: 700;
+    font-size: 0.8rem;
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+.mira-ov-btn-secondary:hover { background: #eef2ff; }
+
+.mira-ov-scan-status {
+    font-size: 0.75rem;
+    color: var(--mira-muted, #94a3b8);
+}
+
+/* Scan results table */
+.mira-ov-scan-results { overflow-x: auto; }
+
+.mira-ov-scan-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.76rem;
+}
+
+.mira-ov-scan-table th {
+    background: #f8fafc;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #475569;
+    padding: 7px 10px;
+    border-bottom: 1px solid #e2e8f0;
+    white-space: nowrap;
+}
+
+.mira-ov-scan-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: top;
+    color: var(--mira-text, #1e293b);
+}
+
+.mira-ov-issue-cell { max-width: 220px; }
+.mira-ov-issue-label {
+    display: block;
+    font-size: 0.65rem;
+    color: #94a3b8;
+    margin-bottom: 2px;
+}
+
+.mira-ov-source-cell {
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: #64748b;
+    font-style: italic;
+}
+
+.mira-ov-risk-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+.mira-ov-risk-high   { background: #fee2e2; color: #991b1b; }
+.mira-ov-risk-medium { background: #fef3c7; color: #92400e; }
+.mira-ov-risk-low    { background: #f0fdf4; color: #166534; }
+
+.mira-ov-review-select {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-size: 0.72rem;
+    color: #1e293b;
+    background: #fff;
+}
+
+/* § 4 — Recs label */
+.mira-ov-rec-card .mira-ov-section-label { margin-bottom: 12px; }
+
+/* Daily MR triage verdict head */
+.mira-ov-verdict-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+.mira-ov-verdict-scope {
+    margin-left: auto;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: var(--mira-muted, #94a3b8);
+    background: #f1f5f9;
+    padding: 2px 10px;
+    border-radius: 999px;
+}
+.mira-ov-verdict-body { margin-top: 8px; overflow-x: auto; }
+
+/* ════════════════════════════════════════════════════════════════════════
+   Management-readability tidy pass (2026-06)
+   Display only — spacing, hierarchy, lighter borders, internal scroll.
+   No logic / KPI / data changes.
+   ════════════════════════════════════════════════════════════════════════ */
+
+/* Calmer, consistent vertical rhythm. */
+.mira-ov-body { gap: 22px; }
+.mira-ov-shell { gap: 22px; }
+
+/* Stronger, clearer section headings. */
+.mira-ov-section-label {
+    font-size: 0.74rem;
+    color: #475569;
+    letter-spacing: 0.08em;
+    margin-bottom: 12px;
+}
+
+/* ── § 2  KPI cards: equal height, single light border + accent strip ────── */
+.mira-ov-kpi-row { align-items: stretch; }
+.mira-ov-kpi-row .mira-ov-kpi-card {
+    display: flex;
+    flex-direction: column;
+    border-width: 1px;
+    border-top-width: 3px;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+}
+.mira-ov-kpi-head { margin-bottom: 2px; }
+.mira-ov-kpi-row .mira-ov-kpi-title { font-size: 0.98rem; }
+.mira-ov-chip-grid { gap: 7px; margin-top: 12px; flex: 1 1 auto; }
+
+/* KPI chips: single clean label/value row, value emphasised + right-aligned. */
+.mira-ov-kpi-chip {
+    grid-template-columns: 1fr auto;
+    align-items: center;
+    padding: 8px 11px;
+    background: #f9fafb;
+    border-color: #eef1f6;
+}
+.mira-ov-chip-value { font-size: 1.04rem; }
+/* A subtle dot marks chips whose note is now a hover tooltip (no crowding). */
+.mira-ov-chip-has-note { cursor: help; }
+.mira-ov-chip-has-note .mira-ov-chip-label::after {
+    content: "";
+    display: inline-block;
+    width: 5px; height: 5px;
+    margin-left: 6px;
+    border-radius: 50%;
+    background: #b4bdca;
+    vertical-align: middle;
+}
+
+/* ── Collapsible Notes / Details (replaces always-on paragraphs) ──────────── */
+.mira-ov-section-details,
+.mira-ov-card-details {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px dashed #e7ecf3;
+}
+.mira-ov-details-summary {
+    cursor: pointer;
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: #64748b;
+    user-select: none;
+}
+.mira-ov-details-summary::-webkit-details-marker { display: none; }
+.mira-ov-details-summary::before {
+    content: "\25B8";            /* ▸ */
+    font-size: 0.7rem;
+    color: #94a3b8;
+    transition: transform 140ms ease;
+}
+details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
+.mira-ov-details-summary:hover { color: #334155; }
+.mira-ov-section-details .mira-ov-section-summary,
+.mira-ov-card-details .mira-ov-section-summary { margin-top: 8px; }
+
+/* Clamp long evidence to two lines (full text expands via Details). */
+.mira-ov-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    margin: 8px 0 0;
+}
+
+/* ── § 3  AI Tech Notes: two balanced columns, flattened nested cards ─────── */
+.mira-ov-ai-sub-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-items: stretch;        /* both columns share the taller height */
+    gap: 14px;
+}
+.mira-ov-ai-sub-card {
+    display: flex;
+    flex-direction: column;
+    border-color: #e7ecf3;
+    box-shadow: 0 6px 18px rgba(15, 23, 42, 0.04);
+    min-height: 0;
+}
+/* Body fills the card so equal-height columns align cleanly; long lists scroll. */
+.mira-ov-ai-sub-card .mira-ov-sub-card-body {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+    overflow: hidden;
+}
+.mira-ov-ai-sub-card .mira-ov-sub-card-body > .mira-ov-detail-card:last-child { flex: 1 1 auto; }
+.mira-ov-ai-sub-card .mira-ov-prediction-list,
+.mira-ov-ai-sub-card .mira-ov-issue-list { flex: 1 1 auto; }
+.mira-ov-sub-card-title {
+    font-size: 0.78rem;
+    font-weight: 850;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #334155;
+    padding-bottom: 8px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid #eef2f7;
+}
+
+/* Flatten the detail-cards rendered inside each AI sub-card — no nested borders. */
+.mira-ov-sub-card-body .mira-ov-detail-card {
+    border: none;
+    box-shadow: none;
+    background: transparent;
+    padding: 0;
+    border-radius: 0;
+}
+.mira-ov-sub-card-body .mira-ov-detail-card + .mira-ov-detail-card { margin-top: 16px; }
+.mira-ov-sub-card-body .mira-ov-scroll-card {
+    display: flex;
+    flex: 1 1 0;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+.mira-ov-sub-card-body .mira-ov-detail-card + .mira-ov-scroll-card,
+.mira-ov-sub-card-body .mira-ov-scroll-card + .mira-ov-detail-card {
+    margin-top: 0;
+}
+.mira-ov-sub-card-body .mira-ov-forecast-grid { grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); }
+.mira-ov-sub-card-body .mira-ov-kpi-title {
+    font-size: 0.78rem;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin-bottom: 10px;
+}
+
+/* Risk Indicators + Repair Insights: scroll inside the list, page stays short. */
+.mira-ov-prediction-list,
+.mira-ov-issue-list {
+    max-height: 360px;
+    overflow-y: auto;
+    padding-right: 4px;
+}
+.mira-ov-scroll-card .mira-ov-prediction-list,
+.mira-ov-scroll-card .mira-ov-issue-list {
+    flex: 1 1 auto;
+    gap: 8px;
+    min-height: 0;
+    max-height: none;
+    padding: 0 4px 0 0;
+}
+.mira-ov-prediction-list::-webkit-scrollbar,
+.mira-ov-issue-list::-webkit-scrollbar,
+.mira-ov-verdict-body::-webkit-scrollbar { width: 8px; height: 8px; }
+.mira-ov-prediction-list::-webkit-scrollbar-thumb,
+.mira-ov-issue-list::-webkit-scrollbar-thumb { background: #d8dee8; border-radius: 8px; }
+
+/* Lighter prediction / issue / forecast cards (one thin border). */
+.mira-ov-forecast-card,
+.mira-ov-prediction-card,
+.mira-ov-issue-card {
+    border-width: 1px;
+    padding: 10px 11px;
+    border-radius: 12px;
+}
+.mira-ov-prediction-card .mira-ov-muted-copy,
+.mira-ov-issue-card .mira-ov-muted-copy {
+    margin-bottom: 0;
+}
+.mira-ov-prediction-top strong { font-size: 0.9rem; color: #1e293b; }
+.mira-ov-prediction-top {
+    align-items: flex-start;
+    gap: 10px;
+}
+.mira-ov-prediction-top .mira-ov-mini-badge {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+.mira-ov-list-compact { gap: 5px; }
+.mira-ov-list-compact li { font-size: 0.82rem; }
+
+/* Confidence badge — neutral/blue scale, kept distinct from impact colour. */
+.mira-ov-mini-badge.mira-conf-high { background: #e0edff; color: #1d4ed8; border-color: rgba(37, 99, 235, 0.18); }
+.mira-ov-mini-badge.mira-conf-medium { background: #eef2f7; color: #475569; }
+.mira-ov-mini-badge.mira-conf-low { background: #f3f4f6; color: #94a3b8; }
+
+/* ── § 3b  Data Quality: lighter, secondary card below the analysis columns ─ */
+.mira-ov-dq-card {
+    margin-top: 14px;
+    background: #f9fafb;
+    border-style: dashed;
+    box-shadow: none;
+}
+.mira-ov-dq-card .mira-ov-sub-card-title { color: #64748b; border-bottom-color: #e7ecf3; }
+.mira-ov-dq-card .mira-ov-sub-card-body { font-size: 0.78rem; }
+.mira-ov-dq-card .mira-ov-list { gap: 6px; max-height: 150px; overflow-y: auto; padding-right: 4px; }
+
+/* AI data-notes (warning list) stays compact at the foot of each column. */
+.mira-ov-ai-notes {
+    flex: 0 0 auto;
+    gap: 4px;
+    margin-top: 0;
+    padding-left: 14px;
+    font-size: 0.76rem;
+}
+.mira-ov-ai-notes li {
+    line-height: 1.35;
+}
+
+/* ── Responsive: collapse the two analysis columns on narrower screens ────── */
+@media (max-width: 1024px) {
+    .mira-ov-ai-sub-grid { grid-template-columns: 1fr; }
+    .mira-ov-prediction-list,
+    .mira-ov-issue-list { max-height: none; }
+    .mira-ov-ai-sub-card .mira-ov-sub-card-body {
+        overflow: visible;
+    }
+    .mira-ov-sub-card-body .mira-ov-scroll-card {
+        overflow: visible;
+    }
 }

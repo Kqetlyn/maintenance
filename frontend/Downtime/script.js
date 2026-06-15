@@ -163,6 +163,32 @@ let mtbfHistoryPromise = null;
 let selectedMttrCriticality = "";
 let allWorkOrderRowsCache = null;
 let allWorkOrderRowsPromise = null;
+// ── Page-level Production Equipment / Utilities / Unclassified category filter ──
+// Mirrors backend asset_mapping._GROUP_TO_CATEGORY so old cached rows (without an
+// equipment_category field) still classify correctly.
+let selectedEquipmentCategory = "all"; // all | Production Equipment | Utilities | Unclassified
+const EQUIP_GROUP_TO_CATEGORY = {
+    "Production Equipment": "Production Equipment",
+    "Utilities / Support": "Utilities",
+    "Utilities": "Utilities",
+    "Refrigeration": "Utilities",
+    "Facility / Building": "Unclassified",
+    "Unknown / Review": "Unclassified",
+};
+function getRowEquipmentCategory(row) {
+    const c = row && row.equipment_category;
+    if (c) return c;
+    return EQUIP_GROUP_TO_CATEGORY[String((row && row.machine_group) || "").trim()] || "Unclassified";
+}
+function applyCategoryFilter(rows) {
+    if (!Array.isArray(rows) || selectedEquipmentCategory === "all") return rows || [];
+    return rows.filter((r) => getRowEquipmentCategory(r) === selectedEquipmentCategory);
+}
+// Category-scoped all-year rows — single chokepoint replacing the many
+// `getCategoryScopedAllRows()` reads.
+function getCategoryScopedAllRows() {
+    return applyCategoryFilter(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+}
 let mrMovementSelectedYear = "";
 let mrMovementUserSelectedYear = false;
 let mrCarryoverFilter = "all";
@@ -182,6 +208,18 @@ let preventiveCorrectiveAnalysisPeriodFilter = "full";
 let preventiveCorrectiveAnalysisYearModeFilter = "financial";
 let preventiveCorrectiveReviewDecisions = loadPreventiveCorrectiveReviewDecisions();
 let deferredMrMovementHandle = null;
+
+// ── Missing-data / data-cleansing review layer ───────────────────────────────
+// Editable cleansing fields (status / remark / follow-up) are stored SEPARATELY
+// from the raw imported WO/MR data in localStorage, so the original source is
+// never modified. The missing-data counts always come from the raw SLA model.
+const DATA_CLEANSING_STORAGE_KEY = "downtime.dataCleansingReview.v1";
+const CLEANSING_STATUS_OPTIONS = ["Open", "Checking", "Confirmed Data Issue", "Valid Record", "To Exclude", "Corrected"];
+const CLEANSING_CLEARED_STATUSES = new Set(["Corrected", "Valid Record", "To Exclude"]);
+const MISSING_FIELD_TYPES = ["Missing Actual Start", "Missing Actual End", "Missing Asset", "Invalid Date", "Missing Duration", "Others"];
+let dataCleansingReview = loadDataCleansingReview();
+let lastWorkOrderSlaModel = null;
+let missingDataFilters = { severity: "all", fieldType: "all", slaStatus: "all", machineGroup: "all", search: "", cleared: "all" };
 let deferredAllYearWorkOrderHandle = null;
 let deferredAllYearDynamicsHandle = null;
 let allYearWorkOrderRenderToken = 0;
@@ -227,7 +265,14 @@ const CRITICALITY_COLORS = {
     "Critical": "#ef4444",
     "Non-Critical / Facility": "#64748b",
 };
-const PRODUCTION_CRITICAL_LABELS = new Set(["critical", "semi critical", "production critical"]);
+// Criticality labels treated as "Critical" in all dashboard filters.
+// Utilities and Refrigeration are operational/production-critical and must appear
+// when the user selects the "Critical" filter in MTTR / MTBF sections.
+const PRODUCTION_CRITICAL_LABELS = new Set([
+    "critical", "semi critical", "production critical",
+    "utility", "utilities", "utility support", "utilities support",
+    "refrigeration",
+]);
 const NON_PRODUCTION_LABELS = new Set([
     "non critical facility",
     "facility non critical",
@@ -236,9 +281,16 @@ const NON_PRODUCTION_LABELS = new Set([
     "support",
     "support system",
     "support systems",
-    "utility",
-    "utilities",
     "non production",
+]);
+// Machine group names (from Asset_Master "Main Asset Group") that are
+// operational-critical. Used as a fallback when the row's criticality field is
+// blank or set to the generic backend default.
+const CRITICAL_MACHINE_GROUPS = new Set([
+    "Production Equipment",
+    "Utilities",
+    "Utilities / Support",
+    "Refrigeration",
 ]);
 const MR_MONTH_LABELS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const MR_FINANCIAL_YEAR_START_MONTH = 4; // April
@@ -885,7 +937,9 @@ function getTtrHours(row) {
 }
 
 function getWorkOrderRows(management) {
-    return Array.isArray(management?.work_orders) ? management.work_orders : [];
+    // Apply the page-level equipment-category filter at the source so every section
+    // (KPIs, MTTR, MTBF, trend, rankings, tables) inherits it.
+    return applyCategoryFilter(Array.isArray(management?.work_orders) ? management.work_orders : []);
 }
 
 function getPeriodLabel(meta = {}) {
@@ -2219,15 +2273,39 @@ function renderMrMovementSection(rows = allWorkOrderRowsCache) {
     renderMrCarryoverTable(model);
 }
 
+function renderMrMovementTable(monthLabels, raisedByMonth, finishedByMonth) {
+    const head = document.getElementById("mr-movement-table-head");
+    const body = document.getElementById("mr-movement-table-body");
+    if (!head && !body) return;
+    if (!monthLabels.length) {
+        if (head) head.innerHTML = "<th>Metric</th><th>No data</th>";
+        if (body) body.innerHTML = `<tr><td colspan="2" class="empty-cell">No MR movement data available.</td></tr>`;
+        return;
+    }
+    if (head) {
+        head.innerHTML = `<th>Metric</th>${monthLabels.map((label) => `<th>${escapeHtml(label)}</th>`).join("")}`;
+    }
+    if (body) {
+        const rowFor = (label, values) => `
+            <tr>
+                <td>${escapeHtml(label)}</td>
+                ${values.map((value) => `<td>${escapeHtml(fmtNumber(value || 0))}</td>`).join("")}
+            </tr>`;
+        body.innerHTML = rowFor("MR Raised", raisedByMonth) + rowFor("MR Finished", finishedByMonth);
+    }
+}
+
 function renderMrMovementChart(model) {
     const canvas = ensureCanvas("mrMovementChart");
     if (!canvas) return;
     if (!model.rows.length) {
         renderEmptyChart("mrMovementChart", "No MR movement data available.");
+        renderMrMovementTable([], [], []);
         return;
     }
     const raisedByFinancialMonth = MR_FINANCIAL_MONTH_ORDER.map((monthIndex) => model.monthlyRaised[monthIndex] || 0);
     const finishedByFinancialMonth = MR_FINANCIAL_MONTH_ORDER.map((monthIndex) => model.monthlyFinished[monthIndex] || 0);
+    renderMrMovementTable(getMrFinancialMonthLabelsWithYear(model.selectedYear), raisedByFinancialMonth, finishedByFinancialMonth);
     destroyChart("mrMovementChart");
     chartRefs.mrMovementChart = new Chart(canvas.getContext("2d"), {
         type: "bar",
@@ -3676,9 +3754,15 @@ function getPreventiveCorrectiveReviewDecision(id) {
     return reviewDecision ? { ...decision, reviewDecision, reviewStatus: "Reviewed" } : null;
 }
 
+function findWtEntryById(id) {
+    if (!Array.isArray(preventiveCorrectiveSourceRows)) return null;
+    return preventiveCorrectiveSourceRows.find((r) => getPreventiveCorrectiveReviewKey(r, 0) === id) || null;
+}
+
 function setPreventiveCorrectiveReviewDecision(id, reviewDecision, originalType = "") {
     const normalizedType = normalizePreventiveCorrectiveMaintenanceType(reviewDecision);
     if (!id || !normalizedType) return;
+    const prev = preventiveCorrectiveReviewDecisions[id]?.reviewDecision || "Unreviewed";
     preventiveCorrectiveReviewDecisions[id] = {
         originalType: normalizePreventiveCorrectiveMaintenanceType(originalType),
         reviewDecision: normalizedType,
@@ -3687,6 +3771,23 @@ function setPreventiveCorrectiveReviewDecision(id, reviewDecision, originalType 
         reviewNote: "",
     };
     savePreventiveCorrectiveReviewDecisions();
+    const row = findWtEntryById(id);
+    appendEditHistory({
+        reviewType: "work-type",
+        woId: id,
+        mrId: row ? (cleanExportIdentifier(row.maintenance_order_id || row.request_id) || "") : "",
+        equipment: row ? getMachineEquipmentName(row) : "",
+        machineGroup: row ? (cleanMrValue(row.machine_group) || getPerformanceMachineGroup(row) || "") : "",
+        severity: row ? getMrServiceLevel(row) : "",
+        field: "reviewDecision",
+        previousValue: prev,
+        newValue: normalizedType,
+        reviewStatus: "Reviewed",
+        remark: "",
+        followUpAction: "",
+    });
+    renderSectionEditHistory("wt-review-history-body", "work-type");
+    renderGlobalEditHistory();
 }
 
 function clearPreventiveCorrectiveReviewDecision(id) {
@@ -3856,6 +3957,16 @@ const PREVENTIVE_CORRECTIVE_ANALYSIS_TYPES = {
         axisLabel: "Data Review",
         color: "#f59e0b",
     },
+    comparison: {
+        key: "comparison",
+        label: "Preventive vs Corrective",
+        metricLabel: "Logged MR",
+        rowLabel: "logged",
+        axisLabel: "Logged MR",
+        color: "#10b981",
+        preventiveColor: "#10b981",
+        correctiveColor: "#ef4444",
+    },
 };
 
 function getPreventiveCorrectiveAnalysisTypeConfig() {
@@ -3984,18 +4095,44 @@ function buildPreventiveCorrectiveAnalysisModel(rows = []) {
         : null;
     const monthOrder = getPreventiveCorrectiveAnalysisMonthOrder(selectedYear, periodKey, yearMode);
     const monthLabels = getPreventiveCorrectiveAnalysisMonthLabels(selectedYear, monthOrder, yearMode);
-    const monthlyCounts = new Array(monthOrder.length).fill(0);
     const ytdCutoffDate = periodKey === "ytd" ? getPreventiveCorrectiveAnalysisYtdReferenceDate(selectedYear, yearMode) : null;
-    let totalRows = 0;
 
-    selectedEntries.forEach((entry) => {
-        if (selectedYear !== null && getPreventiveCorrectiveAnalysisYearValue(entry, yearMode) !== selectedYear) return;
-        if (periodKey === "ytd" && (!ytdCutoffDate || entry.createdDate > ytdCutoffDate)) return;
-        const monthPosition = monthOrder.indexOf(entry.createdDate.getMonth());
-        if (monthPosition < 0) return;
-        totalRows += 1;
-        monthlyCounts[monthPosition] += 1;
-    });
+    // Bucket a set of entries into the selected financial/calendar year's months.
+    const countByMonth = (entries) => {
+        const counts = new Array(monthOrder.length).fill(0);
+        let total = 0;
+        entries.forEach((entry) => {
+            if (!(entry.createdDate instanceof Date) || Number.isNaN(entry.createdDate.getTime())) return;
+            if (selectedYear !== null && getPreventiveCorrectiveAnalysisYearValue(entry, yearMode) !== selectedYear) return;
+            if (periodKey === "ytd" && (!ytdCutoffDate || entry.createdDate > ytdCutoffDate)) return;
+            const monthPosition = monthOrder.indexOf(entry.createdDate.getMonth());
+            if (monthPosition < 0) return;
+            total += 1;
+            counts[monthPosition] += 1;
+        });
+        return { counts, total };
+    };
+
+    const isComparison = config.key === "comparison";
+    let monthlyCounts;
+    let totalRows;
+    let comparison = null;
+    if (isComparison) {
+        const prev = countByMonth(baseModel.preventive);
+        const corr = countByMonth(baseModel.corrective);
+        comparison = {
+            preventive: prev.counts,
+            corrective: corr.counts,
+            preventiveTotal: prev.total,
+            correctiveTotal: corr.total,
+        };
+        monthlyCounts = prev.counts;            // kept for callers that read a single series
+        totalRows = prev.total + corr.total;
+    } else {
+        const single = countByMonth(selectedEntries);
+        monthlyCounts = single.counts;
+        totalRows = single.total;
+    }
 
     return {
         availableYears,
@@ -4003,6 +4140,7 @@ function buildPreventiveCorrectiveAnalysisModel(rows = []) {
         selectedYearLabel: selectedYear !== null ? getPreventiveCorrectiveAnalysisYearLabel(selectedYear, yearMode) : getPreventiveCorrectiveAnalysisYearLabel(null, yearMode),
         monthLabels,
         monthlyCounts,
+        comparison,
         totalRows,
         config,
         periodKey,
@@ -4044,20 +4182,27 @@ function renderPreventiveCorrectiveAnalysis(rows = []) {
     }
 
     if (body) {
-        body.innerHTML = model.monthLabels.length ? `
+        const metricRow = (label, values) => `
             <tr>
-                <td>${escapeHtml(metricLabel)}</td>
-                ${model.monthlyCounts.map((value) => `<td>${escapeHtml(fmtNumber(value))}</td>`).join("")}
-            </tr>
-        ` : `<tr><td colspan="2" class="empty-cell">YTD has not started for ${escapeHtml(model.selectedYearLabel)}.</td></tr>`;
+                <td>${escapeHtml(label)}</td>
+                ${values.map((value) => `<td>${escapeHtml(fmtNumber(value))}</td>`).join("")}
+            </tr>`;
+        if (!model.monthLabels.length) {
+            body.innerHTML = `<tr><td colspan="2" class="empty-cell">YTD has not started for ${escapeHtml(model.selectedYearLabel)}.</td></tr>`;
+        } else if (model.comparison) {
+            body.innerHTML = metricRow("Logged Preventive", model.comparison.preventive)
+                + metricRow("Logged Corrective", model.comparison.corrective);
+        } else {
+            body.innerHTML = metricRow(metricLabel, model.monthlyCounts);
+        }
     }
 
     const periodText = model.periodKey === "ytd" && model.ytdCutoffDate
         ? ` through ${fmtDateOnly(model.ytdCutoffDate)}`
         : "";
-    const noteParts = [
-        `${fmtNumber(model.totalRows)} ${model.config.rowLabel} row${model.totalRows === 1 ? "" : "s"} counted by created or raised date in ${model.selectedYearLabel}${periodText}.`,
-    ];
+    const noteParts = model.comparison
+        ? [`${fmtNumber(model.comparison.preventiveTotal)} preventive vs ${fmtNumber(model.comparison.correctiveTotal)} corrective rows counted by created or raised date in ${model.selectedYearLabel}${periodText}.`]
+        : [`${fmtNumber(model.totalRows)} ${model.config.rowLabel} row${model.totalRows === 1 ? "" : "s"} counted by created or raised date in ${model.selectedYearLabel}${periodText}.`];
     if (note) note.textContent = noteParts.join(" ");
 
     destroyChart("preventiveCorrectiveAnalysisChart");
@@ -4071,17 +4216,35 @@ function renderPreventiveCorrectiveAnalysis(rows = []) {
         return;
     }
 
+    const analysisDatasets = model.comparison
+        ? [
+            {
+                label: "Logged Preventive",
+                data: model.comparison.preventive,
+                backgroundColor: model.config.preventiveColor || "#10b981",
+                borderRadius: 8,
+                maxBarThickness: 34,
+            },
+            {
+                label: "Logged Corrective",
+                data: model.comparison.corrective,
+                backgroundColor: model.config.correctiveColor || "#ef4444",
+                borderRadius: 8,
+                maxBarThickness: 34,
+            },
+        ]
+        : [{
+            label: metricLabel,
+            data: model.monthlyCounts,
+            backgroundColor: model.config.color,
+            borderRadius: 8,
+            maxBarThickness: 34,
+        }];
     chartRefs.preventiveCorrectiveAnalysisChart = new Chart(canvas.getContext("2d"), {
         type: "bar",
         data: {
             labels: model.monthLabels,
-            datasets: [{
-                label: metricLabel,
-                data: model.monthlyCounts,
-                backgroundColor: model.config.color,
-                borderRadius: 8,
-                maxBarThickness: 34,
-            }],
+            datasets: analysisDatasets,
         },
         options: {
             ...mrTrackingAxisOptions(model.config.axisLabel),
@@ -4280,6 +4443,7 @@ function renderPreventiveCorrectiveSection(rows = []) {
         topicPreventiveMonthFilter,
     );
     const model = buildPreventiveCorrectiveModel(scoped);
+    window._lastPreventiveCorrectiveModel = model;
     renderPreventiveCorrectiveChart(model);
     renderPreventiveCorrectiveList(model);
     setText(
@@ -4287,6 +4451,8 @@ function renderPreventiveCorrectiveSection(rows = []) {
         `${fmtNumber(model.review.length)} unresolved corrective row${model.review.length === 1 ? "" : "s"} contain preventive wording and need data review. Data Review excludes confirmed rows. Reviewed Preventive: ${fmtNumber(model.reviewedPreventive.length)} | Reviewed Corrective: ${fmtNumber(model.reviewedCorrective.length)}.`
     );
     renderPreventiveCorrectiveAnalysis(preventiveCorrectiveSourceRows);
+    renderWorkTypeClassificationTable();
+    renderSectionEditHistory("wt-review-history-body", "work-type");
 }
 
 function hasWorkOrderSlaFields(rows = []) {
@@ -4294,11 +4460,12 @@ function hasWorkOrderSlaFields(rows = []) {
 }
 
 function getWorkOrderSlaSourceRows(rows = []) {
-    if (hasWorkOrderSlaFields(allWorkOrderRowsCache)) return allWorkOrderRowsCache;
-    if (hasWorkOrderSlaFields(rows)) return rows;
+    // Apply the page-level category filter to whichever source we resolve.
+    if (hasWorkOrderSlaFields(allWorkOrderRowsCache)) return applyCategoryFilter(allWorkOrderRowsCache);
+    if (hasWorkOrderSlaFields(rows)) return applyCategoryFilter(rows);
     const currentRows = getWorkOrderRows(getManagement());
     if (hasWorkOrderSlaFields(currentRows)) return currentRows;
-    return Array.isArray(allWorkOrderRowsCache) && allWorkOrderRowsCache.length ? allWorkOrderRowsCache : currentRows;
+    return applyCategoryFilter(Array.isArray(allWorkOrderRowsCache) && allWorkOrderRowsCache.length ? allWorkOrderRowsCache : currentRows);
 }
 
 function getWorkOrderSlaDefaultYear(rows = []) {
@@ -4500,6 +4667,7 @@ function classifyWorkOrderSlaRow(row, index, referenceDate) {
         delayHours,
         validForSla,
         slaStatus,
+        repairHours: Number.isFinite(startToEndHours) && startToEndHours >= 0 ? startToEndHours : null,
     };
 }
 
@@ -4600,22 +4768,30 @@ function renderWorkOrderSlaSummaryTable(model) {
     const body = document.getElementById("wo-sla-severity-body");
     if (!body) return;
     if (!model.severityRows.some((row) => row.total > 0)) {
-        body.innerHTML = `<tr><td colspan="7" class="empty-cell">No work orders match the current SLA scope.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="8" class="empty-cell">No work orders match the current SLA scope.</td></tr>`;
         return;
     }
     body.innerHTML = model.severityRows
         .filter((row) => row.total > 0)
-        .map((row) => `
+        .map((row) => {
+            const completeness = row.total ? (row.validCount / row.total) * 100 : null;
+            const completenessTone = completeness === null ? "" : (completeness >= 90 ? "good" : (completeness >= 70 ? "" : "bad"));
+            const missingCell = row.missingData > 0
+                ? `<button type="button" class="sla-missing-link" data-missing-severity="${escapeHtml(row.severity.key)}" title="Show the ${escapeHtml(fmtNumber(row.missingData))} ${escapeHtml(row.severity.label)} missing-data records">${escapeHtml(fmtNumber(row.missingData))}</button>`
+                : `<span class="wo-response-metric missing">0</span>`;
+            return `
             <tr>
                 <td>${renderWorkOrderSlaSeverityLabel(row.severity)}</td>
                 <td>${escapeHtml(fmtNumber(row.total))}</td>
                 <td><span class="wo-response-metric good">${escapeHtml(fmtNumber(row.metTarget))}</span></td>
                 <td><span class="wo-response-metric bad">${escapeHtml(fmtNumber(row.late))}</span></td>
                 <td><span class="wo-response-metric bad">${escapeHtml(fmtNumber(row.openOverdue))}</span></td>
-                <td><span class="wo-response-metric missing">${escapeHtml(fmtNumber(row.missingData))}</span></td>
+                <td>${missingCell}</td>
+                <td><span class="wo-response-metric ${escapeHtml(completenessTone)}">${escapeHtml(completeness === null ? "N/A" : fmtPercent(completeness))}</span></td>
                 <td>${escapeHtml(row.slaPct === null ? "N/A" : fmtPercent(row.slaPct))}</td>
             </tr>
-        `)
+        `;
+        })
         .join("");
 }
 
@@ -4693,11 +4869,719 @@ function renderWorkOrderSlaDrilldownTable(model) {
     }).join("");
 }
 
+// ── Data-cleansing review layer (localStorage; never touches raw source) ──────
+function loadDataCleansingReview() {
+    if (typeof window === "undefined" || !window.localStorage) return {};
+    try {
+        const parsed = JSON.parse(window.localStorage.getItem(DATA_CLEANSING_STORAGE_KEY) || "{}");
+        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+    } catch (error) {
+        console.warn("Data cleansing review could not be loaded:", error);
+        return {};
+    }
+}
+
+function saveDataCleansingReview() {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+        window.localStorage.setItem(DATA_CLEANSING_STORAGE_KEY, JSON.stringify(dataCleansingReview));
+    } catch (error) {
+        console.warn("Data cleansing review could not be saved:", error);
+    }
+}
+
+function getCleansingKey(entry) {
+    const wo = cleanExportIdentifier(entry.row?.work_order_id || entry.row?.wo_id);
+    if (wo) return `wo:${wo}`;
+    const mr = cleanExportIdentifier(entry.row?.maintenance_order_id || entry.row?.request_id || entry.row?.mr_id);
+    if (mr) return `mr:${mr}`;
+    return `k:${entry.id}:${entry.created?.raw || ""}`;
+}
+
+function getCleansingRecord(key) {
+    const rec = dataCleansingReview[key] || {};
+    const status = CLEANSING_STATUS_OPTIONS.includes(rec.cleansingStatus) ? rec.cleansingStatus : "Open";
+    return { cleansingStatus: status, remark: String(rec.remark || ""), followUpAction: String(rec.followUpAction || ""), updatedAt: rec.updatedAt || "" };
+}
+
+function findSlaEntryByCleansingKey(key) {
+    if (!lastWorkOrderSlaModel) return null;
+    return lastWorkOrderSlaModel.entries.find((e) => getCleansingKey(e) === key) || null;
+}
+
+function setCleansingField(key, field, value) {
+    if (!key || !["cleansingStatus", "remark", "followUpAction"].includes(field)) return;
+    const prev = getCleansingRecord(key);
+    const prevValue = prev[field];
+    if (prevValue === value) return;
+    const next = { ...prev, [field]: value, updatedAt: new Date().toISOString() };
+    if (next.cleansingStatus === "Open" && !next.remark.trim() && !next.followUpAction.trim()) {
+        delete dataCleansingReview[key];
+    } else {
+        dataCleansingReview[key] = next;
+    }
+    saveDataCleansingReview();
+    // Capture history context from the SLA model entry.
+    const entry = findSlaEntryByCleansingKey(key);
+    appendEditHistory({
+        reviewType: "missing-data",
+        woId: entry ? entry.id : key,
+        mrId: entry ? (entry.requestId || "") : "",
+        equipment: entry ? entry.equipmentName : "",
+        machineGroup: entry ? getSlaMachineGroup(entry.row) : "",
+        severity: entry ? entry.severity.label : "",
+        field,
+        previousValue: prevValue,
+        newValue: value,
+        cleansingStatus: next.cleansingStatus,
+        remark: next.remark,
+        followUpAction: next.followUpAction,
+    });
+    renderSectionEditHistory("missing-data-history-body", "missing-data");
+    renderGlobalEditHistory();
+}
+
+function isClearedStatus(status) {
+    return CLEANSING_CLEARED_STATUSES.has(status);
+}
+
+// ── Unified Edit History (Missing Data + Work Type + future review sections) ──
+const EDIT_HISTORY_KEY = "downtime.editHistory.v1";
+const EDIT_HISTORY_LIMIT = 2000;
+let editHistory = loadEditHistory();
+let editHistoryPage = 0;
+const EDIT_HISTORY_PAGE_SIZE = 30;
+let editHistoryFilters = { reviewType: "all", search: "", machineGroup: "all", severity: "all" };
+
+function loadEditHistory() {
+    if (typeof window === "undefined" || !window.localStorage) return [];
+    try {
+        const p = JSON.parse(window.localStorage.getItem(EDIT_HISTORY_KEY) || "[]");
+        return Array.isArray(p) ? p : [];
+    } catch { return []; }
+}
+
+function saveEditHistory() {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+        if (editHistory.length > EDIT_HISTORY_LIMIT) editHistory = editHistory.slice(0, EDIT_HISTORY_LIMIT);
+        window.localStorage.setItem(EDIT_HISTORY_KEY, JSON.stringify(editHistory));
+    } catch (e) { console.warn("Edit history save failed:", e); }
+}
+
+function appendEditHistory(entry) {
+    editHistory.unshift({
+        id: `eh-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        editedAt: new Date().toISOString(),
+        ...entry,
+    });
+    saveEditHistory();
+}
+
+function renderSectionEditHistory(containerId, reviewType) {
+    const body = document.getElementById(containerId);
+    if (!body) return;
+    const entries = editHistory.filter((h) => h.reviewType === reviewType);
+    if (!entries.length) {
+        body.innerHTML = `<p class="dr-history-empty">No edits recorded yet for this section.</p>`;
+        return;
+    }
+    body.innerHTML = entries.slice(0, 100).map((h) => `
+        <div class="eh-item">
+            <span class="eh-time">${escapeHtml(fmtDateTime(new Date(h.editedAt)))}</span>
+            <span class="eh-who">${escapeHtml(h.woId || h.mrId || "--")}</span>
+            <span class="eh-field">${escapeHtml(h.field)}</span>
+            <span class="eh-from">${escapeHtml(String(h.previousValue || ""))}</span>
+            <span class="eh-arrow">→</span>
+            <span class="eh-to">${escapeHtml(String(h.newValue || ""))}</span>
+            <span class="eh-equip">${escapeHtml(h.equipment || "")}</span>
+        </div>`).join("");
+}
+
+function renderGlobalEditHistory() {
+    const body = document.getElementById("global-edit-history-body");
+    const countEl = document.getElementById("global-edit-history-count");
+    if (!body) return;
+    const f = editHistoryFilters;
+    const term = (f.search || "").trim().toLowerCase();
+    const filtered = editHistory.filter((h) => {
+        if (f.reviewType !== "all" && h.reviewType !== f.reviewType) return false;
+        if (f.machineGroup !== "all" && h.machineGroup !== f.machineGroup) return false;
+        if (f.severity !== "all" && h.severity !== f.severity) return false;
+        if (term) {
+            const hay = [h.woId, h.mrId, h.equipment, h.field, h.newValue].join(" ").toLowerCase();
+            if (!hay.includes(term)) return false;
+        }
+        return true;
+    });
+    const pageStart = editHistoryPage * EDIT_HISTORY_PAGE_SIZE;
+    const pageEntries = filtered.slice(pageStart, pageStart + EDIT_HISTORY_PAGE_SIZE);
+    const totalPages = Math.ceil(filtered.length / EDIT_HISTORY_PAGE_SIZE) || 1;
+    if (countEl) countEl.textContent = `${fmtNumber(filtered.length)} edits across all review sections`;
+    renderGlobalEditHistoryPagination(filtered.length, totalPages);
+    body.innerHTML = pageEntries.length ? pageEntries.map((h) => `
+        <tr>
+            <td><span class="eh-type-badge eh-type-${escapeHtml(h.reviewType || "")}">${escapeHtml(REVIEW_TYPE_LABELS[h.reviewType] || h.reviewType || "--")}</span></td>
+            <td>${escapeHtml(h.woId || "--")}</td>
+            <td>${escapeHtml(h.mrId || "--")}</td>
+            <td>${escapeHtml(h.equipment || "--")}</td>
+            <td>${escapeHtml(h.machineGroup || "--")}</td>
+            <td>${escapeHtml(h.severity || "--")}</td>
+            <td>${escapeHtml(h.field || "--")}</td>
+            <td class="eh-prev">${escapeHtml(String(h.previousValue || ""))}</td>
+            <td class="eh-next">${escapeHtml(String(h.newValue || ""))}</td>
+            <td>${escapeHtml(h.cleansingStatus || h.reviewStatus || "--")}</td>
+            <td>${escapeHtml(h.remark || "")}</td>
+            <td>${escapeHtml(h.followUpAction || "")}</td>
+            <td class="eh-time-cell">${escapeHtml(h.editedAt ? fmtDateTime(new Date(h.editedAt)) : "--")}</td>
+        </tr>`).join("")
+        : `<tr><td colspan="13" class="empty-cell">No edits match the current filters.</td></tr>`;
+}
+
+function renderGlobalEditHistoryPagination(total, totalPages) {
+    const bar = document.getElementById("global-edit-history-pagination");
+    if (!bar) return;
+    bar.innerHTML = total <= EDIT_HISTORY_PAGE_SIZE ? "" : `
+        <button type="button" class="page-btn" id="gh-prev" ${editHistoryPage === 0 ? "disabled" : ""}>← Prev</button>
+        <span class="page-info">Page ${editHistoryPage + 1} / ${totalPages}</span>
+        <button type="button" class="page-btn" id="gh-next" ${editHistoryPage >= totalPages - 1 ? "disabled" : ""}>Next →</button>`;
+}
+
+function populateGlobalEditHistoryFilters() {
+    const typeSelect = document.getElementById("gh-reviewtype-filter");
+    const groupSelect = document.getElementById("gh-group-filter");
+    if (!groupSelect) return;
+    const groups = [...new Set(editHistory.map((h) => h.machineGroup).filter(Boolean))].sort();
+    const cur = editHistoryFilters.machineGroup;
+    groupSelect.innerHTML = `<option value="all">All Machine Groups</option>` +
+        groups.map((g) => `<option value="${escapeHtml(g)}"${g === cur ? " selected" : ""}>${escapeHtml(g)}</option>`).join("");
+    groupSelect.value = groups.includes(cur) ? cur : "all";
+    if (typeSelect) typeSelect.value = editHistoryFilters.reviewType;
+}
+
+const REVIEW_TYPE_LABELS = {
+    "missing-data": "Missing Data",
+    "work-type": "Work Type",
+    "data-reliability": "Data Reliability",
+};
+
+// ── Work Type Classification Review ──────────────────────────────────────────
+const WORK_TYPE_REVIEW_KEY = "downtime.workTypeReview.v1";
+const WORK_TYPE_STATUS_OPTIONS = ["Open", "Checking", "Confirmed Incorrect", "Confirmed Correct", "Corrected", "To Exclude"];
+const WORK_TYPE_CLEARED_STATUSES = new Set(["Confirmed Correct", "Corrected", "To Exclude"]);
+let workTypeReview = loadWorkTypeReview();
+let workTypeReviewPage = 0;
+const WORK_TYPE_PAGE_SIZE = 25;
+let workTypeReviewFilter = "open";  // all | open | cleared
+let workTypeReviewSearch = "";
+
+function loadWorkTypeReview() {
+    if (typeof window === "undefined" || !window.localStorage) return {};
+    try {
+        const p = JSON.parse(window.localStorage.getItem(WORK_TYPE_REVIEW_KEY) || "{}");
+        return p && typeof p === "object" && !Array.isArray(p) ? p : {};
+    } catch { return {}; }
+}
+
+function saveWorkTypeReview() {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try {
+        window.localStorage.setItem(WORK_TYPE_REVIEW_KEY, JSON.stringify(workTypeReview));
+    } catch (e) { console.warn("Work type review save failed:", e); }
+}
+
+function getWorkTypeReviewRecord(key) {
+    const r = workTypeReview[key] || {};
+    return {
+        reviewStatus: WORK_TYPE_STATUS_OPTIONS.includes(r.reviewStatus) ? r.reviewStatus : "Open",
+        suggestedWorkType: String(r.suggestedWorkType || "Possible Preventive / PM"),
+        remark: String(r.remark || ""),
+        followUpAction: String(r.followUpAction || ""),
+        updatedAt: r.updatedAt || "",
+    };
+}
+
+function setWorkTypeReviewField(key, field, value, entryCtx) {
+    const prev = getWorkTypeReviewRecord(key);
+    const prevValue = prev[field];
+    if (prevValue === value) return;
+    const allowed = ["reviewStatus", "suggestedWorkType", "remark", "followUpAction"];
+    if (!allowed.includes(field)) return;
+    const next = { ...prev, [field]: value, updatedAt: new Date().toISOString() };
+    if (next.reviewStatus === "Open" && !next.remark.trim() && !next.followUpAction.trim() && next.suggestedWorkType === "Possible Preventive / PM") {
+        delete workTypeReview[key];
+    } else {
+        workTypeReview[key] = next;
+    }
+    saveWorkTypeReview();
+    appendEditHistory({
+        reviewType: "work-type",
+        woId: entryCtx?.woId || "",
+        mrId: entryCtx?.mrId || "",
+        equipment: entryCtx?.equipment || "",
+        machineGroup: entryCtx?.machineGroup || "",
+        severity: entryCtx?.severity || "",
+        field,
+        previousValue: prevValue,
+        newValue: value,
+        reviewStatus: next.reviewStatus,
+        remark: next.remark,
+        followUpAction: next.followUpAction,
+    });
+    if (field === "reviewStatus") renderWorkTypeClassificationTable();
+    renderSectionEditHistory("wt-review-history-body", "work-type");
+    renderGlobalEditHistory();
+}
+
+function buildWorkTypeClassificationEntries() {
+    // Uses the existing Preventive/Corrective model (already computed from preventiveCorrectiveSourceRows).
+    // "Work type classification" entries are Corrective rows that have preventive signals
+    // in their description — these are the `reviewNeeded === true` entries.
+    const model = window._lastPreventiveCorrectiveModel;
+    if (!model) return [];
+    return model.entries.filter((e) => e.reviewNeeded || (e.originalType === "Corrective" && e.hasPreventiveSignal));
+}
+
+function renderWorkTypeClassificationTable() {
+    const body = document.getElementById("wt-classification-body");
+    const countEl = document.getElementById("wt-classification-count");
+    if (!body) return;
+    let entries = buildWorkTypeClassificationEntries();
+    const term = workTypeReviewSearch.trim().toLowerCase();
+    if (workTypeReviewFilter !== "all") {
+        entries = entries.filter((e) => {
+            const rec = getWorkTypeReviewRecord(e.id);
+            const cleared = WORK_TYPE_CLEARED_STATUSES.has(rec.reviewStatus);
+            return workTypeReviewFilter === "cleared" ? cleared : !cleared;
+        });
+    }
+    if (term) {
+        entries = entries.filter((e) => {
+            const hay = [e.id, e.requestId, e.equipmentName, e.description].join(" ").toLowerCase();
+            return hay.includes(term);
+        });
+    }
+    const totalPages = Math.ceil(entries.length / WORK_TYPE_PAGE_SIZE) || 1;
+    if (workTypeReviewPage >= totalPages) workTypeReviewPage = 0;
+    const pageEntries = entries.slice(workTypeReviewPage * WORK_TYPE_PAGE_SIZE, (workTypeReviewPage + 1) * WORK_TYPE_PAGE_SIZE);
+    if (countEl) {
+        const total = buildWorkTypeClassificationEntries().length;
+        const cleared = buildWorkTypeClassificationEntries().filter((e) => WORK_TYPE_CLEARED_STATUSES.has(getWorkTypeReviewRecord(e.id).reviewStatus)).length;
+        countEl.textContent = `${fmtNumber(entries.length)} shown | ${fmtNumber(total)} flagged (${fmtNumber(cleared)} reviewed)`;
+    }
+    renderWorkTypeClassificationPagination(entries.length, totalPages);
+    if (!pageEntries.length) {
+        body.innerHTML = `<tr><td colspan="12" class="empty-cell">No flagged records match the current filters.</td></tr>`;
+        return;
+    }
+    body.innerHTML = pageEntries.map((entry) => {
+        const key = entry.id;
+        const rec = getWorkTypeReviewRecord(key);
+        const cleared = WORK_TYPE_CLEARED_STATUSES.has(rec.reviewStatus);
+        const statusOpts = WORK_TYPE_STATUS_OPTIONS
+            .map((o) => `<option value="${escapeHtml(o)}"${o === rec.reviewStatus ? " selected" : ""}>${escapeHtml(o)}</option>`).join("");
+        const machineGroup = cleanMrValue(entry.row?.machine_group) || getPerformanceMachineGroup(entry.row) || "--";
+        const ctxAttr = `data-wt-key="${escapeHtml(key)}" data-wt-wo="${escapeHtml(entry.id)}" data-wt-mr="${escapeHtml(entry.requestId || "")}" data-wt-equip="${escapeHtml(entry.equipmentName)}" data-wt-group="${escapeHtml(machineGroup)}" data-wt-sev="${escapeHtml(entry.severity?.label || "")}"`;
+        return `
+            <tr class="${cleared ? "cleansing-cleared-row" : ""}">
+                <td><div class="cell-title">${escapeHtml(entry.id)}</div></td>
+                <td>${escapeHtml(entry.requestId || "--")}</td>
+                <td>${escapeHtml(entry.equipmentName)}</td>
+                <td>${escapeHtml(getMachineAssetId(entry.row) || "--")}</td>
+                <td>${escapeHtml(machineGroup)}</td>
+                <td><span class="pm-cm-type-pill ${escapeHtml(entry.loggedType)}">${escapeHtml(entry.originalType || entry.loggedType)}</span></td>
+                <td><span class="missing-field-tag">${escapeHtml(rec.suggestedWorkType)}</span></td>
+                <td class="cleansing-desc-cell" title="${escapeHtml(entry.description || "")}">${escapeHtml(entry.description || "--")}</td>
+                <td class="cleansing-desc-cell">${escapeHtml(entry.reviewReason || "--")}</td>
+                <td><select class="cleansing-input cleansing-status-select wt-input" data-wt-field="reviewStatus" ${ctxAttr}>${statusOpts}</select></td>
+                <td><input type="text" class="cleansing-input cleansing-text wt-input" data-wt-field="remark" ${ctxAttr} value="${escapeHtml(rec.remark)}" placeholder="Remark"></td>
+                <td><input type="text" class="cleansing-input cleansing-text wt-input" data-wt-field="followUpAction" ${ctxAttr} value="${escapeHtml(rec.followUpAction)}" placeholder="Action"></td>
+            </tr>`;
+    }).join("");
+}
+
+function renderWorkTypeClassificationPagination(total, totalPages) {
+    const bar = document.getElementById("wt-pagination");
+    if (!bar) return;
+    bar.innerHTML = total <= WORK_TYPE_PAGE_SIZE ? "" : `
+        <button type="button" class="page-btn" id="wt-prev" ${workTypeReviewPage === 0 ? "disabled" : ""}>← Prev</button>
+        <span class="page-info">Page ${workTypeReviewPage + 1} / ${totalPages} (${fmtNumber(total)} records)</span>
+        <button type="button" class="page-btn" id="wt-next" ${workTypeReviewPage >= totalPages - 1 ? "disabled" : ""}>Next →</button>`;
+}
+
+// ── Missing-data classification + views ──────────────────────────────────────
+function getSlaMachineGroup(row) {
+    return cleanMrValue(row?.machine_group) || getPerformanceMachineGroup(row) || "Unknown / Review";
+}
+
+function classifyMissingFieldType(entry) {
+    if (entry.slaStatus === "Missing Start Date") return "Missing Actual Start";
+    if (entry.slaStatus === "Missing End Date") return "Missing Actual End";
+    const delayText = (entry.delayLines || []).join(" ").toLowerCase();
+    if (delayText.includes("invalid") || delayText.includes("before")) return "Invalid Date";
+    if (!getMachineAssetId(entry.row)) return "Missing Asset";
+    if (entry.actualStart?.date && entry.actualEnd?.date && entry.repairHours === null) return "Missing Duration";
+    return "Others";
+}
+
+function isOneMinuteMttrEntry(entry) {
+    return entry.repairHours !== null && entry.repairHours >= 0 && Math.round(entry.repairHours * 60) <= 1;
+}
+
+function slaExportDateTime(part) {
+    if (!part) return "--";
+    if (part.date) return fmtDateTime(part.date);
+    return part.raw ? String(part.raw) : "--";
+}
+
+function slaDurationText(hours) {
+    return Number.isFinite(hours) ? formatSlaDuration(hours) : "--";
+}
+
+function missingEntryView(entry) {
+    const key = getCleansingKey(entry);
+    const rec = getCleansingRecord(key);
+    return {
+        key,
+        woId: entry.id,
+        mrId: entry.requestId || "",
+        equipment: entry.equipmentName,
+        assetId: getMachineAssetId(entry.row) || "--",
+        machineGroup: getSlaMachineGroup(entry.row),
+        severityLabel: entry.severity.label,
+        severityRaw: entry.severityRaw || "",
+        created: slaExportDateTime(entry.created),
+        actualStart: slaExportDateTime(entry.actualStart),
+        actualEnd: slaExportDateTime(entry.actualEnd),
+        duration: slaDurationText(entry.repairHours),
+        missingFieldType: classifyMissingFieldType(entry),
+        slaStatus: entry.slaStatus,
+        openAge: slaDurationText(entry.openAgeHours),
+        completionDelay: entry.delayHours != null ? formatSlaDuration(entry.delayHours, { signed: true }) : "--",
+        description: getMrDescription(entry.row) || "--",
+        translatedDescription: String(entry.row?.translated_description || "").trim(),
+        cleansingStatus: rec.cleansingStatus,
+        remark: rec.remark,
+        followUpAction: rec.followUpAction,
+        cleared: isClearedStatus(rec.cleansingStatus),
+    };
+}
+
+function getMissingDataEntries(model) {
+    if (!model) return [];
+    return model.entries.filter((entry) => isWorkOrderSlaMissingStatus(entry.slaStatus));
+}
+
+function getOneMinuteMttrEntries(model) {
+    if (!model) return [];
+    return model.entries.filter(isOneMinuteMttrEntry);
+}
+
+function entryMatchesSlaStatusFilter(entry, value) {
+    if (value === "all") return true;
+    if (value === "Missing Data") return isWorkOrderSlaMissingStatus(entry.slaStatus);
+    return entry.slaStatus === value;
+}
+
+function getFilteredMissingDataEntries(model) {
+    if (!model) return [];
+    const f = missingDataFilters;
+    const term = f.search.trim().toLowerCase();
+    // Default scope is missing-data rows, but the SLA Status filter can broaden it.
+    const base = f.slaStatus === "all" || !["all", "Missing Data"].includes(f.slaStatus)
+        ? model.entries
+        : getMissingDataEntries(model);
+    return base.filter((entry) => {
+        if (!entryMatchesSlaStatusFilter(entry, f.slaStatus)) return false;
+        if (f.severity !== "all" && entry.severity.key !== f.severity) return false;
+        if (f.fieldType !== "all" && classifyMissingFieldType(entry) !== f.fieldType) return false;
+        if (f.machineGroup !== "all" && getSlaMachineGroup(entry.row) !== f.machineGroup) return false;
+        const status = getCleansingRecord(getCleansingKey(entry)).cleansingStatus;
+        if (f.cleared === "open" && isClearedStatus(status)) return false;
+        if (f.cleared === "cleared" && !isClearedStatus(status)) return false;
+        if (term) {
+            const hay = [entry.id, entry.requestId, entry.equipmentName, getMachineAssetId(entry.row), getMrDescription(entry.row)].join(" ").toLowerCase();
+            if (!hay.includes(term)) return false;
+        }
+        return true;
+    });
+}
+
+function populateMissingDataFilters(model) {
+    const select = document.getElementById("missing-data-group-filter");
+    if (!select || !model) return;
+    const groups = [...new Set(model.entries.map((entry) => getSlaMachineGroup(entry.row)).filter(Boolean))].sort();
+    const current = missingDataFilters.machineGroup;
+    select.innerHTML = `<option value="all">All Machine Groups</option>` +
+        groups.map((group) => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join("");
+    select.value = groups.includes(current) ? current : "all";
+    missingDataFilters.machineGroup = select.value;
+}
+
+function syncMissingDataFilterControls() {
+    const map = {
+        "missing-data-severity-filter": missingDataFilters.severity,
+        "missing-data-fieldtype-filter": missingDataFilters.fieldType,
+        "missing-data-status-filter": missingDataFilters.slaStatus,
+        "missing-data-group-filter": missingDataFilters.machineGroup,
+        "missing-data-cleared-filter": missingDataFilters.cleared,
+        "missing-data-search": missingDataFilters.search,
+    };
+    Object.entries(map).forEach(([id, value]) => {
+        const el = document.getElementById(id);
+        if (el && el.value !== value) el.value = value;
+    });
+}
+
+function renderMissingDataRow(entry) {
+    const v = missingEntryView(entry);
+    const statusOptions = CLEANSING_STATUS_OPTIONS
+        .map((opt) => `<option value="${escapeHtml(opt)}"${opt === v.cleansingStatus ? " selected" : ""}>${escapeHtml(opt)}</option>`)
+        .join("");
+    return `
+        <tr class="${v.cleared ? "cleansing-cleared-row" : ""}">
+            <td><div class="cell-title">${escapeHtml(v.woId)}</div></td>
+            <td>${escapeHtml(v.mrId || "--")}</td>
+            <td>${escapeHtml(v.equipment)}</td>
+            <td>${escapeHtml(v.assetId)}</td>
+            <td>${escapeHtml(v.machineGroup)}</td>
+            <td>
+                <div class="cell-title">${escapeHtml(v.severityLabel)}</div>
+                ${v.severityRaw ? `<div class="cell-sub">${escapeHtml(v.severityRaw)}</div>` : ""}
+            </td>
+            <td>${escapeHtml(v.created)}</td>
+            <td>${escapeHtml(v.actualStart)}</td>
+            <td>${escapeHtml(v.actualEnd)}</td>
+            <td>${escapeHtml(v.duration)}</td>
+            <td><span class="missing-field-tag">${escapeHtml(v.missingFieldType)}</span></td>
+            <td><span class="wo-response-status ${escapeHtml(getSlaStatusTone(v.slaStatus))}">${escapeHtml(v.slaStatus)}</span></td>
+            <td>${escapeHtml(v.openAge)}</td>
+            <td>${escapeHtml(v.completionDelay)}</td>
+            <td class="cleansing-desc-cell" title="${escapeHtml(v.description)}">${escapeHtml(v.description)}</td>
+            <td><select class="cleansing-input cleansing-status-select" data-cleansing-key="${escapeHtml(v.key)}" data-cleansing-field="cleansingStatus" aria-label="Cleansing status">${statusOptions}</select></td>
+            <td><input type="text" class="cleansing-input cleansing-text" data-cleansing-key="${escapeHtml(v.key)}" data-cleansing-field="remark" value="${escapeHtml(v.remark)}" placeholder="Add remark"></td>
+            <td><input type="text" class="cleansing-input cleansing-text" data-cleansing-key="${escapeHtml(v.key)}" data-cleansing-field="followUpAction" value="${escapeHtml(v.followUpAction)}" placeholder="Action"></td>
+        </tr>`;
+}
+
+function renderMissingDataDrilldown() {
+    const body = document.getElementById("missing-data-body");
+    const countNode = document.getElementById("missing-data-count");
+    if (!body) return;
+    const model = lastWorkOrderSlaModel;
+    populateMissingDataFilters(model);
+    syncMissingDataFilterControls();
+    if (!model) {
+        body.innerHTML = `<tr><td colspan="18" class="empty-cell">Open the SLA Compliance section to load work-order data.</td></tr>`;
+        if (countNode) countNode.textContent = "--";
+        return;
+    }
+    if (!window.missingDataPage) window.missingDataPage = 0;
+    const MISSING_PAGE_SIZE = 25;
+    const entries = getFilteredMissingDataEntries(model);
+    const totalPages = Math.ceil(entries.length / MISSING_PAGE_SIZE) || 1;
+    if (window.missingDataPage >= totalPages) window.missingDataPage = 0;
+    const pageStart = window.missingDataPage * MISSING_PAGE_SIZE;
+    const pageEntries = entries.slice(pageStart, pageStart + MISSING_PAGE_SIZE);
+    if (countNode) {
+        const missingAll = getMissingDataEntries(model);
+        const clearedCount = missingAll.filter((e) => isClearedStatus(getCleansingRecord(getCleansingKey(e)).cleansingStatus)).length;
+        countNode.textContent = `${fmtNumber(entries.length)} shown | ${fmtNumber(missingAll.length)} total missing-data records (${fmtNumber(clearedCount)} cleared)`;
+    }
+    const paginationBar = document.getElementById("missing-data-pagination");
+    if (paginationBar) {
+        paginationBar.innerHTML = entries.length <= MISSING_PAGE_SIZE ? "" : `
+            <button type="button" class="page-btn" id="md-prev" ${window.missingDataPage === 0 ? "disabled" : ""}>&#8592; Prev</button>
+            <span class="page-info">Page ${window.missingDataPage + 1} / ${totalPages} &nbsp;&bull;&nbsp; ${fmtNumber(entries.length)} records</span>
+            <button type="button" class="page-btn" id="md-next" ${window.missingDataPage >= totalPages - 1 ? "disabled" : ""}>Next &#8594;</button>`;
+    }
+    body.innerHTML = pageEntries.length
+        ? pageEntries.map(renderMissingDataRow).join("")
+        : `<tr><td colspan="18" class="empty-cell">No records match the current cleansing filters.</td></tr>`;
+}
+
+function openMissingDataDrilldownForSeverity(severityKey) {
+    missingDataFilters = { severity: severityKey || "all", fieldType: "all", slaStatus: "Missing Data", machineGroup: "all", search: "", cleared: "all" };
+    const card = document.getElementById("missing-data-drilldown");
+    if (card && card.tagName === "DETAILS") card.open = true;
+    renderMissingDataDrilldown();
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// ── Excel exports (SheetJS) ──────────────────────────────────────────────────
+const MISSING_LINE_HEADERS = ["WO ID", "MR ID", "Equipment / Asset Name", "Asset ID", "Machine Group", "Severity / Priority", "Created Date", "Actual Start Date", "Actual End Date", "Actual Duration", "Missing Field Type", "SLA Status", "Open Age", "Completion Delay", "Description", "Cleansing Status", "Remark", "Follow-up Action"];
+const ONE_MIN_MTTR_HEADERS = ["WO ID", "MR ID", "Equipment / Asset Name", "Asset ID", "Machine Group", "Severity", "Actual Start Date", "Actual End Date", "Duration", "Description", "Cleansing Status", "Remark", "Follow-up Action"];
+
+function missingLineItemRow(entry) {
+    const v = missingEntryView(entry);
+    return [v.woId, v.mrId || "", v.equipment, v.assetId, v.machineGroup, [v.severityLabel, v.severityRaw].filter(Boolean).join(" / "), v.created, v.actualStart, v.actualEnd, v.duration, v.missingFieldType, v.slaStatus, v.openAge, v.completionDelay, v.description, v.cleansingStatus, v.remark, v.followUpAction];
+}
+
+function oneMinMttrRow(entry) {
+    const v = missingEntryView(entry);
+    return [v.woId, v.mrId || "", v.equipment, v.assetId, v.machineGroup, v.severityLabel, v.actualStart, v.actualEnd, v.duration, v.description, v.cleansingStatus, v.remark, v.followUpAction];
+}
+
+function buildSlaMissingSummary(model) {
+    const header = ["Severity", "Total WO", "Valid SLA Records", "Missing Data Count", "Data Completeness %", "Met Target", "Late", "Open Overdue", "SLA % based on valid records only"];
+    const rows = model.severityRows.filter((r) => r.total > 0).map((r) => [
+        r.severity.label, r.total, r.validCount, r.missingData,
+        r.total ? exportPercent((r.validCount / r.total) * 100) : "",
+        r.metTarget, r.late, r.openOverdue,
+        r.slaPct === null ? "N/A" : exportPercent(r.slaPct),
+    ]);
+    rows.push([
+        "TOTAL", model.totalRows, model.validCount, model.missingData,
+        model.totalRows ? exportPercent((model.validCount / model.totalRows) * 100) : "",
+        model.metTarget, model.late, model.openOverdue,
+        model.overallCompliance === null ? "N/A" : exportPercent(model.overallCompliance),
+    ]);
+    return { header, rows };
+}
+
+function isOpenFollowupStatus(status) {
+    return status === "Open" || status === "Checking";
+}
+
+function setMissingDataExportStatus(message, tone = "") {
+    const node = document.getElementById("missing-data-export-status");
+    if (!node) return;
+    node.textContent = message || "";
+    node.className = `missing-data-export-status${tone ? ` ${tone}` : ""}`;
+}
+
+// Export exactly the records currently shown in the Missing Data Drill-down table
+// (respecting all active filters: severity, field type, SLA status, machine group,
+// cleared toggle, and search). Styled to match the Machine Explorer export.
+function exportDataCleansingTracker() {
+    if (typeof XLSX === "undefined") { setMissingDataExportStatus("SheetJS not loaded yet — please wait and retry.", "error"); return; }
+    const model = lastWorkOrderSlaModel;
+    if (!model) { setMissingDataExportStatus("No SLA data loaded yet — open the SLA Compliance section first.", "error"); return; }
+
+    // Respect all active filters — export exactly what is visible in the table
+    const entries = getFilteredMissingDataEntries(model);
+    if (!entries.length) { setMissingDataExportStatus("No records match the current filters — nothing to export.", "error"); return; }
+
+    // ── Style helpers (matching Machine Explorer export) ─────────────────────
+    const solid = (rgb) => ({ patternType: "solid", fgColor: { rgb }, bgColor: { rgb } });
+    const fnt = (rgb, bold = false) => ({ color: { rgb }, bold, sz: 9, name: "Calibri" });
+    const aln = (h = "left", wrap = false) => ({ horizontal: h, vertical: "middle", wrapText: wrap });
+    const mk = (fillRgb, textRgb, bold = false, h = "left") => ({
+        font: fnt(textRgb, bold),
+        fill: solid(fillRgb),
+        alignment: aln(h),
+    });
+    const HEADER = {
+        font: { color: { rgb: "FFFFFF" }, bold: true, sz: 9, name: "Calibri" },
+        fill: solid("0F766E"),
+        alignment: aln("center", true),
+        border: { bottom: { style: "medium", color: { rgb: "0D5C56" } } },
+    };
+    const STRIPE = [mk("FFFFFF", "1E293B"), mk("F0FDF8", "1E293B")];
+    const cs = (ws, r, c, style) => { const addr = XLSX.utils.encode_cell({ r, c }); if (ws[addr]) ws[addr].s = style; };
+
+    // Missing-field-type badge colour
+    const fieldTypeStyle = (ft) => {
+        if (ft === "Missing Actual Start" || ft === "Missing Actual End") return mk("FEE2E2", "991B1B", true);
+        if (ft === "Invalid Date") return mk("FFEDD5", "9A3412", true);
+        if (ft === "Missing Asset") return mk("EDE9FE", "4C1D95", true);
+        return mk("FEF3C7", "92400E");
+    };
+    const slaStatusStyle = (s) => {
+        if (s === "Open Overdue") return mk("FEE2E2", "991B1B", true, "center");
+        if (s === "Late")         return mk("FFEDD5", "9A3412", true, "center");
+        if (s === "Missing Data" || s === "Missing Start Date" || s === "Missing End Date")
+            return mk("F1F5F9", "64748B", false, "center");
+        return mk("D1FAE5", "065F46", false, "center");
+    };
+    const cleansingStyle = (s) => {
+        if (s === "Open")     return mk("FEE2E2", "991B1B", false);
+        if (s === "Checking") return mk("FEF3C7", "92400E", false);
+        if (CLEANSING_CLEARED_STATUSES.has(s)) return mk("D1FAE5", "065F46", true);
+        return mk("F1F5F9", "475569");
+    };
+    const sevStyle = (sev) => {
+        const s = String(sev || "").trim();
+        if (s.startsWith("S1")) return mk("FEE2E2", "991B1B", true, "center");
+        if (s.startsWith("S2")) return mk("FFEDD5", "9A3412", true, "center");
+        if (s.startsWith("S3")) return mk("FEF9C3", "713F12", false, "center");
+        if (s.startsWith("S4")) return mk("DBEAFE", "1E40AF", false, "center");
+        return mk("F1F5F9", "64748B", false, "center");
+    };
+
+    // ── Build the single sheet ───────────────────────────────────────────────
+    // Columns ordered: identity → SLA context → missing info → narrative → review
+    const HEADERS = [
+        "WO ID", "MR ID",                                             // 0-1  identity
+        "Equipment / Asset Name", "Asset ID", "Machine Group",        // 2-4  asset
+        "Severity / Priority",                                         // 5    priority
+        "Created Date", "Actual Start", "Actual End",                 // 6-8  timeline
+        "Actual Duration", "Open Age",                                 // 9-10 time in flight
+        "Missing Field Type", "SLA Status",                           // 11-12 issue
+        "Completion Delay",                                            // 13
+        "Description", "Translated Description",                      // 14-15 narrative
+        "Remark", "Follow-up Action",                                  // 16-17 review layer
+    ];
+    const colWidths = [18, 15, 34, 16, 24, 14, 20, 20, 20, 14, 12, 22, 16, 14, 52, 52, 30, 30];
+
+    const data = [HEADERS];
+    entries.forEach((entry) => {
+        const v = missingEntryView(entry);
+        data.push([
+            v.woId, v.mrId || "",
+            v.equipment, v.assetId, v.machineGroup,
+            v.severityLabel,
+            v.created, v.actualStart, v.actualEnd,
+            v.duration, v.openAge,
+            v.missingFieldType, v.slaStatus,
+            v.completionDelay,
+            v.description, v.translatedDescription,
+            v.remark, v.followUpAction,
+        ]);
+    });
+
+    const ws = XLSX.utils.aoa_to_sheet(data);
+    ws["!cols"]  = colWidths.map((w) => ({ wch: w }));
+    ws["!rows"]  = [{ hpt: 34 }];
+    ws["!autofilter"] = { ref: XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: data.length - 1, c: HEADERS.length - 1 } }) };
+
+    // Style header row
+    HEADERS.forEach((_, c) => cs(ws, 0, c, HEADER));
+
+    // Style data rows
+    // Col indices after removing Cleansing Status and adding Translated Description:
+    // 5=Severity  11=Missing Field Type  12=SLA Status  (Cleansing Status removed)
+    entries.forEach((entry, i) => {
+        const r = i + 1;
+        const v = missingEntryView(entry);
+        HEADERS.forEach((_, c) => cs(ws, r, c, STRIPE[i % 2]));   // base stripe
+        cs(ws, r, 5,  sevStyle(v.severityLabel));
+        cs(ws, r, 11, fieldTypeStyle(v.missingFieldType));
+        cs(ws, r, 12, slaStatusStyle(v.slaStatus));
+    });
+
+    // ── File name encodes active filters so it's self-documenting ────────────
+    const f = missingDataFilters;
+    const sevPart   = f.severity !== "all"   ? `_${f.severity}` : "";
+    const typePart  = f.fieldType !== "all"  ? `_${f.fieldType.replace(/\s+/g, "-")}` : "";
+    const grpPart   = f.machineGroup !== "all" ? `_${f.machineGroup.replace(/[^a-zA-Z0-9]/g, "-")}` : "";
+    const clearPart = f.cleared !== "all"    ? `_${f.cleared}` : "";
+    const datePart  = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const fileName  = `Missing_Data_Review${sevPart}${typePart}${grpPart}${clearPart}_${datePart}.xlsx`;
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Missing Data Review");
+    XLSX.writeFile(wb, fileName);
+
+    setMissingDataExportStatus(`Exported ${fmtNumber(entries.length)} records → ${fileName}`, "success");
+}
+
 function renderWorkOrderResponseSection(rows = []) {
     const sourceRows = getWorkOrderSlaSourceRows(rows);
     populateWorkOrderSlaFilters(sourceRows);
     const scopedRows = getScopedWorkOrderSlaRows(sourceRows);
     const model = buildWorkOrderSlaModel(scopedRows, getWorkOrderSlaReferenceDate());
+    lastWorkOrderSlaModel = model;
     const scope = getWorkOrderSlaScopeFilters();
     const usingAllYearSource = hasWorkOrderSlaFields(allWorkOrderRowsCache) && sourceRows === allWorkOrderRowsCache;
     const subtitleParts = [usingAllYearSource ? "Using all-year work-order source" : `Using ${getPeriodLabel(downtimePayload?.meta || {})} work-order rows`];
@@ -4738,8 +5622,13 @@ function renderWorkOrderResponseSection(rows = []) {
     renderWorkOrderSlaAverageTable("wo-sla-response-body", model.severityRows, "response");
     renderWorkOrderSlaAverageTable("wo-sla-completion-body", model.severityRows, "completion");
     renderWorkOrderSlaDrilldownTable(model);
+    renderMissingDataDrilldown();
     renderOpenSeveritySection(scopedRows);
-    renderPreventiveCorrectiveSection(scopedRows);
+    // The Preventive/Corrective section has its OWN year/month filter and the
+    // analysis chart its own financial-year selector, so feed it the full all-year
+    // source rows (NOT the SLA-scoped rows) — otherwise the SLA year filter hides
+    // every financial year except the SLA-selected one (past-year data vanished).
+    renderPreventiveCorrectiveSection(sourceRows);
     syncTopicMirrors();
 }
 
@@ -5224,7 +6113,7 @@ function renderMachineExplorerGroupCards(rows = []) {
             machineExplorerRefrigExpandedCondensers = new Set();
             const groupSelect = document.getElementById("machine-explorer-group");
             if (groupSelect) groupSelect.value = machineExplorerSelectedGroup;
-            renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+            renderMachineExplorer(getCategoryScopedAllRows());
         });
     });
 }
@@ -5306,7 +6195,7 @@ function renderRefrigSubgroupSection(allRows) {
             machineExplorerRefrigSubgroup = btn.dataset.refrigSubgroup || "";
             machineExplorerRefrigCondenserGroupId = "";
             machineExplorerSelectedAssetId = "";
-            renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+            renderMachineExplorer(getCategoryScopedAllRows());
         });
     });
 }
@@ -5487,7 +6376,7 @@ function renderRefrigCdeDetail(rows) {
             <td>${renderBadgeCell("status", getMrStatus(row))}</td>
             <td>${renderBadgeCell("service", getMrServiceLevel(row))}</td>
             <td class="description-cell">${escapeHtml(description || "--")}</td>
-            <td class="description-cell">${escapeHtml(row.translated_description || description || "--")}</td>
+            <td class="description-cell" title="${escapeHtml(row.translated_description || "")}">${escapeHtml(row.translated_description && row.translated_description !== description ? row.translated_description : "--")}</td>
             <td>${escapeHtml(getMrCreatedBy(row))}</td>
             <td>${escapeHtml(getMrStartedBy(row))}</td>
             <td>${escapeHtml(raised ? fmtDateTime(raised) : "--")}</td>
@@ -5579,7 +6468,7 @@ function renderMachineExplorerAssetSummary(assetRows = []) {
     body.querySelectorAll("[data-asset-id]").forEach((row) => {
         const selectAsset = () => {
             machineExplorerSelectedAssetId = row.dataset.assetId || "";
-            renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+            renderMachineExplorer(getCategoryScopedAllRows());
         };
         row.addEventListener("click", selectAsset);
         row.addEventListener("keydown", (event) => {
@@ -5737,8 +6626,8 @@ function renderMachineHistoryRow(row, index) {
             <td>${renderBadgeCell("status", getMrStatus(row))}</td>
             <td>${renderBadgeCell("service", getMrServiceLevel(row))}</td>
             <td>${renderBadgeCell("wo-type", row.job_trade || row.maintenance_job_type || "")}</td>
-            <td class="description-cell">${escapeHtml(description || "--")}</td>
-            <td class="description-cell">${escapeHtml(row.translated_description || description || "--")}</td>
+            <td class="description-cell" title="${escapeHtml(description || "")}">${escapeHtml(description || "--")}</td>
+            <td class="description-cell" title="${escapeHtml(row.translated_description || "")}">${escapeHtml(row.translated_description && row.translated_description !== description ? row.translated_description : "--")}</td>
             <td>${escapeHtml(getMrStartedBy(row))}</td>
             <td>${escapeHtml(getMrCreatedBy(row))}</td>
             <td>${escapeHtml(raised ? fmtDateTime(raised) : "--")}</td>
@@ -5877,7 +6766,7 @@ function exportMachineExplorerData() {
         alert("Export library not loaded. Please refresh the page and try again.");
         return;
     }
-    const rows = allWorkOrderRowsCache || getFallbackAllWorkOrderRows();
+    const rows = getCategoryScopedAllRows();
 
     // Resolve history rows (same as what's displayed in section 3)
     let historyRows;
@@ -6700,8 +7589,14 @@ function getAssetMetaFromLookup(assetLookup, assetId) {
 function getMtbfRecordCriticality(record, assetLookup) {
     const meta = getAssetMetaFromLookup(assetLookup, record?.asset_id);
     const raw = String(meta?.criticality || record?.criticality || record?.normalized_criticality || record?.raw_criticality || "").trim();
+    // Check asset-master criticality first; fall back to machine-group name.
+    if (raw && raw !== "Non-Critical / Facility" && raw !== "Non-Critical") {
+        return PRODUCTION_CRITICAL_LABELS.has(normalizeClassification(raw)) ? "Critical" : "Non-Critical / Facility";
+    }
+    const machineGroup = String(meta?.machine_name || record?.machine_group || "").trim();
+    if (CRITICAL_MACHINE_GROUPS.has(machineGroup)) return "Critical";
     if (!raw) return "";
-    return PRODUCTION_CRITICAL_LABELS.has(normalizeClassification(raw)) ? "Critical" : "Non-Critical / Facility";
+    return "Non-Critical / Facility";
 }
 
 function matchesMtbfCriticalityFilter(record, criticalityFilter, assetLookup) {
@@ -6737,7 +7632,7 @@ function getSelectedMtbfDateRange() {
 }
 
 function getAllWorkOrdersForMtbf() {
-    if (mtbfHistoryPayload?.work_orders?.length) return mtbfHistoryPayload.work_orders;
+    if (mtbfHistoryPayload?.work_orders?.length) return applyCategoryFilter(mtbfHistoryPayload.work_orders);
     return getWorkOrderRows(getManagement());
 }
 
@@ -6869,29 +7764,92 @@ function syncMtbfTrendModeLabels() {
 }
 
 function computeMtbfFromWorkOrders(wos) {
-    // Per-asset MTBF: average gap (hrs) between consecutive work orders
+    // Per-asset MTBF — strict end-to-start only (no start-to-start fallback).
+    // All excluded pairs are collected in the module-level mtbfExcludedPairs array
+    // so the MTBF Data Reliability Review table can show them.
+    mtbfExcludedPairs = [];
+
     const byAsset = new Map();
     wos.forEach((wo) => {
-        const id = wo.asset_id || "";
-        if (!id || id === "WO-Asset") return;
+        const id = String(wo.asset_id || "").trim();
+        if (!id || id.toUpperCase() === "WO-ASSET" || id === "--") return;
+        if (isMtbfGeneralAreaWo(wo)) return;            // skip area/location placeholders
         if (!byAsset.has(id)) byAsset.set(id, []);
         byAsset.get(id).push(wo);
     });
+
     const assetLookup = buildAssetListLookup();
     const results = [];
+
     byAsset.forEach((assetWos, assetId) => {
+        // Sort by actual start date
         const sorted = [...assetWos].sort((a, b) => {
-            const ta = new Date(a.start_time || a.actual_start_time || 0).getTime();
-            const tb = new Date(b.start_time || b.actual_start_time || 0).getTime();
-            return ta - tb;
+            const ta = getMtbfWorkOrderStart(a);
+            const tb = getMtbfWorkOrderStart(b);
+            return (ta ? ta.getTime() : 0) - (tb ? tb.getTime() : 0);
         });
+
         const gaps = [];
+
         for (let i = 1; i < sorted.length; i++) {
-            const t1 = new Date(sorted[i - 1].end_time || sorted[i - 1].start_time || 0).getTime();
-            const t2 = new Date(sorted[i].start_time || sorted[i].actual_start_time || 0).getTime();
-            const gapHours = (t2 - t1) / 3600000;
-            if (gapHours > 0) gaps.push(gapHours);
+            const prev = sorted[i - 1];
+            const next = sorted[i];
+            const prevEnd   = getMtbfWorkOrderEnd(prev);    // strict — null if no actual end
+            const nextStart = getMtbfWorkOrderStart(next);
+            const prevStart = getMtbfWorkOrderStart(prev);
+
+            const pairKey = `${assetId}|${prev.work_order_id || i - 1}|${next.work_order_id || i}`;
+            const baseExclusion = {
+                assetId,
+                assetName: prev.asset_display_name || prev.machine_group || assetId,
+                prevWoId: prev.work_order_id || "--",
+                prevMrId: prev.request_id || prev.maintenance_order_id || "--",
+                prevActualStart: prevStart ? fmtDateTime(prevStart) : "--",
+                prevActualEnd: prevEnd ? fmtDateTime(prevEnd) : "--",
+                nextWoId: next.work_order_id || "--",
+                nextMrId: next.request_id || next.maintenance_order_id || "--",
+                nextActualStart: nextStart ? fmtDateTime(nextStart) : "--",
+                calculatedGap: "--",
+                pairKey,
+            };
+
+            // Exclusion: previous WO has no actual end date
+            if (!prevEnd) {
+                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Missing Previous Actual End" });
+                continue;
+            }
+            // Exclusion: next WO has no actual start date
+            if (!nextStart) {
+                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Missing Next Actual Start" });
+                continue;
+            }
+
+            const gapMs    = nextStart.getTime() - prevEnd.getTime();
+            const gapHours = gapMs / 3600000;
+
+            baseExclusion.calculatedGap = gapHours >= 1
+                ? fmtDaysHours(gapHours)
+                : `${Math.round(gapHours * 60)} min`;
+
+            // Exclusion: negative or overlapping gap
+            if (gapHours <= 0) {
+                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Negative or overlapping gap" });
+                continue;
+            }
+            // Exclusion: effectively zero (≤ 1 min)
+            if (gapHours < MTBF_MIN_GAP_HOURS) {
+                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Suspicious short gap (≤ 1 min)" });
+                continue;
+            }
+
+            // Include gap — flag if suspiciously short (< 1 hour) but it is a valid end-to-start gap
+            const isSuspicious = gapHours < MTBF_SUSPICIOUS_GAP_HOURS;
+            if (isSuspicious) {
+                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Suspicious short gap (< 1 h) — included in MTBF but flagged for review" });
+            }
+            gaps.push(gapHours);
         }
+
         const avgMtbf = gaps.length > 0 ? gaps.reduce((a, b) => a + b, 0) / gaps.length : null;
         const meta = assetLookup.get(assetId) || {};
         results.push({
@@ -6901,17 +7859,65 @@ function computeMtbfFromWorkOrders(wos) {
             average_mtbf_hours: avgMtbf,
             work_order_count: sorted.length,
             valid_mtbf_gap_count: gaps.length,
+            excluded_gap_count: sorted.length > 1 ? (sorted.length - 1 - gaps.length) : 0,
         });
     });
+
     return results;
 }
 
-function getMtbfWorkOrderStart(wo) {
-    return parseDateValue(wo.start_time || wo.actual_start_time || wo.maintenance_start_time);
+// MTBF constants
+const MTBF_SUSPICIOUS_GAP_HOURS = 1;   // gaps < 1 h are flagged as suspicious but still included if valid end-to-start
+const MTBF_MIN_GAP_HOURS       = 1 / 60; // absolute floor — gaps <= 1 min are excluded (effectively zero)
+
+// General-area pattern: "Production High Risk", "Work Area", etc. are
+// area/location records, not specific machines — MTBF between them is meaningless.
+const MTBF_GENERAL_AREA_RE = /\b(risk\s*area|work\s*area|high\s+risk|low\s+risk|medium\s+risk|general\s+area|production\s+area|low\s+risk\s+area|high\s+risk\s+area)\b/i;
+
+function isMtbfGeneralAreaWo(wo) {
+    const name = [wo.machine_group, wo.asset_display_name, wo.machine_name, wo.raw_functional_location, wo.location]
+        .filter(Boolean).join(" ");
+    return MTBF_GENERAL_AREA_RE.test(name);
 }
 
+// In-memory store of excluded MTBF pairs; populated each time computeMtbfFromWorkOrders runs.
+let mtbfExcludedPairs = [];
+let mtbfExcludedPairsReview = loadMtbfExcludedPairsReview();
+
+const MTBF_RELIABILITY_REVIEW_KEY = "downtime.mtbfReliabilityReview.v1";
+const MTBF_REVIEW_STATUS_OPTIONS   = ["Open", "Checking", "Confirmed Issue", "Valid Record", "To Exclude", "Corrected"];
+
+function loadMtbfExcludedPairsReview() {
+    if (typeof window === "undefined" || !window.localStorage) return {};
+    try {
+        const p = JSON.parse(window.localStorage.getItem(MTBF_RELIABILITY_REVIEW_KEY) || "{}");
+        return p && typeof p === "object" && !Array.isArray(p) ? p : {};
+    } catch { return {}; }
+}
+function saveMtbfExcludedPairsReview() {
+    if (typeof window === "undefined" || !window.localStorage) return;
+    try { window.localStorage.setItem(MTBF_RELIABILITY_REVIEW_KEY, JSON.stringify(mtbfExcludedPairsReview)); }
+    catch (e) { console.warn("MTBF review save failed:", e); }
+}
+function getMtbfReviewRecord(key) {
+    const r = mtbfExcludedPairsReview[key] || {};
+    return { reviewStatus: MTBF_REVIEW_STATUS_OPTIONS.includes(r.reviewStatus) ? r.reviewStatus : "Open", remark: String(r.remark || ""), followUpAction: String(r.followUpAction || "") };
+}
+function setMtbfReviewField(key, field, value) {
+    const prev = getMtbfReviewRecord(key);
+    const next = { ...prev, [field]: value };
+    if (next.reviewStatus === "Open" && !next.remark.trim() && !next.followUpAction.trim()) delete mtbfExcludedPairsReview[key];
+    else mtbfExcludedPairsReview[key] = next;
+    saveMtbfExcludedPairsReview();
+}
+
+function getMtbfWorkOrderStart(wo) {
+    return parseDateValue(wo.actual_start_time || wo.maintenance_start_time || wo.start_time);
+}
+
+// STRICT: no fallback to start_time — end must be an actual recorded end date.
 function getMtbfWorkOrderEnd(wo) {
-    return parseDateValue(wo.end_time || wo.actual_end_time || wo.maintenance_end_time || wo.start_time || wo.actual_start_time);
+    return parseDateValue(wo.actual_end_time || wo.maintenance_end_time || wo.end_time);
 }
 
 function getMtbfTrendBucketMode(range, pointDates) {
@@ -7018,7 +8024,68 @@ function getMtbfAssetRowsForPeriod() {
         if (year) return t.startsWith(year);
         return true;
     });
-    return computeMtbfFromWorkOrders(filtered);
+    const rows = computeMtbfFromWorkOrders(filtered);
+    renderMtbfReliabilityReview();
+    return rows;
+}
+
+function renderMtbfReliabilityReview() {
+    const body = document.getElementById("mtbf-reliability-body");
+    const countEl = document.getElementById("mtbf-reliability-count");
+    if (!body) return;
+
+    const filterVal = document.getElementById("mtbf-reliability-filter")?.value || "all";
+    const searchVal = (document.getElementById("mtbf-reliability-search")?.value || "").trim().toLowerCase();
+
+    const pairs = mtbfExcludedPairs.filter((p) => {
+        if (filterVal !== "all" && !p.exclusionReason.toLowerCase().includes(filterVal.toLowerCase())) return false;
+        if (searchVal) {
+            const hay = [p.assetId, p.assetName, p.prevWoId, p.prevMrId, p.nextWoId, p.nextMrId, p.exclusionReason].join(" ").toLowerCase();
+            if (!hay.includes(searchVal)) return false;
+        }
+        return true;
+    });
+
+    if (countEl) countEl.textContent = `${fmtNumber(pairs.length)} of ${fmtNumber(mtbfExcludedPairs.length)} excluded / flagged pairs`;
+
+    if (!pairs.length) {
+        body.innerHTML = `<tr><td colspan="14" class="empty-cell">${
+            mtbfExcludedPairs.length
+                ? "No pairs match the current filter."
+                : "No excluded pairs — MTBF data is clean, or MTBF has not been computed yet."
+        }</td></tr>`;
+        return;
+    }
+
+    body.innerHTML = pairs.slice(0, 500).map((p) => {
+        const rec = getMtbfReviewRecord(p.pairKey);
+        const isSuspicious = p.exclusionReason.includes("suspicious") || p.exclusionReason.includes("Suspicious");
+        const rowCls = isSuspicious ? "" : "cleansing-cleared-row";   // highlight hard-excluded rows
+        const statusOpts = MTBF_REVIEW_STATUS_OPTIONS
+            .map((o) => `<option value="${escapeHtml(o)}"${o === rec.reviewStatus ? " selected" : ""}>${escapeHtml(o)}</option>`).join("");
+        return `
+            <tr class="${rowCls}">
+                <td>${escapeHtml(p.assetId)}</td>
+                <td>${escapeHtml(p.assetName)}</td>
+                <td>${escapeHtml(p.prevWoId)}</td>
+                <td>${escapeHtml(p.prevMrId)}</td>
+                <td>${escapeHtml(p.prevActualStart)}</td>
+                <td>${escapeHtml(p.prevActualEnd)}</td>
+                <td>${escapeHtml(p.nextWoId)}</td>
+                <td>${escapeHtml(p.nextMrId)}</td>
+                <td>${escapeHtml(p.nextActualStart)}</td>
+                <td>${escapeHtml(p.calculatedGap)}</td>
+                <td><span class="missing-field-tag">${escapeHtml(p.exclusionReason)}</span></td>
+                <td><select class="cleansing-input cleansing-status-select mtbf-review-input"
+                        data-mtbf-key="${escapeHtml(p.pairKey)}" data-mtbf-field="reviewStatus">${statusOpts}</select></td>
+                <td><input type="text" class="cleansing-input cleansing-text mtbf-review-input"
+                        data-mtbf-key="${escapeHtml(p.pairKey)}" data-mtbf-field="remark"
+                        value="${escapeHtml(rec.remark)}" placeholder="Remark"></td>
+                <td><input type="text" class="cleansing-input cleansing-text mtbf-review-input"
+                        data-mtbf-key="${escapeHtml(p.pairKey)}" data-mtbf-field="followUpAction"
+                        value="${escapeHtml(rec.followUpAction)}" placeholder="Action"></td>
+            </tr>`;
+    }).join("");
 }
 
 function filterMtbfTrend(trend) {
@@ -7893,7 +8960,7 @@ function getFilteredMachineGroups() {
     const month = document.getElementById("group-month-filter")?.value || "";
     const search = (document.getElementById("group-search")?.value || "").trim().toLowerCase();
 
-    return (allWorkOrderRowsCache || getWorkOrderRows(getManagement())).filter((row) => {
+    return (applyCategoryFilter(allWorkOrderRowsCache || getWorkOrderRows(getManagement()))).filter((row) => {
         const raised = getMrRaisedDate(row).date;
         if (criticality && String(row.criticality || row.normalized_criticality || "") !== criticality) return false;
         if (location && String(row.location || row.building || "") !== location) return false;
@@ -8057,7 +9124,7 @@ function renderUtilitiesTable() {
 const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 function populateFilters(management) {
-    const woRows = allWorkOrderRowsCache || getWorkOrderRows(management);
+    const woRows = applyCategoryFilter(allWorkOrderRowsCache || getWorkOrderRows(management));
     populateSelect("group-criticality-filter", [...new Set(woRows.map((row) => row.criticality || row.normalized_criticality).filter(Boolean))], "All Criticalities");
     populateSelect("group-location-filter", [...new Set(woRows.map((row) => row.location || row.building).filter(Boolean))], "All Locations");
 
@@ -8182,6 +9249,20 @@ function handlePeriodChange() {
     });
 }
 
+function handleEquipmentCategoryChange(event) {
+    // Frontend-only filter — no re-fetch needed; the page re-renders from the
+    // already-loaded rows with the category filter applied in getWorkOrderRows().
+    selectedEquipmentCategory = event?.target?.value || "all";
+    try {
+        renderDowntimePage();
+        if (document.getElementById("utilities-panel")?.classList.contains("active")) {
+            renderMachineExplorer(getCategoryScopedAllRows());
+        }
+    } catch (error) {
+        console.error("Category filter re-render failed:", error);
+    }
+}
+
 function handleDowntimeStageChange(event) {
     downtimeStageFilter = event?.target?.value || DOWNTIME_STAGE_ALL;
     resetStageScopedCaches();
@@ -8272,7 +9353,7 @@ function setPerformanceView(view) {
     });
     document.getElementById("machine-groups-panel")?.classList.toggle("active", view === "machine-groups");
     document.getElementById("utilities-panel")?.classList.toggle("active", view === "utilities");
-    if (view === "utilities") renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+    if (view === "utilities") renderMachineExplorer(getCategoryScopedAllRows());
 }
 
 function wireFilters() {
@@ -8303,6 +9384,7 @@ function wireFilters() {
     document.getElementById("custom-start")?.addEventListener("change", handlePeriodChange);
     document.getElementById("custom-end")?.addEventListener("change", handlePeriodChange);
     document.getElementById("downtime-stage-filter")?.addEventListener("change", handleDowntimeStageChange);
+    document.getElementById("downtime-category-filter")?.addEventListener("change", handleEquipmentCategoryChange);
     document.getElementById("refresh-asset-mapping-btn")?.addEventListener("click", handleAssetMappingRefresh);
 
     // Topic-panel scoped filters — only the dedicated panels respect these.
@@ -8342,59 +9424,125 @@ function wireFilters() {
     document.getElementById("mr-movement-year")?.addEventListener("change", (event) => {
         mrMovementSelectedYear = event.target.value || mrMovementSelectedYear;
         mrMovementUserSelectedYear = true;
-        renderMrMovementSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
-        renderDynamicsWorkOrderSections(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrMovementSection(getCategoryScopedAllRows());
+        renderDynamicsWorkOrderSections(getCategoryScopedAllRows());
     });
     document.getElementById("mr-carryover-filter")?.addEventListener("change", (event) => {
         mrCarryoverFilter = event.target.value || "all";
-        renderMrMovementSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrMovementSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-carryover-sort")?.addEventListener("change", (event) => {
         mrCarryoverSort = event.target.value || "duration_desc";
-        renderMrMovementSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrMovementSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-tracking-equipment")?.addEventListener("change", (event) => {
         mrTrackingEquipmentFilter = event.target.value || "all";
-        renderMrTrackingSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrTrackingSection(getCategoryScopedAllRows());
         renderWorkOrderResponseSection(getWorkOrderRows(getManagement()));
     });
     document.getElementById("mr-tracking-severity")?.addEventListener("change", (event) => {
         mrTrackingSeverityFilter = event.target.value || "all";
-        renderMrTrackingSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrTrackingSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-tracking-year")?.addEventListener("change", (event) => {
         mrTrackingSelectedYear = event.target.value || mrTrackingSelectedYear || "all";
         if (!mrTrackingSelectedMonth) mrTrackingSelectedMonth = "all";
-        renderMrTrackingSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrTrackingSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-tracking-month")?.addEventListener("change", (event) => {
         mrTrackingSelectedMonth = event.target.value || mrTrackingSelectedMonth || "all";
-        renderMrTrackingSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrTrackingSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-tracking-date-group")?.addEventListener("change", (event) => {
         mrTrackingDateGrouping = event.target.value || "monthly";
-        renderMrTrackingSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMrTrackingSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-machine-filter")?.addEventListener("change", (event) => {
         mrMachineFilter = event.target.value || "all";
-        renderMachineMrSection(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineMrSection(getCategoryScopedAllRows());
     });
     document.getElementById("wo-sla-year-filter")?.addEventListener("change", (event) => {
         woSlaYearFilter = event.target.value || "all";
         woSlaMonthFilter = "all";
-        renderWorkOrderResponseSection(allWorkOrderRowsCache || getWorkOrderRows(getManagement()));
+        renderWorkOrderResponseSection(applyCategoryFilter(allWorkOrderRowsCache || getWorkOrderRows(getManagement())));
     });
     document.getElementById("wo-sla-month-filter")?.addEventListener("change", (event) => {
         woSlaMonthFilter = event.target.value || "all";
-        renderWorkOrderResponseSection(allWorkOrderRowsCache || getWorkOrderRows(getManagement()));
+        renderWorkOrderResponseSection(applyCategoryFilter(allWorkOrderRowsCache || getWorkOrderRows(getManagement())));
+    });
+    // ── Missing Data Drill-down (data cleansing review) ──
+    document.getElementById("missing-data-severity-filter")?.addEventListener("change", (e) => { missingDataFilters.severity = e.target.value || "all"; renderMissingDataDrilldown(); });
+    document.getElementById("missing-data-fieldtype-filter")?.addEventListener("change", (e) => { missingDataFilters.fieldType = e.target.value || "all"; renderMissingDataDrilldown(); });
+    document.getElementById("missing-data-status-filter")?.addEventListener("change", (e) => { missingDataFilters.slaStatus = e.target.value || "all"; renderMissingDataDrilldown(); });
+    document.getElementById("missing-data-group-filter")?.addEventListener("change", (e) => { missingDataFilters.machineGroup = e.target.value || "all"; renderMissingDataDrilldown(); });
+    document.getElementById("missing-data-cleared-filter")?.addEventListener("change", (e) => { missingDataFilters.cleared = e.target.value || "all"; renderMissingDataDrilldown(); });
+    document.getElementById("missing-data-search")?.addEventListener("input", (e) => { missingDataFilters.search = e.target.value || ""; renderMissingDataDrilldown(); });
+    document.getElementById("missing-data-export-btn")?.addEventListener("click", exportDataCleansingTracker);
+    document.getElementById("missing-data-followup-export-btn")?.addEventListener("click", exportDataCleansingTracker);
+    document.getElementById("cleansing-tracker-export-btn")?.addEventListener("click", exportDataCleansingTracker);
+    const missingDataCard = document.getElementById("missing-data-drilldown");
+    if (missingDataCard) {
+        missingDataCard.addEventListener("change", (e) => {
+            const el = e.target.closest(".cleansing-input");
+            if (!el) return;
+            const prevPage = window.missingDataPage;
+            setCleansingField(el.dataset.cleansingKey, el.dataset.cleansingField, el.value);
+            if (el.dataset.cleansingField === "cleansingStatus") { window.missingDataPage = prevPage; renderMissingDataDrilldown(); }
+        });
+        // Pagination clicks (delegated)
+        missingDataCard.addEventListener("click", (e) => {
+            if (e.target.id === "md-next") { window.missingDataPage = (window.missingDataPage || 0) + 1; renderMissingDataDrilldown(); }
+            if (e.target.id === "md-prev") { window.missingDataPage = Math.max(0, (window.missingDataPage || 1) - 1); renderMissingDataDrilldown(); }
+            // Edit History tab toggle
+            if (e.target.dataset.mdTab) {
+                const tab = e.target.dataset.mdTab;
+                document.querySelectorAll(".md-tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.mdTab === tab));
+                document.getElementById("missing-data-tab-records")?.classList.toggle("hidden", tab !== "records");
+                document.getElementById("missing-data-tab-history")?.classList.toggle("hidden", tab !== "history");
+                if (tab === "history") { renderSectionEditHistory("missing-data-history-body", "missing-data"); }
+            }
+        });
+    }
+    document.getElementById("wo-sla-severity-body")?.addEventListener("click", (e) => {
+        const btn = e.target.closest("[data-missing-severity]");
+        if (!btn) return;
+        openMissingDataDrilldownForSeverity(btn.dataset.missingSeverity);
+    });
+    // Work Type Classification table
+    document.getElementById("wt-classification-card")?.addEventListener("change", (e) => {
+        const el = e.target.closest(".wt-input");
+        if (!el) return;
+        const ctx = { woId: el.dataset.wtWo, mrId: el.dataset.wtMr, equipment: el.dataset.wtEquip, machineGroup: el.dataset.wtGroup, severity: el.dataset.wtSev };
+        setWorkTypeReviewField(el.dataset.wtKey, el.dataset.wtField, el.value, ctx);
+    });
+    document.getElementById("wt-classification-card")?.addEventListener("click", (e) => {
+        if (e.target.id === "wt-next") { workTypeReviewPage++; renderWorkTypeClassificationTable(); }
+        if (e.target.id === "wt-prev") { workTypeReviewPage = Math.max(0, workTypeReviewPage - 1); renderWorkTypeClassificationTable(); }
+        if (e.target.dataset.wtTab) {
+            const tab = e.target.dataset.wtTab;
+            document.querySelectorAll(".wt-tab-btn").forEach((b) => b.classList.toggle("active", b.dataset.wtTab === tab));
+            document.getElementById("wt-tab-records")?.classList.toggle("hidden", tab !== "records");
+            document.getElementById("wt-tab-history")?.classList.toggle("hidden", tab !== "history");
+            if (tab === "history") renderSectionEditHistory("wt-review-history-body", "work-type");
+        }
+    });
+    document.getElementById("wt-filter-status")?.addEventListener("change", (e) => { workTypeReviewFilter = e.target.value || "open"; workTypeReviewPage = 0; renderWorkTypeClassificationTable(); });
+    document.getElementById("wt-search")?.addEventListener("input", (e) => { workTypeReviewSearch = e.target.value || ""; workTypeReviewPage = 0; renderWorkTypeClassificationTable(); });
+    // Global Edit History
+    document.getElementById("gh-reviewtype-filter")?.addEventListener("change", (e) => { editHistoryFilters.reviewType = e.target.value || "all"; editHistoryPage = 0; renderGlobalEditHistory(); });
+    document.getElementById("gh-group-filter")?.addEventListener("change", (e) => { editHistoryFilters.machineGroup = e.target.value || "all"; editHistoryPage = 0; renderGlobalEditHistory(); });
+    document.getElementById("gh-search")?.addEventListener("input", (e) => { editHistoryFilters.search = e.target.value || ""; editHistoryPage = 0; renderGlobalEditHistory(); });
+    document.getElementById("global-edit-history-pagination")?.addEventListener("click", (e) => {
+        if (e.target.id === "gh-next") { editHistoryPage++; renderGlobalEditHistory(); }
+        if (e.target.id === "gh-prev") { editHistoryPage = Math.max(0, editHistoryPage - 1); renderGlobalEditHistory(); }
     });
     document.getElementById("pm-cm-list-filter")?.addEventListener("change", (event) => {
         preventiveCorrectiveListFilter = event.target.value || "review";
-        renderWorkOrderResponseSection(allWorkOrderRowsCache || getWorkOrderRows(getManagement()));
+        renderWorkOrderResponseSection(applyCategoryFilter(allWorkOrderRowsCache || getWorkOrderRows(getManagement())));
     });
     document.getElementById("pm-cm-list-body")?.addEventListener("click", handlePreventiveCorrectiveReviewAction);
     // MR Comparison & Trend Analysis controls
-    const cmcRefresh = () => renderCriticalMrComparison(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+    const cmcRefresh = () => renderCriticalMrComparison(getCategoryScopedAllRows());
     document.getElementById("cmc-scope")?.addEventListener("change", (e) => { cmcScope = e.target.value || "all"; cmcRefresh(); });
     document.getElementById("cmc-mode")?.addEventListener("change", (e) => { cmcMode = e.target.value || "month"; updateCmcControlVisibility(); cmcRefresh(); });
     document.getElementById("cmc-year-view")?.addEventListener("change", (e) => { cmcYearView = e.target.value || "compare"; updateCmcControlVisibility(); cmcRefresh(); });
@@ -8416,25 +9564,25 @@ function wireFilters() {
         const btn = event.target.closest("[data-history-mode]");
         if (!btn) return;
         machineHistoryViewMode = btn.dataset.historyMode || "selected";
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-history-sort")?.addEventListener("change", (event) => {
         machineHistorySort = event.target.value || "latest_wo_mr";
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-history-year")?.addEventListener("change", (event) => {
         machineHistoryYearFilter = event.target.value || "";
         machineHistoryDateFrom = "";
         machineHistoryDateTo = "";
         syncMachineHistoryPeriodInputs();
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-history-month")?.addEventListener("change", (event) => {
         machineHistoryMonthFilter = event.target.value || "";
         machineHistoryDateFrom = "";
         machineHistoryDateTo = "";
         syncMachineHistoryPeriodInputs();
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-history-date-from")?.addEventListener("change", (event) => {
         machineHistoryDateFrom = event.target.value || "";
@@ -8442,7 +9590,7 @@ function wireFilters() {
         machineHistoryMonthFilter = "";
         normalizeMachineHistoryDateRange();
         syncMachineHistoryPeriodInputs();
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-history-date-to")?.addEventListener("change", (event) => {
         machineHistoryDateTo = event.target.value || "";
@@ -8450,15 +9598,15 @@ function wireFilters() {
         machineHistoryMonthFilter = "";
         normalizeMachineHistoryDateRange();
         syncMachineHistoryPeriodInputs();
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-history-search")?.addEventListener("input", (event) => {
         machineHistorySearch = event.target.value || "";
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("include-related-matches")?.addEventListener("change", (event) => {
         includeRelatedMatches = !!event.target.checked;
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-history-export-btn")?.addEventListener("click", () => {
         exportMachineExplorerData();
@@ -8467,13 +9615,13 @@ function wireFilters() {
         machineExplorerSelectedAssetId = event.target.value || "";
         const assetSelect = document.getElementById("machine-explorer-asset");
         if (assetSelect) assetSelect.value = machineExplorerSelectedAssetId;
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-explorer-asset")?.addEventListener("change", (event) => {
         machineExplorerSelectedAssetId = event.target.value || "";
         const machineSelect = document.getElementById("machine-explorer-machine");
         if (machineSelect) machineSelect.value = machineExplorerSelectedAssetId;
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-explorer-group")?.addEventListener("change", (event) => {
         machineExplorerSelectedGroup = event.target.value || MACHINE_EXPLORER_ALL_GROUP;
@@ -8481,24 +9629,24 @@ function wireFilters() {
         machineExplorerRefrigSubgroup = "";
         machineExplorerRefrigCondenserGroupId = "";
         machineExplorerRefrigExpandedCondensers = new Set();
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-explorer-sort")?.addEventListener("change", (event) => {
         machineExplorerSort = event.target.value || "most_wo_mr";
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-explorer-asset-criticality")?.addEventListener("change", (event) => {
         machineExplorerAssetCriticalityFilter = event.target.value || "";
         machineExplorerSelectedAssetId = "";
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-explorer-ack-filter")?.addEventListener("change", (event) => {
         machineExplorerAckFilter = event.target.value || "";
         machineExplorerSelectedAssetId = "";
-        renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("refrig-tree-search")?.addEventListener("input", () => {
-        renderRefrigCdeTree(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+        renderRefrigCdeTree(getCategoryScopedAllRows());
     });
     [
         "machine-explorer-criticality",
@@ -8511,7 +9659,7 @@ function wireFilters() {
         "machine-explorer-quality",
     ].forEach((id) => {
         document.getElementById(id)?.addEventListener("change", () => {
-            renderMachineExplorer(allWorkOrderRowsCache || getFallbackAllWorkOrderRows());
+            renderMachineExplorer(getCategoryScopedAllRows());
         });
     });
     document.getElementById("mtbf-year-filter")?.addEventListener("change", () => {
@@ -11096,8 +12244,27 @@ function kdiNormalizeCriticality(raw) {
 function kdiGetAssetCriticality(wo, assetLookup) {
     const meta = getAssetMetaFromLookup(assetLookup, wo.asset_id);
     const raw = String(meta?.criticality || wo.criticality || wo.normalized_criticality || wo.raw_criticality || "").trim();
-    if (!raw) return "Unclassified";
-    return kdiNormalizeCriticality(raw);
+
+    // If the asset master has already assigned a real criticality, use it.
+    if (raw && raw !== "Non-Critical / Facility" && raw !== "Non-Critical") {
+        return kdiNormalizeCriticality(raw);
+    }
+
+    // Fall back to machine-group-name classification.
+    // The backend currently sets all rows to "Non-Critical / Facility" as a
+    // generic default when no explicit criticality column exists in the MR file.
+    // We override that by looking at the machine group (derived from Asset_Master
+    // "Main Asset Group") which does carry the production/facility distinction.
+    const machineGroup = String(
+        meta?.machine_name || meta?.group || wo.machine_group || wo.equipment_name || ""
+    ).trim();
+    if (CRITICAL_MACHINE_GROUPS.has(machineGroup)) return "Critical";
+    if (machineGroup === "Facility / Building" || machineGroup === "Unknown / Review") return "Non-Critical / Facility";
+
+    // If the raw value was the generic Non-Critical default from the backend,
+    // propagate it now (better than Unclassified for known-mapped assets).
+    if (raw) return kdiNormalizeCriticality(raw);
+    return "Unclassified";
 }
 
 // ── MTTR ─────────────────────────────────────────────────────────────────────
@@ -11123,16 +12290,25 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
                 group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 hours: [],
+                totalDowntimeHours: 0,
+                workOrderCount: 0,
+                lastFailureDate: null,
                 missingCount: 0,
             });
         }
         const entry = assetMap.get(assetId);
+        entry.workOrderCount++;
+        const failureDate = parseDateValue(wo.actual_start_time || wo.actual_start || wo.maintenance_start_time || wo.start_time);
+        if (failureDate && (!entry.lastFailureDate || failureDate > entry.lastFailureDate)) {
+            entry.lastFailureDate = failureDate;
+        }
         const h = getTtrHours(wo);
         if (h !== null && Number.isFinite(h) && h >= 0) {
             totalHours += h;
             validCount++;
             validHours.push(h);
             entry.hours.push(h);
+            entry.totalDowntimeHours += h;
         } else {
             missingCount++;
             entry.missingCount++;
@@ -11144,6 +12320,7 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
         medianMttr: median(validHours),
         validCount,
         missingCount,
+        totalDowntimeHours: totalHours,
         assetMap,
     };
 }
@@ -11157,8 +12334,11 @@ function kdiBuildMttrAssetRows(assetMap, critFilter, selectedGroup = "") {
             group: entry.group,
             criticality: entry.criticality,
             woCount: entry.hours.length,
+            totalWoCount: entry.workOrderCount || entry.hours.length + entry.missingCount,
             avgMttr: entry.hours.length > 0 ? entry.hours.reduce((sum, value) => sum + value, 0) / entry.hours.length : null,
             highestMttr: entry.hours.length > 0 ? Math.max(...entry.hours) : null,
+            totalDowntimeHours: entry.totalDowntimeHours || 0,
+            lastFailureDate: entry.lastFailureDate || null,
             missingCount: entry.missingCount,
         }))
         .filter((entry) => entry.woCount > 0 || entry.missingCount > 0)
@@ -11171,11 +12351,13 @@ function kdiGroupMttrByMachineGroup(assetMap, critFilter) {
         if (critFilter && entry.criticality !== critFilter) return;
         const key = entry.group;
         if (!groups.has(key)) {
-            groups.set(key, { machineName: key, criticality: entry.criticality, hours: [], missingCount: 0 });
+            groups.set(key, { machineName: key, criticality: entry.criticality, hours: [], assetIds: new Set(), missingCount: 0, totalDowntimeHours: 0 });
         }
         const g = groups.get(key);
+        g.assetIds.add(entry.assetId);
         g.hours.push(...entry.hours);
         g.missingCount += entry.missingCount;
+        g.totalDowntimeHours += entry.totalDowntimeHours || 0;
         if (!g.criticality || g.criticality === "Unclassified") g.criticality = entry.criticality;
     });
     return [...groups.values()]
@@ -11183,8 +12365,11 @@ function kdiGroupMttrByMachineGroup(assetMap, critFilter) {
             machineName: g.machineName,
             criticality: g.criticality || "Unclassified",
             woCount: g.hours.length,
+            assetCount: g.assetIds.size,
             avgMttr: g.hours.length > 0 ? g.hours.reduce((a, b) => a + b, 0) / g.hours.length : null,
+            medianMttr: median(g.hours),
             highestMttr: g.hours.length > 0 ? Math.max(...g.hours) : null,
+            totalDowntimeHours: g.totalDowntimeHours,
             missingCount: g.missingCount,
         }))
         .filter((g) => g.woCount > 0 || g.missingCount > 0)
@@ -11217,6 +12402,11 @@ function kdiRenderMttrGroupChart(groups, assetRows = [], selectedGroup = "", ran
             responsive: true,
             maintainAspectRatio: false,
             indexAxis: "y",
+            onClick: (_event, elements) => {
+                if (usingAssets || !elements.length) return;
+                const row = valid[elements[0].index];
+                if (row?.machineName) kdiOpenMttrGroupDrilldown(row.machineName);
+            },
             plugins: {
                 legend: { display: false },
                 tooltip: {
@@ -11264,8 +12454,8 @@ function kdiRenderMttrSummaryTable(groups, assetRows = [], selectedGroup = "", r
     }
     if (head) {
         head.innerHTML = usingAssets
-            ? "<th>Asset Name</th><th>Asset ID</th><th>Criticality</th><th>WO Count</th><th>Avg MTTR</th><th>Highest MTTR</th><th>Missing / Invalid MTTR WOs</th>"
-            : "<th>Machine Group</th><th>Criticality</th><th>WO Count</th><th>Avg MTTR</th><th>Highest MTTR</th><th>Missing / Invalid MTTR WOs</th>";
+            ? "<th>Asset Name</th><th>Asset ID</th><th>Criticality</th><th>WO Count</th><th>Avg MTTR</th><th>Total Downtime</th><th>Missing / Invalid</th>"
+            : "<th>Machine Group</th><th>MTTR</th><th>WO Count</th><th>Total Downtime</th><th>Assets Affected</th><th>Missing / Invalid</th>";
     }
     if (searchInput) {
         searchInput.placeholder = usingAssets ? "Search assets..." : "Search groups...";
@@ -11288,65 +12478,131 @@ function kdiRenderMttrSummaryTable(groups, assetRows = [], selectedGroup = "", r
                 <td>${escapeHtml(row.assetName || "--")}</td>
                 <td>${escapeHtml(row.assetId || "--")}</td>
                 <td>${escapeHtml(row.criticality)}</td>
-                <td>${fmtNumber(row.woCount)}</td>
-                <td>${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
-                <td>${row.highestMttr !== null ? fmtHours(row.highestMttr) : "--"}</td>
-                <td>${fmtNumber(row.missingCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
+                <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
+                <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.missingCount)}</td>
             </tr>
         `).join("")
-        : visible.map((row) => `
-            <tr>
+        : visible.map((row, index) => `
+            <tr class="kdi-drill-row${index === 0 ? " kdi-attention-row" : ""}" data-kdi-group="${escapeHtml(row.machineName)}" tabindex="0" title="Click to view assets in ${escapeHtml(row.machineName)}">
                 <td>${escapeHtml(row.machineName)}</td>
-                <td>${escapeHtml(row.criticality)}</td>
-                <td>${fmtNumber(row.woCount)}</td>
-                <td>${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
-                <td>${row.highestMttr !== null ? fmtHours(row.highestMttr) : "--"}</td>
-                <td>${fmtNumber(row.missingCount)}</td>
+                <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
+                <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.assetCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.missingCount)}</td>
             </tr>
         `).join("");
 }
 
-function kdiRenderMttrAssetDrilldown(assetMap, critFilter, selectedGroup = "") {
-    const tbody = document.getElementById("kdi-mttr-asset-table-body");
-    const groupSelect = document.getElementById("kdi-mttr-asset-group-filter");
+function kdiGetLaterDate(a, b) {
+    if (!a) return b || null;
+    if (!b) return a || null;
+    return a > b ? a : b;
+}
+
+function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode = "mttr") {
+    const rowsById = new Map();
+    const ensureRow = (entry) => {
+        const key = String(entry?.assetId || entry?.assetName || "").trim() || `${entry?.group || "Unclassified"}:${rowsById.size}`;
+        if (!rowsById.has(key)) {
+            rowsById.set(key, {
+                assetId: entry?.assetId || "--",
+                assetName: entry?.assetName || entry?.assetId || "--",
+                group: entry?.group || "Unclassified",
+                criticality: entry?.criticality || "Unclassified",
+                woCount: 0,
+                mttrWoCount: 0,
+                mtbfWoCount: 0,
+                avgMttr: null,
+                avgMtbf: null,
+                totalDowntimeHours: 0,
+                lastFailureDate: null,
+                repeatFailureCount: 0,
+            });
+        }
+        const row = rowsById.get(key);
+        if ((!row.assetName || row.assetName === row.assetId) && entry?.assetName) row.assetName = entry.assetName;
+        if (!row.group || row.group === "Unclassified") row.group = entry?.group || row.group;
+        if ((!row.criticality || row.criticality === "Unclassified") && entry?.criticality) row.criticality = entry.criticality;
+        return row;
+    };
+    const includeEntry = (entry) => (!critFilter || entry?.criticality === critFilter) && (!selectedGroup || entry?.group === selectedGroup);
+
+    kdiCurrentMttrData?.assetMap?.forEach((entry) => {
+        if (!includeEntry(entry)) return;
+        const row = ensureRow(entry);
+        row.mttrWoCount = entry.hours?.length || 0;
+        row.woCount = Math.max(row.woCount, entry.workOrderCount || row.mttrWoCount + (entry.missingCount || 0));
+        row.avgMttr = row.mttrWoCount > 0 ? entry.hours.reduce((sum, value) => sum + value, 0) / row.mttrWoCount : null;
+        row.totalDowntimeHours = entry.totalDowntimeHours || 0;
+        row.lastFailureDate = kdiGetLaterDate(row.lastFailureDate, entry.lastFailureDate || null);
+    });
+
+    (kdiCurrentMtbfData?.allAssets || []).forEach((entry) => {
+        if (!includeEntry(entry)) return;
+        const row = ensureRow(entry);
+        row.mtbfWoCount = entry.woCount || 0;
+        row.woCount = Math.max(row.woCount, row.mtbfWoCount);
+        row.avgMtbf = entry.avgMtbf ?? null;
+        row.repeatFailureCount = entry.gapCount || 0;
+        row.lastFailureDate = kdiGetLaterDate(row.lastFailureDate, entry.lastFailureDate || null);
+    });
+
+    return [...rowsById.values()]
+        .filter((row) => row.woCount > 0 || row.mttrWoCount > 0 || row.mtbfWoCount > 0)
+        .sort((a, b) => {
+            if (sortMode === "mtbf") {
+                if (a.avgMtbf === null && b.avgMtbf !== null) return 1;
+                if (a.avgMtbf !== null && b.avgMtbf === null) return -1;
+                if (a.avgMtbf !== null && b.avgMtbf !== null && a.avgMtbf !== b.avgMtbf) return a.avgMtbf - b.avgMtbf;
+                return (b.repeatFailureCount || 0) - (a.repeatFailureCount || 0);
+            }
+            if (a.avgMttr === null && b.avgMttr !== null) return 1;
+            if (a.avgMttr !== null && b.avgMttr === null) return -1;
+            if (a.avgMttr !== null && b.avgMttr !== null && a.avgMttr !== b.avgMttr) return b.avgMttr - a.avgMttr;
+            return (b.totalDowntimeHours || 0) - (a.totalDowntimeHours || 0);
+        });
+}
+
+function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critFilter = "", selectedGroup = "", sortMode = "mttr") {
+    const tbody = document.getElementById(tbodyId);
+    const groupSelect = document.getElementById(groupSelectId);
     if (!tbody) return;
-    const allAssets = [...assetMap.values()].filter((a) => (!critFilter || a.criticality === critFilter) && (!selectedGroup || a.group === selectedGroup));
+    const availableRows = kdiBuildCombinedAssetRows(critFilter, "", sortMode);
     if (groupSelect) {
-        const groups = [...new Set(allAssets.map((a) => a.group))].sort();
+        const groups = [...new Set(availableRows.map((row) => row.group).filter(Boolean))].sort((a, b) => a.localeCompare(b));
         const prev = groupSelect.value;
         const preferredGroup = selectedGroup && groups.includes(selectedGroup) ? selectedGroup : prev;
         groupSelect.innerHTML = `<option value="">All Groups</option>` +
-            groups.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
-        if (groups.includes(preferredGroup)) groupSelect.value = preferredGroup;
+            groups.map((group) => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join("");
+        groupSelect.value = groups.includes(preferredGroup) ? preferredGroup : "";
     }
     const groupFilter = groupSelect?.value || "";
-    const drilldownSearch = kdiNormalizeSearchTerm(document.getElementById("kdi-mttr-asset-search")?.value || "");
-    const rows = allAssets
-        .filter((a) => !groupFilter || a.group === groupFilter)
-        .map((a) => ({
-            assetId: a.assetId,
-            assetName: a.assetName,
-            group: a.group,
-            criticality: a.criticality,
-            woCount: a.hours.length,
-            avgMttr: a.hours.length > 0 ? a.hours.reduce((x, y) => x + y, 0) / a.hours.length : null,
-        }))
-        .filter((a) => !drilldownSearch || kdiAssetMatchesSearch(a, drilldownSearch))
-        .sort((a, b) => (b.avgMttr || 0) - (a.avgMttr || 0));
+    const drilldownSearch = kdiNormalizeSearchTerm(document.getElementById(searchId)?.value || "");
+    const rows = kdiBuildCombinedAssetRows(critFilter, groupFilter, sortMode)
+        .filter((row) => !drilldownSearch || kdiAssetMatchesSearch(row, drilldownSearch) || kdiNormalizeSearchTerm(row.group).includes(drilldownSearch));
     if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="6" class="empty-cell">${drilldownSearch ? "No assets match the search." : "No data for the selected filter."}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="empty-cell">${drilldownSearch ? "No assets match the search." : "No data for the selected filter."}</td></tr>`;
         return;
     }
-    tbody.innerHTML = rows.map((a) => `
+    tbody.innerHTML = rows.map((row) => `
         <tr>
-            <td>${escapeHtml(a.assetId)}</td>
-            <td>${escapeHtml(a.assetName)}</td>
-            <td>${escapeHtml(a.group)}</td>
-            <td>${escapeHtml(a.criticality)}</td>
-            <td>${fmtNumber(a.woCount)}</td>
-            <td>${a.avgMttr !== null ? fmtHours(a.avgMttr) : "--"}</td>
+            <td>${escapeHtml(row.assetId || "--")}</td>
+            <td>${escapeHtml(row.assetName || "--")}</td>
+            <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
+            <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
+            <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
+            <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
+            <td>${row.lastFailureDate ? escapeHtml(fmtDateOnly(row.lastFailureDate)) : "--"}</td>
+            <td class="kdi-number-cell">${fmtNumber(row.repeatFailureCount)}</td>
         </tr>
     `).join("");
+}
+
+function kdiRenderMttrAssetDrilldown(assetMap, critFilter, selectedGroup = "") {
+    kdiRenderCombinedAssetDrilldown("kdi-mttr-asset-table-body", "kdi-mttr-asset-group-filter", "kdi-mttr-asset-search", critFilter, selectedGroup, "mttr");
 }
 
 // ── MTBF ─────────────────────────────────────────────────────────────────────
@@ -11357,9 +12613,11 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
     wos.forEach((wo) => {
         const assetId = String(wo.asset_id || "").trim();
         if (!assetId || assetId.toUpperCase() === "WO-ASSET") return;
-        const start = parseDateValue(wo.start_time || wo.actual_start_time || wo.actual_start || wo.maintenance_start_time);
+        if (isMtbfGeneralAreaWo(wo)) return;   // exclude general area/location placeholders
+        const start = parseDateValue(wo.actual_start_time || wo.actual_start || wo.maintenance_start_time || wo.start_time);
         if (!start) return;
-        const end = parseDateValue(wo.end_time || wo.actual_end_time || wo.actual_end || wo.maintenance_end_time) || start;
+        // STRICT: no fallback to start — must have an actual end for end-to-start MTBF.
+        const end = parseDateValue(wo.actual_end_time || wo.actual_end || wo.maintenance_end_time || wo.end_time);
         if (!byAsset.has(assetId)) {
             const meta = getAssetMetaFromLookup(assetLookup, assetId);
             // Prefer the per-asset friendly name from Asset_Master.xlsx
@@ -11370,9 +12628,15 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
                 group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 wos: [],
+                lastFailureDate: null,
             });
         }
-        byAsset.get(assetId).wos.push({ _start: start, _end: end });
+        const entry = byAsset.get(assetId);
+        if (start && (!entry.lastFailureDate || start > entry.lastFailureDate)) {
+            entry.lastFailureDate = start;
+        }
+        // Only store WO if we have both start and a valid actual end (strict end-to-start).
+        if (end) entry.wos.push({ _start: start, _end: end });
     });
 
     let totalMtbfHours = 0;
@@ -11386,8 +12650,10 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
         const sorted = [...entry.wos].sort((a, b) => a._start - b._start);
         const gaps = [];
         for (let i = 1; i < sorted.length; i++) {
+            // Previous WO must have an actual end (_end was only stored when valid).
+            // Gap = next Actual Start − previous Actual End (end-to-start, no fallback).
             const gapHrs = (sorted[i]._start.getTime() - sorted[i - 1]._end.getTime()) / 3600000;
-            if (gapHrs > 0) gaps.push(gapHrs);
+            if (gapHrs > MTBF_MIN_GAP_HOURS) gaps.push(gapHrs);   // exclude zero/negative and ≤ 1 min
         }
         if (gaps.length > 0) {
             const avg = gaps.reduce((a, b) => a + b, 0) / gaps.length;
@@ -11434,6 +12700,7 @@ function kdiBuildMtbfAssetRows(allAssets, critFilter, selectedGroup = "") {
             avgMtbf: entry.avgMtbf,
             minMtbf: entry.minMtbf,
             maxMtbf: entry.maxMtbf,
+            lastFailureDate: entry.lastFailureDate || null,
         }))
         .sort((a, b) => (a.avgMtbf || 0) - (b.avgMtbf || 0));
 }
@@ -11444,11 +12711,13 @@ function kdiGroupMtbfByMachineGroup(allAssets, critFilter) {
         if (critFilter && entry.criticality !== critFilter) return;
         const key = entry.group;
         if (!groups.has(key)) {
-            groups.set(key, { machineName: key, criticality: entry.criticality, avgMtbfs: [], minMtbfs: [], maxMtbfs: [], assetCount: 0, gapCount: 0, insufficientCount: 0 });
+            groups.set(key, { machineName: key, criticality: entry.criticality, avgMtbfs: [], minMtbfs: [], maxMtbfs: [], assetCount: 0, assetsWithMtbf: 0, woCount: 0, gapCount: 0, insufficientCount: 0 });
         }
         const g = groups.get(key);
         g.assetCount++;
+        g.woCount += entry.woCount || 0;
         if (entry.hasMtbf) {
+            g.assetsWithMtbf++;
             g.avgMtbfs.push(entry.avgMtbf);
             g.minMtbfs.push(entry.minMtbf);
             g.maxMtbfs.push(entry.maxMtbf);
@@ -11463,6 +12732,8 @@ function kdiGroupMtbfByMachineGroup(allAssets, critFilter) {
             machineName: g.machineName,
             criticality: g.criticality || "Unclassified",
             assetCount: g.assetCount,
+            assetsWithMtbf: g.assetsWithMtbf,
+            woCount: g.woCount,
             gapCount: g.gapCount,
             avgMtbf: g.avgMtbfs.length > 0 ? g.avgMtbfs.reduce((a, b) => a + b, 0) / g.avgMtbfs.length : null,
             lowestMtbf: g.minMtbfs.length > 0 ? Math.min(...g.minMtbfs) : null,
@@ -11500,6 +12771,11 @@ function kdiRenderMtbfGroupChart(groups, assetRows = [], selectedGroup = "", ran
             responsive: true,
             maintainAspectRatio: false,
             indexAxis: "y",
+            onClick: (_event, elements) => {
+                if (usingAssets || !elements.length) return;
+                const row = valid[elements[0].index];
+                if (row?.machineName) kdiOpenMtbfGroupDrilldown(row.machineName);
+            },
             plugins: {
                 legend: { display: false },
                 tooltip: {
@@ -11548,7 +12824,7 @@ function kdiRenderMtbfSummaryTable(groups, assetRows = [], selectedGroup = "", r
     if (head) {
         head.innerHTML = usingAssets
             ? "<th>Asset Name</th><th>Asset ID</th><th>Criticality</th><th>WO Count</th><th>Repeat Failures</th><th>Avg MTBF</th><th>Lowest MTBF</th><th>Highest MTBF</th>"
-            : "<th>Machine Group</th><th>Criticality</th><th>Asset Count</th><th>Repeat Failures</th><th>Avg MTBF</th><th>Lowest MTBF</th><th>Highest MTBF</th><th>Insufficient Data</th>";
+            : "<th>Machine Group</th><th>MTBF</th><th>Failure / WO Count</th><th>Assets Included</th><th>Repeat Failure Count</th><th>Lowest MTBF</th><th>Insufficient Data</th>";
     }
     if (searchInput) {
         searchInput.placeholder = usingAssets ? "Search assets..." : "Search groups...";
@@ -11562,7 +12838,7 @@ function kdiRenderMtbfSummaryTable(groups, assetRows = [], selectedGroup = "", r
             ? groupRows.filter((row) => kdiNormalizeSearchTerm(row.machineName).includes(search) || kdiNormalizeSearchTerm(row.criticality).includes(search))
             : groupRows);
     if (!visible.length) {
-        tbody.innerHTML = `<tr><td colspan="8" class="empty-cell">${search ? `No ${usingAssets ? "assets" : "groups"} match the search.` : "No MTBF data for the selected filters."}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${usingAssets ? 8 : 7}" class="empty-cell">${search ? `No ${usingAssets ? "assets" : "groups"} match the search.` : "No MTBF data for the selected filters."}</td></tr>`;
         return;
     }
     tbody.innerHTML = usingAssets
@@ -11571,23 +12847,22 @@ function kdiRenderMtbfSummaryTable(groups, assetRows = [], selectedGroup = "", r
                 <td>${escapeHtml(row.assetName || "--")}</td>
                 <td>${escapeHtml(row.assetId || "--")}</td>
                 <td>${escapeHtml(row.criticality)}</td>
-                <td>${fmtNumber(row.woCount)}</td>
-                <td>${fmtNumber(row.gapCount)}</td>
-                <td>${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
-                <td>${row.minMtbf !== null ? fmtDaysHours(row.minMtbf) : "--"}</td>
-                <td>${row.maxMtbf !== null ? fmtDaysHours(row.maxMtbf) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.gapCount)}</td>
+                <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
+                <td class="kdi-number-cell">${row.minMtbf !== null ? fmtDaysHours(row.minMtbf) : "--"}</td>
+                <td class="kdi-number-cell">${row.maxMtbf !== null ? fmtDaysHours(row.maxMtbf) : "--"}</td>
             </tr>
         `).join("")
-        : visible.map((row) => `
-            <tr>
+        : visible.map((row, index) => `
+            <tr class="kdi-drill-row${index === 0 ? " kdi-attention-row" : ""}" data-kdi-group="${escapeHtml(row.machineName)}" tabindex="0" title="Click to view assets in ${escapeHtml(row.machineName)}">
                 <td>${escapeHtml(row.machineName)}</td>
-                <td>${escapeHtml(row.criticality)}</td>
-                <td>${fmtNumber(row.assetCount)}</td>
-                <td>${fmtNumber(row.gapCount)}</td>
-                <td>${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
-                <td>${row.lowestMtbf !== null ? fmtDaysHours(row.lowestMtbf) : "--"}</td>
-                <td>${row.highestMtbf !== null ? fmtDaysHours(row.highestMtbf) : "--"}</td>
-                <td>${fmtNumber(row.insufficientCount)}</td>
+                <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.gapCount)} / ${fmtNumber(row.woCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.assetsWithMtbf)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.gapCount)}</td>
+                <td class="kdi-number-cell">${row.lowestMtbf !== null ? fmtDaysHours(row.lowestMtbf) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.insufficientCount)}</td>
             </tr>
         `).join("");
 }
@@ -11646,40 +12921,7 @@ function kdiRenderMtbfAdditionalKpis(groups, assetRows, selectedGroup = "", rank
 }
 
 function kdiRenderMtbfAssetDrilldown(assetResults, critFilter, selectedGroup = "") {
-    const tbody = document.getElementById("kdi-mtbf-asset-table-body");
-    const groupSelect = document.getElementById("kdi-mtbf-asset-group-filter");
-    if (!tbody) return;
-    const filtered = assetResults.filter((a) => (!critFilter || a.criticality === critFilter) && (!selectedGroup || a.group === selectedGroup));
-    if (groupSelect) {
-        const groups = [...new Set(filtered.map((a) => a.group))].sort();
-        const prev = groupSelect.value;
-        const preferredGroup = selectedGroup && groups.includes(selectedGroup) ? selectedGroup : prev;
-        groupSelect.innerHTML = `<option value="">All Groups</option>` +
-            groups.map((g) => `<option value="${escapeHtml(g)}">${escapeHtml(g)}</option>`).join("");
-        if (groups.includes(preferredGroup)) groupSelect.value = preferredGroup;
-    }
-    const groupFilter = groupSelect?.value || "";
-    const drilldownSearch = kdiNormalizeSearchTerm(document.getElementById("kdi-mtbf-asset-search")?.value || "");
-    const rows = filtered
-        .filter((a) => !groupFilter || a.group === groupFilter)
-        .filter((a) => !drilldownSearch || kdiAssetMatchesSearch(a, drilldownSearch))
-        .sort((a, b) => (a.avgMtbf || 0) - (b.avgMtbf || 0));
-    if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="8" class="empty-cell">${drilldownSearch ? "No assets match the search." : "No data for the selected filter."}</td></tr>`;
-        return;
-    }
-    tbody.innerHTML = rows.map((a) => `
-        <tr>
-            <td>${escapeHtml(a.assetId)}</td>
-            <td>${escapeHtml(a.assetName)}</td>
-            <td>${escapeHtml(a.group)}</td>
-            <td>${escapeHtml(a.criticality)}</td>
-            <td>${fmtNumber(a.woCount)}</td>
-            <td>${a.avgMtbf !== null ? fmtDaysHours(a.avgMtbf) : "--"}</td>
-            <td>${a.minMtbf !== null ? fmtDaysHours(a.minMtbf) : "--"}</td>
-            <td>${a.maxMtbf !== null ? fmtDaysHours(a.maxMtbf) : "--"}</td>
-        </tr>
-    `).join("");
+    kdiRenderCombinedAssetDrilldown("kdi-mtbf-asset-table-body", "kdi-mtbf-asset-group-filter", "kdi-mtbf-asset-search", critFilter, selectedGroup, "mtbf");
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -11764,7 +13006,9 @@ function updateKdiSection() {
 
     // ── Render MTTR card ──
     const mttrStatus = kdiGetMttrStatusBadge(mttrData.averageMttr, mttrData.validCount, mttrData.missingCount);
-    setText("kdi-mttr-value", mttrData.averageMttr !== null ? fmtHours(mttrData.averageMttr) : "No valid records");
+    const mttrDisplay = mttrData.averageMttr !== null ? fmtHours(mttrData.averageMttr) : "No valid records";
+    setText("kdi-mttr-value", mttrDisplay);
+    setText("kdi-summary-mttr-value", mttrDisplay);
     // Days-equivalent secondary line — keeps the hours-and-minutes headline accurate
     // while giving operators a quick "≈ N days" reading at a glance.
     const mttrDaysEl = document.getElementById("kdi-mttr-days");
@@ -11778,9 +13022,14 @@ function updateKdiSection() {
         }
     }
     setText("kdi-mttr-wo-count", fmtNumber(mttrData.validCount));
+    setText("kdi-summary-work-orders", fmtNumber(mttrData.validCount));
     setText("kdi-mttr-missing-count", fmtNumber(mttrData.missingCount));
+    setText("kdi-summary-missing-invalid", fmtNumber(mttrData.missingCount));
     setText("kdi-mttr-median", mttrData.medianMttr !== null ? fmtHours(mttrData.medianMttr) : "--");
+    setText("kdi-summary-mttr-median", mttrData.medianMttr !== null ? fmtHours(mttrData.medianMttr) : "--");
+    setText("kdi-summary-total-downtime", mttrData.totalDowntimeHours ? fmtDaysHours(mttrData.totalDowntimeHours) : "--");
     setText("kdi-mttr-period-label", periodLabel);
+    setText("kdi-summary-period-label", periodLabel);
     const mttrBadge = document.getElementById("kdi-mttr-status-badge");
     if (mttrBadge) {
         const showBadge = Boolean(mttrStatus?.label);
@@ -11791,21 +13040,22 @@ function updateKdiSection() {
 
     // ── Render MTBF card ──
     const mtbfStatus = kdiGetMtbfStatusBadge(mtbfData.overallMtbf, mtbfData.assetsWithMtbf);
-    setText("kdi-mtbf-value", mtbfData.overallMtbf !== null ? fmtDaysHours(mtbfData.overallMtbf) : "Insufficient data");
+    const mtbfDisplay = mtbfData.overallMtbf !== null ? fmtDaysHours(mtbfData.overallMtbf) : "Insufficient data";
+    setText("kdi-mtbf-value", mtbfDisplay);
+    setText("kdi-summary-mtbf-value", mtbfDisplay);
     setText("kdi-mtbf-valid-assets", fmtNumber(mtbfData.assetsWithMtbf));
+    setText("kdi-summary-mtbf-assets", fmtNumber(mtbfData.assetsWithMtbf));
     setText("kdi-mtbf-repeat-count", fmtNumber(mtbfData.totalGaps));
+    setText("kdi-summary-repeat-pairs", fmtNumber(mtbfData.totalGaps));
     setText("kdi-mtbf-insufficient-count", fmtNumber(mtbfData.assetsInsufficient));
+    setText("kdi-summary-mtbf-insufficient", fmtNumber(mtbfData.assetsInsufficient));
     setText("kdi-mtbf-period-label", periodLabel);
     const mtbfBadge = document.getElementById("kdi-mtbf-status-badge");
     if (mtbfBadge) { mtbfBadge.textContent = mtbfStatus.label; mtbfBadge.className = `kdi-status-badge ${mtbfStatus.cls}`; }
 
-    // Refresh open analysis panels
-    if (!document.getElementById("kdi-mttr-analysis-panel")?.classList.contains("hidden")) {
-        updateKdiMttrAnalysis();
-    }
-    if (!document.getElementById("kdi-mtbf-analysis-panel")?.classList.contains("hidden")) {
-        updateKdiMtbfAnalysis();
-    }
+    // Machine-group analysis is the default management view, so keep both panels fresh.
+    updateKdiMttrAnalysis();
+    updateKdiMtbfAnalysis();
 }
 
 function updateKdiMttrAnalysis() {
@@ -11840,6 +13090,57 @@ function updateKdiMtbfAnalysis() {
     kdiRenderMtbfSummaryTable(groups, assetRows, kdiMtbfSelectedGroup, kdiMtbfRankMode);
     const dd = document.getElementById("kdi-mtbf-asset-drilldown");
     if (dd?.open) kdiRenderMtbfAssetDrilldown(assetResults, crit, kdiMtbfSelectedGroup);
+    renderMtbfReliabilityReview();
+}
+
+function kdiSetSelectValueIfPresent(selectId, value) {
+    const select = document.getElementById(selectId);
+    if (!select) return;
+    const hasOption = [...select.options].some((option) => option.value === value);
+    if (hasOption) select.value = value;
+}
+
+function kdiOpenMttrGroupDrilldown(group) {
+    if (!group || !kdiCurrentMttrData) return;
+    kdiMttrRankMode = "group";
+    kdiMttrSelectedGroup = group;
+    updateKdiMttrAnalysis();
+    const dd = document.getElementById("kdi-mttr-asset-drilldown");
+    if (!dd) return;
+    dd.open = true;
+    kdiSetSelectValueIfPresent("kdi-mttr-asset-group-filter", group);
+    kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, group);
+    dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function kdiOpenMtbfGroupDrilldown(group) {
+    if (!group || !kdiCurrentMtbfData) return;
+    kdiMtbfRankMode = "group";
+    kdiMtbfSelectedGroup = group;
+    updateKdiMtbfAnalysis();
+    const dd = document.getElementById("kdi-mtbf-asset-drilldown");
+    if (!dd) return;
+    dd.open = true;
+    kdiSetSelectValueIfPresent("kdi-mtbf-asset-group-filter", group);
+    kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, group);
+    dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function kdiWireGroupDrilldown(tableBodyId, onOpen) {
+    const tbody = document.getElementById(tableBodyId);
+    if (!tbody) return;
+    tbody.addEventListener("click", (event) => {
+        const row = event.target.closest(".kdi-drill-row[data-kdi-group]");
+        if (!row || !tbody.contains(row)) return;
+        onOpen(row.dataset.kdiGroup || "");
+    });
+    tbody.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const row = event.target.closest(".kdi-drill-row[data-kdi-group]");
+        if (!row || !tbody.contains(row)) return;
+        event.preventDefault();
+        onOpen(row.dataset.kdiGroup || "");
+    });
 }
 
 function kdiWireStaticControls() {
@@ -11847,17 +13148,18 @@ function kdiWireStaticControls() {
         const btn = document.getElementById(btnId);
         const panel = document.getElementById(panelId);
         if (!btn || !panel) return;
+        panel.classList.remove("hidden");
+        btn.setAttribute("aria-expanded", "true");
+        btn.innerHTML = `${label} Machine Group View`;
         btn.addEventListener("click", () => {
-            const nowOpen = panel.classList.toggle("hidden") === false;
-            btn.setAttribute("aria-expanded", String(nowOpen));
-            btn.innerHTML = nowOpen
-                ? `Hide ${label} Analysis &#9650;`
-                : `View ${label} Analysis &#9660;`;
-            if (nowOpen) updateFn();
+            panel.classList.remove("hidden");
+            updateFn();
         });
     }
     wireToggle("kdi-mttr-analysis-btn", "kdi-mttr-analysis-panel", () => { kdiMttrCriticalityFilter = ""; updateKdiMttrAnalysis(); }, "MTTR");
     wireToggle("kdi-mtbf-analysis-btn", "kdi-mtbf-analysis-panel", () => { kdiMtbfCriticalityFilter = ""; updateKdiMtbfAnalysis(); }, "MTBF");
+    kdiWireGroupDrilldown("kdi-mttr-group-table-body", kdiOpenMttrGroupDrilldown);
+    kdiWireGroupDrilldown("kdi-mtbf-group-table-body", kdiOpenMtbfGroupDrilldown);
 
     document.getElementById("kdi-mttr-asset-drilldown")?.addEventListener("toggle", () => {
         if (document.getElementById("kdi-mttr-asset-drilldown")?.open && kdiCurrentMttrData) {
@@ -11894,6 +13196,14 @@ function kdiWireStaticControls() {
     });
     document.getElementById("kdi-mtbf-asset-search")?.addEventListener("input", () => {
         if (kdiCurrentMtbfData) kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, kdiMtbfSelectedGroup);
+    });
+    // MTBF Data Reliability Review controls
+    document.getElementById("mtbf-reliability-filter")?.addEventListener("change", renderMtbfReliabilityReview);
+    document.getElementById("mtbf-reliability-search")?.addEventListener("input", renderMtbfReliabilityReview);
+    document.getElementById("mtbf-reliability-table")?.addEventListener("change", (e) => {
+        const el = e.target.closest(".mtbf-review-input");
+        if (!el) return;
+        setMtbfReviewField(el.dataset.mtbfKey, el.dataset.mtbfField, el.value);
     });
 }
 

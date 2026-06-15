@@ -10,7 +10,7 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260608-history-empty-1">
+    <link rel="stylesheet" href="style.css?v=20260615-kdi-management-1">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -53,6 +53,15 @@
                         <option value="all" selected>Both</option>
                         <option value="Stage 1">Stage 1</option>
                         <option value="Stage 2">Stage 2</option>
+                    </select>
+                </div>
+                <div class="filter-inline stage-filter-inline">
+                    <label class="inline-label" for="downtime-category-filter">Category</label>
+                    <select id="downtime-category-filter" class="inline-select" title="Filter the whole page by asset category (Asset Master mapping)">
+                        <option value="all" selected>All</option>
+                        <option value="Production Equipment">Production Equipment</option>
+                        <option value="Utilities">Utilities</option>
+                        <option value="Unclassified">Unclassified</option>
                     </select>
                 </div>
                 <button class="toggle-btn" type="button" id="refresh-asset-mapping-btn">Refresh Asset Mapping</button>
@@ -154,10 +163,54 @@
             <div class="card-title-block reliability-focus-header">
                 <div>
                     <div class="card-title" id="reliability-focus-title">Key Downtime Indicators</div>
-                    <p class="card-subtitle">MTTR measures repair recovery speed; MTBF measures how long equipment runs before the next failure.</p>
+                    <p class="card-subtitle">MTTR and MTBF shown by machine group for management review. Individual asset details are available by drill-down.</p>
                 </div>
                 <div class="kdi-ytd-pill" id="kdi-ytd-pill" aria-live="polite">YTD --</div>
             </div>
+
+            <div class="kdi-summary-grid" aria-label="Key downtime indicator summary">
+                <div class="kdi-summary-card kdi-summary-card-mttr">
+                    <div class="kdi-summary-label">Overall MTTR</div>
+                    <div class="kdi-summary-value" id="kdi-summary-mttr-value">--</div>
+                    <div class="kdi-summary-sub">Lower is better</div>
+                </div>
+                <div class="kdi-summary-card kdi-summary-card-mtbf">
+                    <div class="kdi-summary-label">Overall MTBF</div>
+                    <div class="kdi-summary-value" id="kdi-summary-mtbf-value">--</div>
+                    <div class="kdi-summary-sub">Higher is better</div>
+                </div>
+                <div class="kdi-summary-card">
+                    <div class="kdi-summary-label">Work Orders Used</div>
+                    <div class="kdi-summary-value" id="kdi-summary-work-orders">--</div>
+                    <div class="kdi-summary-sub">Valid MTTR records</div>
+                </div>
+                <div class="kdi-summary-card">
+                    <div class="kdi-summary-label">Total Downtime</div>
+                    <div class="kdi-summary-value" id="kdi-summary-total-downtime">--</div>
+                    <div class="kdi-summary-sub">From valid repair durations</div>
+                </div>
+                <div class="kdi-summary-card">
+                    <div class="kdi-summary-label">Assets with MTBF</div>
+                    <div class="kdi-summary-value" id="kdi-summary-mtbf-assets">--</div>
+                    <div class="kdi-summary-sub">2+ valid failures</div>
+                </div>
+                <div class="kdi-summary-card">
+                    <div class="kdi-summary-label">Repeat Failure Pairs</div>
+                    <div class="kdi-summary-value" id="kdi-summary-repeat-pairs">--</div>
+                    <div class="kdi-summary-sub">Valid MTBF gaps</div>
+                </div>
+                <div class="kdi-summary-card kdi-summary-card-note">
+                    <div class="kdi-summary-label">Missing / Invalid Records</div>
+                    <div class="kdi-summary-value" id="kdi-summary-missing-invalid">--</div>
+                    <div class="kdi-summary-sub">Excluded from MTTR</div>
+                </div>
+            </div>
+            <details class="kdi-data-note">
+                <summary>Data notes</summary>
+                <span>Median TTR: <strong id="kdi-summary-mttr-median">--</strong></span>
+                <span>Insufficient MTBF assets: <strong id="kdi-summary-mtbf-insufficient">--</strong></span>
+                <span id="kdi-summary-period-label">YTD</span>
+            </details>
 
             <div class="kdi-kpi-grid">
 
@@ -195,8 +248,16 @@
                             View MTTR Analysis &#9660;
                         </button>
                     </div>
-                    <div class="kdi-analysis-panel hidden" id="kdi-mttr-analysis-panel">
+                    <div class="kdi-analysis-panel" id="kdi-mttr-analysis-panel">
                         <div class="kdi-analysis-inner">
+                            <div class="kdi-analysis-card-head">
+                                <div>
+                                    <div class="kdi-section-kicker">Section A</div>
+                                    <div class="kdi-analysis-card-title">MTTR by Machine Group</div>
+                                    <p class="kdi-analysis-card-subtitle">Highest average repair time appears first. Click a machine group row to drill into individual assets.</p>
+                                </div>
+                                <span class="kpi-direction-pill kpi-direction-pill-warn">Lower is better</span>
+                            </div>
                             <div class="kdi-analysis-filter-bar">
                                 <span class="kdi-filter-label">Criticality</span>
                                 <div class="kdi-criticality-filter-group" id="kdi-mttr-criticality-filter"></div>
@@ -228,11 +289,11 @@
                                         <thead>
                                             <tr id="kdi-mttr-summary-head">
                                                 <th>Machine Group</th>
-                                                <th>Criticality</th>
+                                                <th>MTTR</th>
                                                 <th>WO Count</th>
-                                                <th>Avg MTTR</th>
-                                                <th>Highest MTTR</th>
-                                                <th>Missing / Invalid MTTR WOs</th>
+                                                <th>Total Downtime</th>
+                                                <th>Assets Affected</th>
+                                                <th>Missing / Invalid</th>
                                             </tr>
                                         </thead>
                                         <tbody id="kdi-mttr-group-table-body">
@@ -242,7 +303,7 @@
                                 </div>
                             </div>
                             <details class="kdi-asset-drilldown" id="kdi-mttr-asset-drilldown">
-                                <summary class="kdi-drilldown-summary">Individual Asset MTTR (Drill-Down)</summary>
+                                <summary class="kdi-drilldown-summary">View individual assets (MTTR drill-down)</summary>
                                 <div class="kdi-asset-drilldown-filter-row">
                                     <label class="inline-label" for="kdi-mttr-asset-group-filter">Machine Group</label>
                                     <select id="kdi-mttr-asset-group-filter" class="inline-select"><option value="">All Groups</option></select>
@@ -254,14 +315,16 @@
                                             <tr>
                                                 <th>Asset ID</th>
                                                 <th>Asset Name</th>
-                                                <th>Machine Group</th>
-                                                <th>Criticality</th>
+                                                <th>MTTR</th>
+                                                <th>MTBF</th>
                                                 <th>WO Count</th>
-                                                <th>Avg MTTR</th>
+                                                <th>Total Downtime</th>
+                                                <th>Last Failure Date</th>
+                                                <th>Repeat Failure Count</th>
                                             </tr>
                                         </thead>
                                         <tbody id="kdi-mttr-asset-table-body">
-                                            <tr><td colspan="6" class="empty-cell">Expand to view individual asset MTTR.</td></tr>
+                                            <tr><td colspan="8" class="empty-cell">Expand to view individual asset reliability details.</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -304,8 +367,16 @@
                             View MTBF Analysis &#9660;
                         </button>
                     </div>
-                    <div class="kdi-analysis-panel hidden" id="kdi-mtbf-analysis-panel">
+                    <div class="kdi-analysis-panel" id="kdi-mtbf-analysis-panel">
                         <div class="kdi-analysis-inner">
+                            <div class="kdi-analysis-card-head">
+                                <div>
+                                    <div class="kdi-section-kicker">Section B</div>
+                                    <div class="kdi-analysis-card-title">MTBF by Machine Group</div>
+                                    <p class="kdi-analysis-card-subtitle">Lowest average time between failures appears first. Click a machine group row to inspect the assets behind it.</p>
+                                </div>
+                                <span class="kpi-direction-pill kpi-direction-pill-good">Higher is better</span>
+                            </div>
                             <div class="kdi-analysis-filter-bar">
                                 <span class="kdi-filter-label">Criticality</span>
                                 <div class="kdi-criticality-filter-group" id="kdi-mtbf-criticality-filter"></div>
@@ -338,23 +409,22 @@
                                         <thead>
                                             <tr id="kdi-mtbf-summary-head">
                                                 <th>Machine Group</th>
-                                                <th>Criticality</th>
-                                                <th>Asset Count</th>
-                                                <th>Repeat Failures</th>
-                                                <th>Avg MTBF</th>
+                                                <th>MTBF</th>
+                                                <th>Failure / WO Count</th>
+                                                <th>Assets Included</th>
+                                                <th>Repeat Failure Count</th>
                                                 <th>Lowest MTBF</th>
-                                                <th>Highest MTBF</th>
                                                 <th>Insufficient Data</th>
                                             </tr>
                                         </thead>
                                         <tbody id="kdi-mtbf-group-table-body">
-                                            <tr><td colspan="8" class="empty-cell">Loading MTBF data&hellip;</td></tr>
+                                            <tr><td colspan="7" class="empty-cell">Loading MTBF data&hellip;</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
                             </div>
                             <details class="kdi-asset-drilldown" id="kdi-mtbf-asset-drilldown">
-                                <summary class="kdi-drilldown-summary">Individual Asset MTBF (Drill-Down)</summary>
+                                <summary class="kdi-drilldown-summary">View individual assets (MTBF drill-down)</summary>
                                 <div class="kdi-asset-drilldown-filter-row">
                                     <label class="inline-label" for="kdi-mtbf-asset-group-filter">Machine Group</label>
                                     <select id="kdi-mtbf-asset-group-filter" class="inline-select"><option value="">All Groups</option></select>
@@ -366,16 +436,75 @@
                                             <tr>
                                                 <th>Asset ID</th>
                                                 <th>Asset Name</th>
-                                                <th>Machine Group</th>
-                                                <th>Criticality</th>
+                                                <th>MTTR</th>
+                                                <th>MTBF</th>
                                                 <th>WO Count</th>
-                                                <th>Avg MTBF</th>
-                                                <th>Lowest Gap</th>
-                                                <th>Highest Gap</th>
+                                                <th>Total Downtime</th>
+                                                <th>Last Failure Date</th>
+                                                <th>Repeat Failure Count</th>
                                             </tr>
                                         </thead>
                                         <tbody id="kdi-mtbf-asset-table-body">
-                                            <tr><td colspan="8" class="empty-cell">Expand to view individual asset MTBF.</td></tr>
+                                            <tr><td colspan="8" class="empty-cell">Expand to view individual asset reliability details.</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </details>
+
+                            <!-- MTBF Data Reliability Review -->
+                            <details class="card nested-card missing-data-card mtbf-reliability-card">
+                                <summary class="missing-data-summary">
+                                    <span class="card-title">MTBF Data Reliability Review</span>
+                                    <span class="missing-data-count-badge" id="mtbf-reliability-count">--</span>
+                                    <span class="missing-data-summary-hint">Excluded or suspicious WO pairs — click to expand</span>
+                                </summary>
+                                <p class="card-subtitle">
+                                    WO pairs that could <strong>not</strong> be included in the MTBF calculation
+                                    (missing Actual End Date, negative gap, general-area asset, suspicious short gap, etc.).
+                                    MTBF is calculated strictly as
+                                    <strong>Next WO Actual Start − Previous WO Actual End</strong>.
+                                    No start-to-start fallback is used. Review and annotate each pair below.
+                                </p>
+                                <div class="filter-toolbar missing-data-toolbar">
+                                    <div class="filter-group">
+                                        <label for="mtbf-reliability-filter">Exclusion Reason</label>
+                                        <select id="mtbf-reliability-filter" class="inline-select">
+                                            <option value="all">All Reasons</option>
+                                            <option value="Missing Previous">Missing Previous Actual End</option>
+                                            <option value="Missing Next">Missing Next Actual Start</option>
+                                            <option value="Negative">Negative or overlapping gap</option>
+                                            <option value="Suspicious short">Suspicious short gap</option>
+                                            <option value="General">General asset grouping</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-group filter-group-grow">
+                                        <label for="mtbf-reliability-search">Search</label>
+                                        <input type="text" id="mtbf-reliability-search" class="inline-select"
+                                            placeholder="Asset ID, WO ID, or keyword">
+                                    </div>
+                                </div>
+                                <div class="table-wrapper missing-data-table-wrapper" id="mtbf-reliability-table">
+                                    <table class="missing-data-table">
+                                        <thead>
+                                            <tr>
+                                                <th>Asset ID</th>
+                                                <th>Asset Name</th>
+                                                <th>Prev WO ID</th>
+                                                <th>Prev MR ID</th>
+                                                <th>Prev Actual Start</th>
+                                                <th>Prev Actual End</th>
+                                                <th>Next WO ID</th>
+                                                <th>Next MR ID</th>
+                                                <th>Next Actual Start</th>
+                                                <th>Calculated Gap</th>
+                                                <th>Exclusion Reason</th>
+                                                <th>Review Status</th>
+                                                <th>Remark</th>
+                                                <th>Follow-up Action</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="mtbf-reliability-body">
+                                            <tr><td colspan="14" class="empty-cell">MTBF has not been computed yet — open this section after loading data.</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -641,6 +770,19 @@
                 <div class="card nested-card mr-movement-chart-card">
                     <div class="card-title">Monthly MR Raised vs Finished (Financial Calendar Apr-Mar)</div>
                     <div class="chart-container compact-chart" data-chart-id="mrMovementChart"><canvas id="mrMovementChart"></canvas></div>
+                    <div class="table-wrapper compact-table-wrapper mr-movement-table-wrapper">
+                        <table>
+                            <thead>
+                                <tr id="mr-movement-table-head">
+                                    <th>Metric</th>
+                                    <th>Loading...</th>
+                                </tr>
+                            </thead>
+                            <tbody id="mr-movement-table-body">
+                                <tr><td colspan="13" class="empty-cell">Loading yearly MR movement.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
                 </div>
                 <div class="card nested-card mr-backlog-card">
                     <div class="card-title">Backlog Movement</div>
@@ -875,7 +1017,7 @@
         <section class="card mr-movement-section dashboard-topic-panel hidden" id="topic-preventive-corrective" data-topic-panel="preventive-corrective" aria-labelledby="preventive-corrective-title">
             <div class="mr-movement-header">
                 <div>
-                    <div class="card-title" id="preventive-corrective-title">Preventive vs Corrective</div>
+                    <div class="card-title" id="preventive-corrective-title">Work Type Classification Review</div>
                 </div>
                 <div class="topic-scope-filter">
                     <select id="topic-preventive-year-filter" class="topic-scope-select" aria-label="Year filter — Preventive vs Corrective">
@@ -945,6 +1087,7 @@
                         <select id="topic-preventive-analysis-type-filter" class="inline-select">
                             <option value="preventive">Logged Preventive</option>
                             <option value="corrective">Logged Corrective</option>
+                            <option value="comparison">Preventive vs Corrective</option>
                             <option value="review">Data Review</option>
                         </select>
                     </div>
@@ -990,6 +1133,67 @@
                     </div>
                 </div>
             </div>
+            <!-- Work Type Classification Review: PM keyword flagging for misclassified records -->
+            <details class="card nested-card missing-data-card" id="wt-classification-card">
+                <summary class="missing-data-summary">
+                    <span class="card-title">PM Keyword Flagging — Possible Misclassified Work Types</span>
+                    <span class="missing-data-count-badge" id="wt-classification-count">--</span>
+                    <span class="missing-data-summary-hint">Corrective records with PM-related description keywords — click to review</span>
+                </summary>
+                <p class="card-subtitle">Rows with <strong>Maintenance Request Type = CORRECTIVE</strong> but whose description contains PM-related keywords (e.g. PM, Inspection, Planned Maintenance). This does <strong>not</strong> change the original work type — edit the review fields to track your decision separately. These are the same rows as the <em>Data Review</em> list above with added editable columns.</p>
+                <div class="filter-toolbar missing-data-toolbar">
+                    <div class="filter-group">
+                        <label for="wt-filter-status">Review Status</label>
+                        <select id="wt-filter-status" class="inline-select">
+                            <option value="open">Show Open Only</option>
+                            <option value="all">Show All</option>
+                            <option value="cleared">Show Reviewed Only</option>
+                        </select>
+                    </div>
+                    <div class="filter-group filter-group-grow">
+                        <label for="wt-search">Search</label>
+                        <input type="text" id="wt-search" class="inline-select" placeholder="WO ID, MR ID, Equipment, or Description">
+                    </div>
+                </div>
+                <div class="review-tab-bar">
+                    <button type="button" class="review-tab-btn active wt-tab-btn" data-wt-tab="records">Flagged Records</button>
+                    <button type="button" class="review-tab-btn wt-tab-btn" data-wt-tab="history">Edit History</button>
+                </div>
+                <!-- Flagged Records tab -->
+                <div id="wt-tab-records">
+                    <div class="pagination-bar" id="wt-pagination"></div>
+                    <div class="table-wrapper missing-data-table-wrapper">
+                        <table class="missing-data-table">
+                            <thead>
+                                <tr>
+                                    <th>WO ID</th>
+                                    <th>MR ID</th>
+                                    <th>Equipment / Asset Name</th>
+                                    <th>Asset ID</th>
+                                    <th>Machine Group</th>
+                                    <th>Current Work Type</th>
+                                    <th>Suggested Work Type</th>
+                                    <th>Description</th>
+                                    <th>Matched Keyword</th>
+                                    <th>Review Status</th>
+                                    <th>Remark</th>
+                                    <th>Follow-up Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="wt-classification-body">
+                                <tr><td colspan="12" class="empty-cell">Open the Work Type Classification Review section to load flagged records.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+                <!-- Edit History tab -->
+                <div id="wt-tab-history" class="hidden">
+                    <p class="card-subtitle">Field-level edit log for Work Type Classification edits only.</p>
+                    <div class="section-edit-history" id="wt-review-history-body">
+                        <p class="dr-history-empty">No edits recorded yet.</p>
+                    </div>
+                </div>
+            </details>
         </section>
 
         <section class="card wo-response-section dashboard-topic-panel hidden" id="topic-sla-response" data-topic-panel="sla-response" aria-labelledby="wo-response-title">
@@ -1073,6 +1277,7 @@
                 <div class="wo-response-main-stack">
                     <div class="card nested-card wo-response-table-card">
                         <div class="card-title">SLA Compliance by Severity</div>
+                        <p class="card-subtitle sla-summary-subtitle">SLA % is based on <strong>valid records only</strong> (Met + Late + Open Overdue). <strong>Data Completeness %</strong> = Valid SLA records / Total WO — a high SLA % can still hide incomplete data. Click a <strong>Missing Data</strong> count to review &amp; clean those records.</p>
                         <div class="table-wrapper compact-table-wrapper wo-response-table-wrapper">
                             <table>
                                 <thead>
@@ -1083,11 +1288,31 @@
                                         <th>Late</th>
                                         <th>Open Overdue</th>
                                         <th>Missing Data</th>
-                                        <th>SLA %</th>
+                                        <th>Completeness %</th>
+                                        <th>SLA % (valid only)</th>
                                     </tr>
                                 </thead>
                                 <tbody id="wo-sla-severity-body">
-                                    <tr><td colspan="7" class="empty-cell">Loading SLA severity summary.</td></tr>
+                                    <tr><td colspan="8" class="empty-cell">Loading SLA severity summary.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card nested-card wo-response-table-card wo-completion-card">
+                        <div class="card-title">Average Completion Time (MTTR) by Severity</div>
+                        <p class="card-subtitle">Based on <strong>Actual Start Date → Actual End Date</strong> (repair duration only). Excludes records with missing dates.</p>
+                        <div class="table-wrapper compact-table-wrapper wo-response-table-wrapper">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>Severity</th>
+                                        <th>Average MTTR</th>
+                                        <th>Target</th>
+                                        <th>Variance</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="wo-sla-completion-body">
+                                    <tr><td colspan="4" class="empty-cell">Loading completion-time averages.</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1121,45 +1346,121 @@
                         </div>
                     </details>
                 </div>
-                <div class="wo-response-side-stack topic-analysis-only">
-                    <div class="card nested-card wo-response-table-card">
-                        <div class="card-title">Average Response Time by Severity</div>
-                        <div class="table-wrapper compact-table-wrapper wo-response-table-wrapper">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Severity</th>
-                                        <th>Average</th>
-                                        <th>Target</th>
-                                        <th>Variance</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="wo-sla-response-body">
-                                    <tr><td colspan="4" class="empty-cell">Loading response-time averages.</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
+                <!-- Average Response Time hidden: Actual Start Date is not a confirmed
+                     acknowledgement timestamp, so this metric is not shown as an official KPI.
+                     The tbody is kept so the backend render call still works without errors. -->
+                <tbody id="wo-sla-response-body" style="display:none" aria-hidden="true"></tbody>
+            </div>
+            <details class="card nested-card missing-data-card" id="missing-data-drilldown">
+                <summary class="missing-data-summary">
+                    <span class="card-title">Missing Data Drill-down</span>
+                    <span class="missing-data-count-badge" id="missing-data-count">--</span>
+                    <span class="missing-data-summary-hint">Data cleansing review — click to expand</span>
+                </summary>
+                <p class="card-subtitle">Review the exact records behind each Missing Data count. Edit <strong>Cleansing Status</strong>, <strong>Remark</strong> and <strong>Follow-up Action</strong> only — these are saved in a separate review layer (this browser) and never change the imported source data. The Missing Data counts above always reflect the raw imported data.</p>
+                <div class="filter-toolbar missing-data-toolbar">
+                    <div class="filter-group">
+                        <label for="missing-data-severity-filter">Severity</label>
+                        <select id="missing-data-severity-filter" class="inline-select">
+                            <option value="all">All</option>
+                            <option value="S1">S1</option>
+                            <option value="S2">S2</option>
+                            <option value="S3">S3</option>
+                            <option value="S4">S4</option>
+                        </select>
                     </div>
-                    <div class="card nested-card wo-response-table-card">
-                        <div class="card-title">Average Completion Time by Severity</div>
-                        <div class="table-wrapper compact-table-wrapper wo-response-table-wrapper">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Severity</th>
-                                        <th>Average</th>
-                                        <th>Target</th>
-                                        <th>Variance</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="wo-sla-completion-body">
-                                    <tr><td colspan="4" class="empty-cell">Loading completion-time averages.</td></tr>
-                                </tbody>
-                            </table>
-                        </div>
+                    <div class="filter-group">
+                        <label for="missing-data-fieldtype-filter">Missing Field Type</label>
+                        <select id="missing-data-fieldtype-filter" class="inline-select">
+                            <option value="all">All</option>
+                            <option value="Missing Actual Start">Missing Actual Start</option>
+                            <option value="Missing Actual End">Missing Actual End</option>
+                            <option value="Missing Asset">Missing Asset</option>
+                            <option value="Invalid Date">Invalid Date</option>
+                            <option value="Missing Duration">Missing Duration</option>
+                            <option value="Others">Others</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="missing-data-status-filter">SLA Status</label>
+                        <select id="missing-data-status-filter" class="inline-select">
+                            <option value="all">All</option>
+                            <option value="Missing Data" selected>Missing Data</option>
+                            <option value="Open Overdue">Open Overdue</option>
+                            <option value="Late">Late</option>
+                            <option value="Met Target">Met Target</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="missing-data-group-filter">Machine Group</label>
+                        <select id="missing-data-group-filter" class="inline-select">
+                            <option value="all">All Machine Groups</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="missing-data-cleared-filter">Review</label>
+                        <select id="missing-data-cleared-filter" class="inline-select">
+                            <option value="all">Show All</option>
+                            <option value="open">Show Open Only</option>
+                            <option value="cleared">Show Cleared Only</option>
+                        </select>
+                    </div>
+                    <div class="filter-group filter-group-grow">
+                        <label for="missing-data-search">Search</label>
+                        <input type="text" id="missing-data-search" class="inline-select" placeholder="WO ID, MR ID, Asset Name, or Description">
                     </div>
                 </div>
-            </div>
+                <div class="missing-data-actions">
+                    <button type="button" id="cleansing-tracker-export-btn" class="export-btn">Export Selected Records</button>
+                    <span class="missing-data-export-status" id="missing-data-export-status"></span>
+                </div>
+                <!-- Tab bar: Records | Edit History -->
+                <div class="review-tab-bar">
+                    <button type="button" class="review-tab-btn active md-tab-btn" data-md-tab="records">Records</button>
+                    <button type="button" class="review-tab-btn md-tab-btn" data-md-tab="history">Edit History</button>
+                </div>
+                <!-- Records tab -->
+                <div id="missing-data-tab-records">
+                    <div class="pagination-bar" id="missing-data-pagination"></div>
+                    <div class="table-wrapper missing-data-table-wrapper">
+                        <table class="missing-data-table">
+                            <thead>
+                                <tr>
+                                    <th>WO ID</th>
+                                    <th>MR ID</th>
+                                    <th>Equipment / Asset Name</th>
+                                    <th>Asset ID</th>
+                                    <th>Machine Group</th>
+                                    <th>Severity / Priority</th>
+                                    <th>Created Date</th>
+                                    <th>Actual Start Date</th>
+                                    <th>Actual End Date</th>
+                                    <th>Actual Duration</th>
+                                    <th>Missing Field Type</th>
+                                    <th>SLA Status</th>
+                                    <th>Open Age</th>
+                                    <th>Completion Delay</th>
+                                    <th>Description</th>
+                                    <th>Cleansing Status</th>
+                                    <th>Remark</th>
+                                    <th>Follow-up Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="missing-data-body">
+                                <tr><td colspan="18" class="empty-cell">Open the SLA Compliance section to load work-order data.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="pagination-bar" id="missing-data-pagination-bottom"></div>
+                </div>
+                <!-- Edit History tab -->
+                <div id="missing-data-tab-history" class="hidden">
+                    <p class="card-subtitle">Field-level edit log for this section only. Stored locally in this browser.</p>
+                    <div class="section-edit-history" id="missing-data-history-body">
+                        <p class="dr-history-empty">No edits recorded yet.</p>
+                    </div>
+                </div>
+            </details>
             <div class="mr-movement-subhead wo-response-open-severity-head topic-analysis-only">
                 <div class="card-title">Open MR by Severity</div>
             </div>
@@ -1191,6 +1492,64 @@
                     </div>
                 </div>
             </div>
+        </section>
+
+        <!-- Global Edited Lines History — collects all review section edits in one place -->
+        <section class="card mr-movement-section dashboard-topic-panel hidden" id="topic-edit-history" data-topic-panel="sla-response" aria-hidden="true">
+            <details class="global-history-details">
+                <summary class="missing-data-summary">
+                    <span class="card-title">&#128205; Edited Lines History — All Review Sections</span>
+                    <span class="missing-data-count-badge" id="global-edit-history-count">--</span>
+                    <span class="missing-data-summary-hint">Combined log of all manual review edits — click to expand</span>
+                </summary>
+                <p class="card-subtitle">Shows every field-level edit made across the Missing Data Drill-down, Work Type Classification Review, and other editable review sections. Edits are stored locally in this browser and are never sent to the server.</p>
+                <div class="filter-toolbar missing-data-toolbar">
+                    <div class="filter-group">
+                        <label for="gh-reviewtype-filter">Review Type</label>
+                        <select id="gh-reviewtype-filter" class="inline-select">
+                            <option value="all">All Review Types</option>
+                            <option value="missing-data">Missing SLA Data</option>
+                            <option value="work-type">Work Type Classification</option>
+                            <option value="data-reliability">Data Reliability</option>
+                        </select>
+                    </div>
+                    <div class="filter-group">
+                        <label for="gh-group-filter">Machine Group</label>
+                        <select id="gh-group-filter" class="inline-select">
+                            <option value="all">All Machine Groups</option>
+                        </select>
+                    </div>
+                    <div class="filter-group filter-group-grow">
+                        <label for="gh-search">Search</label>
+                        <input type="text" id="gh-search" class="inline-select" placeholder="WO ID, MR ID, Equipment, or field name">
+                    </div>
+                </div>
+                <div class="pagination-bar" id="global-edit-history-pagination"></div>
+                <div class="table-wrapper missing-data-table-wrapper">
+                    <table class="missing-data-table">
+                        <thead>
+                            <tr>
+                                <th>Review Type</th>
+                                <th>WO ID</th>
+                                <th>MR ID</th>
+                                <th>Equipment / Asset</th>
+                                <th>Machine Group</th>
+                                <th>Severity</th>
+                                <th>Field Changed</th>
+                                <th>Previous Value</th>
+                                <th>New Value</th>
+                                <th>Status</th>
+                                <th>Remark</th>
+                                <th>Follow-up Action</th>
+                                <th>Edited Date/Time</th>
+                            </tr>
+                        </thead>
+                        <tbody id="global-edit-history-body">
+                            <tr><td colspan="13" class="empty-cell">No edit history yet — edits will appear here as you review records.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </details>
         </section>
 
         <section class="card dashboard-topic-panel hidden" id="topic-data-reliability" data-topic-panel="data-reliability" aria-labelledby="data-reliability-title">
@@ -1396,15 +1755,16 @@
                     <div class="filter-toolbar machine-explorer-filter-toolbar">
                         <div class="filter-group"><label for="machine-explorer-year">Year</label><select id="machine-explorer-year"><option value="">All Years</option></select></div>
                         <div class="filter-group"><label for="machine-explorer-month">Month</label><select id="machine-explorer-month"><option value="">All Months</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-group">Machine Group</label><select id="machine-explorer-group"><option value="">All Groups</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-criticality">Criticality</label><select id="machine-explorer-criticality"><option value="">All Criticalities</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-status">Status</label><select id="machine-explorer-status"><option value="">All Statuses</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-service-level">Service Level</label><select id="machine-explorer-service-level"><option value="">All Service Levels</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-asset">Asset ID</label><select id="machine-explorer-asset"><option value="">All Assets</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-machine">Machine / Equipment</label><select id="machine-explorer-machine"><option value="">All Machines</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-created-by">Created By</label><select id="machine-explorer-created-by"><option value="">All Creators</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-started-by">Started By</label><select id="machine-explorer-started-by"><option value="">All Starters</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-quality">Data Quality</label><select id="machine-explorer-quality"><option value="">All Quality Flags</option></select></div>
+                        <!-- Hidden filters retained so existing Machine Explorer logic keeps working; only Year + Month are shown per request. -->
+                        <select id="machine-explorer-group" class="hidden" hidden><option value="">All Groups</option></select>
+                        <select id="machine-explorer-criticality" class="hidden" hidden><option value="">All Criticalities</option></select>
+                        <select id="machine-explorer-status" class="hidden" hidden><option value="">All Statuses</option></select>
+                        <select id="machine-explorer-service-level" class="hidden" hidden><option value="">All Service Levels</option></select>
+                        <select id="machine-explorer-asset" class="hidden" hidden><option value="">All Assets</option></select>
+                        <select id="machine-explorer-machine" class="hidden" hidden><option value="">All Machines</option></select>
+                        <select id="machine-explorer-created-by" class="hidden" hidden><option value="">All Creators</option></select>
+                        <select id="machine-explorer-started-by" class="hidden" hidden><option value="">All Starters</option></select>
+                        <select id="machine-explorer-quality" class="hidden" hidden><option value="">All Quality Flags</option></select>
                     </div>
                     <div class="machine-drill-section">
                         <div class="machine-drill-heading">
@@ -1496,7 +1856,8 @@
                                     <option value="most_invalid">Most Invalid/Missing Records</option>
                                 </select>
                             </div>
-                            <div class="filter-inline">
+                            <!-- Criticality filter hidden per request; select retained (hidden) so existing logic keeps working. -->
+                            <div class="filter-inline" hidden style="display:none">
                                 <label class="inline-label" for="machine-explorer-asset-criticality">Criticality</label>
                                 <select id="machine-explorer-asset-criticality" class="inline-select">
                                     <option value="">All</option>
@@ -1634,19 +1995,20 @@
                 </div>
                 <div class="performance-panel" id="machine-groups-panel">
                     <div class="filter-toolbar machine-filter-toolbar">
-                        <div class="filter-group">
+                        <!-- Criticality / Location / Priority / Search hidden per request; elements retained so existing logic keeps working. Only Year + Month are shown. -->
+                        <div class="filter-group" hidden style="display:none">
                             <label for="group-criticality-filter">Criticality</label>
                             <select id="group-criticality-filter">
                                 <option value="">All Criticalities</option>
                             </select>
                         </div>
-                        <div class="filter-group">
+                        <div class="filter-group" hidden style="display:none">
                             <label for="group-location-filter">Location</label>
                             <select id="group-location-filter">
                                 <option value="">All Locations</option>
                             </select>
                         </div>
-                        <div class="filter-group">
+                        <div class="filter-group" hidden style="display:none">
                             <label for="group-priority-filter">Priority</label>
                             <select id="group-priority-filter">
                                 <option value="">All Priorities</option>
@@ -1664,7 +2026,7 @@
                                 <option value="">All Months</option>
                             </select>
                         </div>
-                        <div class="filter-group filter-grow grid-span-2">
+                        <div class="filter-group filter-grow grid-span-2" hidden style="display:none">
                             <label for="group-search">Search</label>
                             <input id="group-search" type="text" placeholder="Machine group or AssetID">
                         </div>
@@ -1737,7 +2099,7 @@
     </main>
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
-    <script src="script.js?v=20260608-history-empty-1" defer></script>
+    <script src="script.js?v=20260615-kdi-management-1" defer></script>
     <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
 </body>
 </html>

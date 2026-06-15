@@ -17,6 +17,19 @@
 
     const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
     const PM_VIEWS = new Set(["overview"]);
+
+    // Financial year — April start (Apr–Mar), matching the rest of the dashboard
+    // (Downtime MR_FINANCIAL_YEAR_START_MONTH = 4). A FY is labelled by its start
+    // year: e.g. FY2025/26 = Apr 2025 → Mar 2026.
+    const FY_START_MONTH = 4;
+    const FY_MONTH_ORDER = Array.from({ length: 12 }, (_, i) => ((FY_START_MONTH - 1 + i) % 12) + 1); // [4..12,1..3]
+    const FY_MONTH_LABELS = FY_MONTH_ORDER.map((m) => MONTHS[m - 1]);
+    function fyStartYearOf(year, month) { return Number(month) >= FY_START_MONTH ? Number(year) : Number(year) - 1; }
+    function fyIndexOf(month) { return (Number(month) - FY_START_MONTH + 12) % 12; }
+    function fyLabel(startYear) {
+        const y = Number(startYear);
+        return Number.isFinite(y) ? `FY${y}/${String((y + 1) % 100).padStart(2, "0")}` : "Financial Year";
+    }
     const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
     const PALETTE = ["#2563eb", "#0ea5e9", "#14b8a6", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#64748b", "#ec4899", "#84cc16"];
     const STAGE_COLORS = { "Stage 1": "#2563eb", "Stage 2": "#14b8a6", "Unmapped": "#94a3b8", "Needs Stage Review": "#f59e0b" };
@@ -47,6 +60,8 @@
         taskMonth: "all",
         taskDateFrom: "",
         taskDateTo: "",
+        doneSearch: "",
+        monthFy: null,
         sortKey: "plannedDate",
         sortDir: 1,
         editTaskId: null,
@@ -168,6 +183,14 @@
         el("pm-task-month")?.addEventListener("change", (event) => { state.taskMonth = event.target.value || "all"; renderTaskList(); });
         el("pm-task-date-from")?.addEventListener("change", (event) => { state.taskDateFrom = event.target.value || ""; renderTaskList(); });
         el("pm-task-date-to")?.addEventListener("change", (event) => { state.taskDateTo = event.target.value || ""; renderTaskList(); });
+        el("pm-done-search")?.addEventListener("input", debounce((event) => {
+            state.doneSearch = event.target.value.trim();
+            renderDoneList();
+        }, 180));
+        el("pm-month-fy")?.addEventListener("change", (event) => {
+            state.monthFy = event.target.value;
+            renderMonthChart();
+        });
     }
 
     function populateTaskFilters() {
@@ -465,6 +488,7 @@
         renderOverview();
         renderCalendar();
         renderTaskList();
+        renderDoneList();
         renderAnalysisCharts();
     }
 
@@ -871,12 +895,66 @@
         return `<td>${esc(task[key]) || "—"}</td>`;
     }
 
+    // ── "Marked as Done" review list (edit / unmark mistaken completions) ──────
+    const DONE_COLS = [
+        ["pmCategory", "PM Category"],
+        ["assetId", "Asset ID"],
+        ["assetName", "Asset"],
+        ["stage", "Stage"],
+        ["plannedDate", "Scheduled Week"],
+        ["completionDate", "Completed On"],
+        ["contractorOrPIC", "PIC / Contractor"],
+        ["remarksReason", "Remarks"],
+        ["doneAction", "Actions"],
+    ];
+
+    // A PM counts as "marked Done" if its stored/operational status is Done — covers
+    // both imported tasks (isDone is derived) and manual tasks (status only).
+    function isMarkedDone(task) { return storedStatus(task) === "Done" || isDone(task); }
+
+    function renderDoneList() {
+        // Only PMs marked Done, within the current global Stage / Year filter.
+        let rows = getFilteredTasks({ period: "all" }).filter(isMarkedDone);
+        if (state.doneSearch) {
+            const needle = state.doneSearch.toLowerCase();
+            rows = rows.filter((t) => [taskCategory(t), t.assetId, t.assetName, t.systemArea, t.mainAssetGroup, t.stage]
+                .join(" ").toLowerCase().includes(needle));
+        }
+        // Most recently completed first.
+        rows.sort((a, b) => String(b.completionDate || "").localeCompare(String(a.completionDate || "")));
+        setText("pm-done-count", fmt(rows.length));
+
+        const head = el("pm-done-table-head");
+        if (head) head.innerHTML = `<tr>${DONE_COLS.map(([, label]) => `<th>${esc(label)}</th>`).join("")}</tr>`;
+
+        const body = el("pm-done-table-body");
+        if (!body) return;
+        if (!rows.length) {
+            body.innerHTML = `<tr><td colspan="${DONE_COLS.length}" class="empty-row">No PM are marked as Done for the current Stage / Year. Mark a PM Done from the Task List or calendar and it will appear here for review.</td></tr>`;
+            return;
+        }
+        body.innerHTML = rows.slice(0, 1000).map((task) => `<tr>${DONE_COLS.map(([key]) => doneCell(key, task)).join("")}</tr>`).join("");
+    }
+
+    function doneCell(key, task) {
+        if (key === "doneAction") {
+            return `<td><div class="pm-row-actions">`
+                + `<button type="button" class="pm-btn-edit pm-btn-edit-sm" data-pm-edit="${esc(task.pmTaskId)}">Edit</button>`
+                + `<button type="button" class="pm-chip-action pm-chip-danger" data-pm-unmark="${esc(task.pmTaskId)}">Unmark as Done</button>`
+                + `</div></td>`;
+        }
+        return taskCell(key, task);
+    }
+
     // ── Analysis charts (5 key charts + top-10 table) ────────────────────────
     function renderAnalysisCharts() {
         const meta = state.payload?.meta || {};
         const yearTasks = getFilteredTasks({ period: "year" });
 
-        makeChart("pm-chart-month", monthlyConfig(monthlySeries(yearTasks, meta.year)));
+        // Scheduled vs Completed runs on the financial year (Apr–Mar) with its own
+        // FY selector; it spans two calendar years so it uses the full task set.
+        populateMonthFyFilter();
+        renderMonthChart();
         makeChart("pm-chart-compliance", complianceConfig(complianceSeries(yearTasks, meta.year)));
         makeChart("pm-chart-status", doughnutConfig(emptyOr(chartFromCounts(countBy(yearTasks, opStatus), STATUS_BREAKDOWN_ORDER)), STATUS_COLORS));
         renderFLChart(yearTasks);
@@ -886,13 +964,42 @@
         renderTopBacklog(backlogTasks);
     }
 
-    function monthlySeries(rows, year) {
+    // ── Scheduled vs Completed by financial-year month (Apr → Mar) ────────────
+    function fysInData() {
+        const set = new Set();
+        getFilteredTasks({ period: "all" }).forEach((t) => {
+            const m = Number(t.plannedMonth), y = Number(t.plannedYear);
+            if (m && y) set.add(fyStartYearOf(y, m));
+        });
+        return [...set].filter((y) => Number.isFinite(y)).sort((a, b) => b - a);
+    }
+    function currentMonthFy() {
+        const fys = fysInData();
+        if (state.monthFy != null && fys.includes(Number(state.monthFy))) return Number(state.monthFy);
+        const guess = Number(state.payload?.meta?.year);   // default to the globally selected year's FY
+        if (fys.includes(guess)) return guess;
+        return fys.length ? fys[0] : (Number.isFinite(guess) ? guess : new Date().getFullYear());
+    }
+    function populateMonthFyFilter() {
+        const sel = el("pm-month-fy");
+        if (!sel) return;
+        const fys = fysInData();
+        const cur = currentMonthFy();
+        const list = fys.length ? fys : [cur];
+        sel.innerHTML = list.map((y) => `<option value="${y}">${esc(fyLabel(y))}</option>`).join("");
+        sel.value = String(cur);
+    }
+    function renderMonthChart() {
+        makeChart("pm-chart-month", monthlyConfig(monthlySeriesFy(getFilteredTasks({ period: "all" }), currentMonthFy())));
+    }
+    function monthlySeriesFy(rows, fyStart) {
         const scheduled = Array(12).fill(0), done = Array(12).fill(0);
         rows.forEach((t) => {
-            const m = Number(t.plannedMonth);
-            if (!m || Number(t.plannedYear) !== Number(year)) return;
-            scheduled[m - 1] += 1;
-            if (isDone(t)) done[m - 1] += 1;   // manual completion only
+            const m = Number(t.plannedMonth), y = Number(t.plannedYear);
+            if (!m || !y || fyStartYearOf(y, m) !== Number(fyStart)) return;
+            const idx = fyIndexOf(m);   // Apr=0 … Mar=11
+            scheduled[idx] += 1;
+            if (isMarkedDone(t)) done[idx] += 1;   // manual completion only
         });
         return { scheduled, done };
     }
@@ -900,10 +1007,10 @@
         return {
             type: "bar",
             data: {
-                labels: MONTHS,
+                labels: FY_MONTH_LABELS,
                 datasets: [
                     { label: "Scheduled", data: series.scheduled, backgroundColor: "#2563eb", borderRadius: 4 },
-                    { label: "Manually Completed", data: series.done, backgroundColor: "#10b981", borderRadius: 4 },
+                    { label: "Completed", data: series.done, backgroundColor: "#10b981", borderRadius: 4 },
                 ],
             },
             options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: "bottom" } }, scales: { x: { grid: { display: false } }, y: { beginAtZero: true, grid: { color: "#eef2f7" } } } },
@@ -1022,9 +1129,30 @@
             if (quick) { const t = state.taskIndex.get(quick.dataset.pmTask); if (t) openEditModal(t, quick.dataset.pmQuick); return; }
             const del = event.target.closest("[data-pm-delete]");
             if (del) { deleteManualTask(del.dataset.pmDelete); return; }
+            const unmark = event.target.closest("[data-pm-unmark]");
+            if (unmark) { unmarkDone(unmark.dataset.pmUnmark); return; }
             const add = event.target.closest("[data-pm-add]");
             if (add) { openPlannerModal(add.dataset.pmAdd); return; }
         });
+    }
+
+    // Revert a mistaken completion: set status back to Pending (clears the
+    // completion date) via the same override-update endpoint.
+    async function unmarkDone(taskId) {
+        const task = state.taskIndex.get(taskId);
+        const label = task ? (task.assetId || task.assetName || "this PM") : "this PM";
+        if (!window.confirm(`Unmark "${label}" as Done?\n\nIt returns to Pending and its completion date is cleared. You can mark it Done again at any time.`)) return;
+        try {
+            const res = await fetch(`${API}/update`, {
+                method: "POST", headers: { "Content-Type": "application/json" }, cache: "no-store",
+                body: JSON.stringify({ pmTaskId: taskId, status: "Pending", completionDate: "" }),
+            });
+            const data = await res.json();
+            if (!res.ok || !data.ok) throw new Error(data.message || `HTTP ${res.status}`);
+            await refresh();
+        } catch (err) {
+            window.alert(err.message || "Could not unmark the PM as Done.");
+        }
     }
 
     function bindEditModal() {

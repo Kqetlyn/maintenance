@@ -16,8 +16,8 @@
     <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet"></noscript>
 
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
-    <link rel="stylesheet" href="/Maintenance/style.css?v=20260604-mr-search-1">
-    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260608-mira-ov-9">
+    <link rel="stylesheet" href="/Maintenance/style.css?v=20260616-pm-fy-1">
+    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260616-scroll-fit-1">
     <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
 
 </head>
@@ -27,8 +27,14 @@
     <main class="dashboard-content">
         <header class="dash-header">
             <div class="header-copy">
-                <h1 id="maintenance-page-title">Preventive Maintenance Schedule</h1>
-                <p class="subtitle" id="maintenance-page-subtitle">Monthly PM planning, completion tracking, backlog, and compliance overview.</p>
+                <h1 id="maintenance-page-title">Overview</h1>
+                <p class="subtitle" id="maintenance-page-subtitle">AI-assisted daily summary for PM schedule, downtime, and spare parts.</p>
+            </div>
+            <div class="header-actions">
+                <button type="button" id="refresh-data-btn" class="refresh-data-btn" title="Clear cached results and reload the latest data files (use after dropping in updated source files).">
+                    <span class="refresh-data-icon" aria-hidden="true">⟳</span>
+                    <span class="refresh-data-label">Refresh data</span>
+                </button>
             </div>
         </header>
 
@@ -187,6 +193,29 @@
                     </div>
                 </section>
 
+                <section class="card-shell pm-table-card pm-done-card" id="pm-done-list-section">
+                    <div class="section-head pm-table-head">
+                        <div>
+                            <h2>Marked as Done &mdash; Review &amp; Correct</h2>
+                            <p class="section-subtitle"><span id="pm-done-count">0</span> PM marked completed (current Stage / Year) &middot; edit or unmark if recorded by mistake</p>
+                        </div>
+                    </div>
+                    <div class="pm-task-filter-grid">
+                        <label class="control-field search-field">
+                            <span>Search completed PM</span>
+                            <input id="pm-done-search" type="search" placeholder="Asset ID, asset name, system">
+                        </label>
+                    </div>
+                    <div class="table-wrap pm-task-scroll">
+                        <table class="pm-table">
+                            <thead id="pm-done-table-head"></thead>
+                            <tbody id="pm-done-table-body">
+                                <tr><td class="empty-row">Loading completed PM.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </section>
+
                 <section class="pm-purpose-head" id="pm-analysis-section">
                     <div>
                         <h2>PM Analysis</h2>
@@ -196,8 +225,14 @@
 
                 <section class="pm-chart-grid">
                     <article class="card-shell pm-chart-card pm-chart-wide">
-                        <div class="section-head"><div><h2>Scheduled vs Completed PM by Month</h2>
-                            <p class="section-subtitle">Verified done and auto-assumed done against the plan</p></div></div>
+                        <div class="section-head pm-chart-head">
+                            <div><h2>Scheduled vs Completed PM by Month</h2>
+                                <p class="section-subtitle">Completed vs the plan, by financial year (Apr&ndash;Mar)</p></div>
+                            <label class="control-field pm-chart-fy-field">
+                                <span>Financial Year</span>
+                                <select id="pm-month-fy"></select>
+                            </label>
+                        </div>
                         <div class="pm-chart-wrap"><canvas id="pm-chart-month"></canvas></div>
                     </article>
                     <article class="card-shell pm-chart-card">
@@ -411,10 +446,12 @@
         </section>
 
         <section id="spare-parts-view" class="maintenance-view hidden">
+            <div id="spare-mgmt-root" class="spare-mgmt-root"></div>
+
             <section class="card-shell spare-import-card">
                 <div class="section-head">
                     <div>
-                        <h2>Spare Parts Imports</h2>
+                        <h2>Data Sources &amp; Imports</h2>
                     </div>
                     <div class="spare-currency-control">
                         <label for="spare-currency-global">Currency</label>
@@ -486,9 +523,9 @@
                     </div>
                 </div>
                 <div class="spare-kpi-rows">
-                    <section class="summary-grid spare-summary-grid spare-kpi-row-primary" aria-label="Current in-stock spare parts">
-                        <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">No. of Current In-Stock Spare Parts</span><strong id="spare-in-stock-items">--</strong></article>
-                        <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Current In-Stock Value</span><strong id="spare-in-stock-value">--</strong></article>
+                    <section class="summary-grid spare-summary-grid spare-kpi-row-primary" aria-label="Current inventory spare parts">
+                        <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Current In-Stock Items</span><strong id="spare-in-stock-items">--</strong></article>
+                        <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Current Inventory Value</span><strong id="spare-in-stock-value">--</strong></article>
                     </section>
                     <section class="summary-grid spare-summary-grid spare-kpi-row-consumption" aria-label="Spare parts consumption">
                         <article class="summary-card summary-card-kpi summary-card-blue spare-kpi-dual">
@@ -497,15 +534,15 @@
                             <span class="spare-kpi-sub"><span id="spare-stocked-count">--</span> PO rows</span>
                         </article>
                         <article class="summary-card summary-card-kpi summary-card-amber spare-kpi-dual">
-                            <span class="summary-label">Non-Stock</span>
+                            <span class="summary-label">Non-Stock Direct Purchase</span>
                             <strong id="spare-non-stock-spare-po-value">--</strong>
                             <span class="spare-kpi-sub"><span id="spare-non-stock-count">--</span> PO rows</span>
                         </article>
                         <article class="summary-card summary-card-kpi summary-card-red spare-kpi-dual">
-                            <span class="summary-label">Services</span>
+                            <span class="summary-label">Services / Labour / Repair</span>
                             <strong id="spare-non-spare-service-po-value">--</strong>
                             <span class="spare-kpi-sub"><span id="spare-services-count">--</span> PO rows</span>
-                            <span class="spare-kpi-note">Services include repair and cleaning.</span>
+                            <span class="spare-kpi-note">Includes cleaning and contractor work.</span>
                         </article>
                     </section>
                 </div>
@@ -642,7 +679,7 @@
 
             <section class="spare-view-selector" aria-label="Spare parts detail views">
                 <button class="spare-select-card is-active" type="button" data-spare-panel="external">
-                    <span>External Bought Spare Parts</span>
+                    <span>Gen PO Classification</span>
                     <strong id="spare-selector-external-metric">--</strong>
                     <small>Gen PO classified spare-part purchases</small>
                 </button>
@@ -662,31 +699,31 @@
                 <section class="card-shell spare-panel-card">
                     <div class="section-head">
                         <div>
-                            <h2>External Bought Spare Parts</h2>
-                            <p class="section-subtitle">Gen PO rows classified into stocked spare parts, non-stock direct purchases, service/non-spare items, and manual review.</p>
+                            <h2>Gen PO Classification</h2>
+                            <p class="section-subtitle">Gen PO rows classified into stocked spare parts, non-stock direct purchases, services / labour / repair / cleaning, and manual review.</p>
                         </div>
                     </div>
 
                     <section class="spare-panel-metric-grid">
                         <article class="spare-panel-metric"><span>Gen PO Spare Part Quantity</span><strong id="spare-fast-moving-parts">--</strong></article>
-                        <article class="spare-panel-metric"><span>Gen PO Non-Spare Quantity</span><strong id="spare-slow-moving-parts">--</strong></article>
+                        <article class="spare-panel-metric"><span>Gen PO Services / Non-Spare Qty</span><strong id="spare-slow-moving-parts">--</strong></article>
                         <article class="spare-panel-metric"><span>Gen PO Spare Part Line Count</span><strong id="spare-dormant-parts">--</strong></article>
                     </section>
 
                     <section class="spare-panel-chart-grid">
                         <article class="spare-panel-chart">
-                            <div class="spare-panel-head"><h3>Gen PO Classification Breakdown</h3><p>Stocked spare part, non-stock direct purchase, non-spare/service, and manual review using the selected metric.</p></div>
+                            <div class="spare-panel-head"><h3>Gen PO Classification Breakdown</h3><p>Stocked spare part, non-stock direct purchase, services / labour / repair / cleaning, and manual review using the selected metric.</p></div>
                             <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="spare-po-classification-chart"></canvas></div>
                         </article>
                         <article class="spare-panel-chart">
-                            <div class="spare-panel-head"><h3>External Purchase Trend by Month</h3><p>Monthly classified Gen PO trend using the selected metric.</p></div>
+                            <div class="spare-panel-head"><h3>Classification Trend by Month</h3><p>Monthly classified Gen PO trend using the selected metric.</p></div>
                             <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="spare-turnover-classification-chart"></canvas></div>
                         </article>
                         <article class="spare-panel-chart">
-                            <div class="spare-panel-head"><h3>Top 10 Externally Purchased Spare Parts</h3><p>Classified spare part descriptions ranked by the selected metric.</p></div>
+                            <div class="spare-panel-head"><h3>Top Purchased Items by Classification</h3><p>Classified spare part descriptions ranked by the selected metric.</p></div>
                             <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="spare-inventory-category-chart"></canvas></div>
                         </article>
-                        <article class="spare-panel-chart">
+                        <article class="spare-panel-chart spm-duplicate-vendor-chart">
                             <div class="spare-panel-head"><h3>Top 10 Vendors for Spare Parts</h3><p>Vendors ranked by classified spare part purchases using the selected metric.</p></div>
                             <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="spare-top-reorder-chart"></canvas></div>
                         </article>
@@ -717,7 +754,7 @@
                     <article class="spare-panel-table">
                         <div class="spare-panel-head spare-panel-head-search">
                             <div>
-                                <h3>Manual Review Table <span class="spare-panel-count" id="spare-manual-review-count">--</span></h3>
+                                <h3>Manual Review / Unclassified Table <span class="spare-panel-count" id="spare-manual-review-count">--</span></h3>
                                 <p>Rows flagged for missing item code, description too short to classify, translation failure, low confidence, weak match, or missing total price.</p>
                             </div>
                             <input type="search" id="spare-manual-review-search" class="spare-panel-search" placeholder="Search PO no., description, item code, vendor…" autocomplete="off" aria-label="Search manual review table">
@@ -808,7 +845,7 @@
             <section class="card-shell pt-header-card">
                 <div class="pt-section-head">
                     <div>
-                        <h2>Project Actual Transactions 2026</h2>
+                        <h2>Goods Issued / Consumption</h2>
                     </div>
                     <div id="pt-status-badge" class="pt-status-badge"></div>
                 </div>
@@ -1024,7 +1061,7 @@
             <!-- ─── End External Purchases ─────────────────────────────────── -->
 
             <article class="card-shell table-card pt-transactions-card">
-                <div class="section-head"><div><h2>All Transactions</h2><p class="section-subtitle">Full detail of all parsed spare part consumption lines (max 300 rows shown).</p></div></div>
+                <div class="section-head"><div><h2>Goods Issued / Consumption Transactions</h2><p class="section-subtitle">Project Actual Transactions detail for parsed spare part consumption lines (max 300 rows shown).</p></div></div>
                 <div class="tbl-filter-bar">
                     <input type="search" id="pt-txn-search" class="tbl-search-input" placeholder="Search description or asset…">
                     <select id="pt-txn-cat" class="tbl-filter-select"><option value="">All Categories</option></select>
@@ -1046,7 +1083,7 @@
             <section class="spare-table-grid">
                 <article class="card-shell table-card pt-parts-combined-card">
                     <div class="section-head">
-                        <div><h2>All Spare Parts</h2><p class="section-subtitle">All parts aggregated by description.</p></div>
+                        <div><h2>Spare Parts Catalogue / Aggregated Parts</h2><p class="section-subtitle">Aggregated from imported purchase and/or consumption records. Treat as live stock balance only when inventory stock data is available.</p></div>
                         <div class="pt-table-year-wrap">
                             <select id="pt-top-parts-year" class="control-select">
                                 <option value="all">All FY</option>
@@ -1664,9 +1701,10 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/shared/mira/mira-overview.js?v=20260608-mira-fast-5" defer></script>
-    <script src="/Maintenance/script.js?v=20260609-asset-excel-export-1" defer></script>
-    <script src="/Maintenance/pm-schedule.js?v=20260605-pm-header-filters-11" defer></script>
+    <script src="/shared/mira/mira-overview.js?v=20260616-scroll-fit-1" defer></script>
+    <script src="/Maintenance/script.js?v=20260612-overview-title-1" defer></script>
+    <script src="/Maintenance/spare-parts-mgmt.js?v=20260615-spare-mgmt-4" defer></script>
+    <script src="/Maintenance/pm-schedule.js?v=20260616-pm-fy-1" defer></script>
     <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
 
