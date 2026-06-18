@@ -3196,7 +3196,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const parts = [];
         if (validation.rows !== undefined && validation.rows !== null) parts.push(`${formatInteger(validation.rows)} rows`);
         if (validation.flagged_rows) parts.push(`${formatInteger(validation.flagged_rows)} flagged`);
-        if (validation.manual_review_rows) parts.push(`${formatInteger(validation.manual_review_rows)} manual review`);
+        if (validation.manual_review_rows) parts.push(`${formatInteger(validation.manual_review_rows)} review / unclassified`);
         if (validation.years?.length) parts.push(`Years: ${validation.years.join(", ")}`);
         if (validation.source_count) parts.push(`${formatInteger(validation.source_count)} source file${Number(validation.source_count) === 1 ? "" : "s"}`);
         return parts.join(" | ");
@@ -3286,7 +3286,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const inventoryRows = payload?.inventory?.records || [];
         const poRows = payload?.po_classification?.records || [];
         populateSpareSelect("spare-supplier-filter", uniqueSorted(poRows.map((row) => row?.vendor_name || row?.supplier)), "All Vendors", state.sparePartsFilters.supplier);
-        populateSpareSelect("spare-classification-filter", uniqueSorted(poRows.map((row) => row?.classification)), "All Classifications", state.sparePartsFilters.classification);
+        populateSpareSelect(
+            "spare-classification-filter",
+            uniqueSorted(poRows.map((row) => normalizeSpareClassification(row?.classification))),
+            "All Classifications",
+            normalizeSpareClassification(state.sparePartsFilters.classification)
+        );
         populateSpareSelect("spare-confidence-filter", uniqueSorted(poRows.map((row) => row?.confidence)), "All Confidence", state.sparePartsFilters.confidence);
         populateSpareSelect("spare-translation-filter", uniqueSorted(poRows.map((row) => row?.translation_status)), "All Translation Status", state.sparePartsFilters.translationStatus);
         populateSpareSelect("spare-inventory-match-filter", uniqueSorted(poRows.map((row) => row?.inventory_match_status)), "All Match Status", state.sparePartsFilters.inventoryMatchStatus);
@@ -3536,6 +3541,55 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    const SPARE_CLASS_STOCK = "Stock Spare Part";
+    const SPARE_CLASS_NON_STOCK = "Non-Stock Spare Part";
+    const SPARE_CLASS_SERVICE = "Service / Labour / Repair";
+    const SPARE_CLASS_CAPEX = "CAPEX";
+    const SPARE_CLASS_CONSUMABLE = "Consumable / Chemical";
+    const SPARE_CLASS_OTHER = "Other / Unclassified";
+    const SPARE_CLASS_ORDER = [
+        SPARE_CLASS_STOCK,
+        SPARE_CLASS_NON_STOCK,
+        SPARE_CLASS_SERVICE,
+        SPARE_CLASS_CAPEX,
+        SPARE_CLASS_CONSUMABLE,
+        SPARE_CLASS_OTHER,
+    ];
+    const SPARE_CLASS_ALIASES = {
+        "Stocked Spare Part Purchase": SPARE_CLASS_STOCK,
+        "Non-Stock Spare Part / Direct Purchase": SPARE_CLASS_NON_STOCK,
+        "Non-Spare Part / Service": SPARE_CLASS_SERVICE,
+        "Manual Review": SPARE_CLASS_OTHER,
+        "Other / Manual Review": SPARE_CLASS_OTHER,
+        "Spare Part": SPARE_CLASS_STOCK,
+        "Non-Spare Part": SPARE_CLASS_SERVICE,
+    };
+
+    function normalizeSpareClassification(value) {
+        const raw = String(value || "").trim();
+        return SPARE_CLASS_ALIASES[raw] || raw || SPARE_CLASS_OTHER;
+    }
+
+    function isSparePartClassification(value) {
+        const normalized = normalizeSpareClassification(value);
+        return normalized === SPARE_CLASS_STOCK || normalized === SPARE_CLASS_NON_STOCK;
+    }
+
+    function isServiceClassification(value) {
+        return normalizeSpareClassification(value) === SPARE_CLASS_SERVICE;
+    }
+
+    function isSpecialPurchaseClassification(value) {
+        const normalized = normalizeSpareClassification(value);
+        return normalized === SPARE_CLASS_SERVICE
+            || normalized === SPARE_CLASS_CAPEX
+            || normalized === SPARE_CLASS_CONSUMABLE;
+    }
+
+    function isOtherClassification(value) {
+        return normalizeSpareClassification(value) === SPARE_CLASS_OTHER;
+    }
+
     function getFilteredSparePartsData(payload) {
         const filters = state.sparePartsFilters;
         const inventory = (payload?.inventory?.records || [])
@@ -3548,6 +3602,7 @@ document.addEventListener("DOMContentLoaded", () => {
             });
 
         const poRows = (payload?.po_classification?.records || [])
+            .map((row) => ({ ...row, classification: normalizeSpareClassification(row?.classification) }))
             .filter((row) => rowWithinSpareRange(row, ["po_date", "goods_received_date"], false))
             .filter((row) => !filters.itemCode || String(row?.code || "").toLowerCase().includes(filters.itemCode))
             .filter((row) => !filters.search || [
@@ -3560,23 +3615,37 @@ document.addEventListener("DOMContentLoaded", () => {
                 row?.vendor_name,
             ].some((value) => String(value || "").toLowerCase().includes(filters.search)))
             .filter((row) => filters.supplier === "all" || (row?.vendor_name || row?.supplier) === filters.supplier)
-            .filter((row) => filters.classification === "all" || row?.classification === filters.classification)
+            .filter((row) => filters.classification === "all" || row?.classification === normalizeSpareClassification(filters.classification))
             .filter((row) => filters.confidence === "all" || row?.confidence === filters.confidence)
             .filter((row) => filters.translationStatus === "all" || row?.translation_status === filters.translationStatus)
             .filter((row) => filters.inventoryMatchStatus === "all" || row?.inventory_match_status === filters.inventoryMatchStatus)
             .filter((row) => filters.groupOfCost === "all" || row?.group_of_cost === filters.groupOfCost)
             .filter((row) => filters.pdMachine === "all" || row?.pd_machine === filters.pdMachine);
 
-        const sparePoRows = poRows.filter((row) => ["Stocked Spare Part Purchase", "Non-Stock Spare Part / Direct Purchase"].includes(row?.classification));
-        const nonSpareRows = poRows.filter((row) => row?.classification === "Non-Spare Part / Service");
-        const manualReviewRows = poRows.filter((row) => row?.needs_manual_review || row?.classification === "Manual Review");
+        const sparePoRows = poRows.filter((row) => isSparePartClassification(row?.classification));
+        const nonSpareRows = poRows.filter((row) => isServiceClassification(row?.classification));
+        const specialPoRows = poRows.filter((row) => isSpecialPurchaseClassification(row?.classification));
+        const classifiedPoRows = poRows.filter((row) => !isOtherClassification(row?.classification));
+        const manualReviewRows = poRows.filter((row) => row?.needs_manual_review || isOtherClassification(row?.classification));
         const inventorySummaryRows = buildSpareInventorySummaryRows(inventory, sparePoRows, filters.stockStatus);
-        const topPurchaseRows = buildSpareTopPurchaseRows(sparePoRows);
-        const topVendorRows = buildSpareVendorRows(sparePoRows);
+        const topPurchaseRows = buildSpareTopPurchaseRows(classifiedPoRows);
+        const topVendorRows = buildSpareVendorRows(classifiedPoRows);
         const storeDrawn = (payload?.consumption?.store_drawn_records || [])
             .filter((row) => !filters.search || [row?.code, row?.name, row?.item_name, row?.description]
                 .some((value) => String(value || "").toLowerCase().includes(filters.search)));
-        return { inventory, poRows, sparePoRows, nonSpareRows, manualReviewRows, inventorySummaryRows, topPurchaseRows, topVendorRows, storeDrawn };
+        return {
+            inventory,
+            poRows,
+            sparePoRows,
+            nonSpareRows,
+            specialPoRows,
+            classifiedPoRows,
+            manualReviewRows,
+            inventorySummaryRows,
+            topPurchaseRows,
+            topVendorRows,
+            storeDrawn,
+        };
     }
 
     function sumSpareValue(rows, key) {
@@ -3655,11 +3724,12 @@ document.addEventListener("DOMContentLoaded", () => {
         const summary = payload?.comparison?.summary || {};
         const useSummary = useSpareOverviewSummary();
         const filteredInventoryValue = sumSpareValue(filtered.inventory, "stock_value");
-        const filteredExternalSpareValue = sumSpareValue(filtered.sparePoRows, "total_cost");
-        const filteredStockedPoValue = sumSpareValue(filtered.sparePoRows.filter((row) => row?.classification === "Stocked Spare Part Purchase"), "total_cost");
-        const filteredNonStockPoValue = sumSpareValue(filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase"), "total_cost");
-        const filteredNonSpareValue = sumSpareValue(filtered.nonSpareRows, "total_cost");
+        const filteredExternalSpareValue = sumSpareValue(filtered.classifiedPoRows || filtered.poRows, "total_cost");
+        const filteredStockedPoValue = sumSpareValue(filtered.poRows.filter((row) => row?.classification === SPARE_CLASS_STOCK), "total_cost");
+        const filteredNonStockPoValue = sumSpareValue(filtered.poRows.filter((row) => row?.classification === SPARE_CLASS_NON_STOCK), "total_cost");
+        const filteredNonSpareValue = sumSpareValue(filtered.poRows.filter((row) => row?.classification === SPARE_CLASS_SERVICE), "total_cost");
         const filteredInventoryQty = sumSpareQuantity(filtered.inventory, "current_quantity");
+        const filteredSpecialQty = sumSpareQuantity(filtered.specialPoRows, "quantity_ordered");
         const pickSummaryNumber = (key, fallback) => {
             const value = toFiniteNumber(summary?.[key]);
             return useSummary && value !== null ? value : fallback;
@@ -3668,7 +3738,7 @@ document.addEventListener("DOMContentLoaded", () => {
         const inventoryValue = useSummary && hasSummaryKey("current_inventory_value")
             ? toFiniteNumber(summary.current_inventory_value)
             : filteredInventoryValue;
-        const externalSpareValue = pickSummaryNumber("external_po_spare_part_value", filteredExternalSpareValue);
+        const externalSpareValue = filteredExternalSpareValue;
         const stockedPoValue = pickSummaryNumber("stocked_spare_part_po_value", filteredStockedPoValue);
         const nonStockPoValue = pickSummaryNumber("non_stock_spare_part_po_value", filteredNonStockPoValue);
         const nonSpareValue = pickSummaryNumber("non_spare_part_service_po_value", filteredNonSpareValue);
@@ -3676,14 +3746,13 @@ document.addEventListener("DOMContentLoaded", () => {
         const inStockRows = filtered.inventory.filter((row) => Number(row?.current_quantity) > 0);
         const inStockItems = pickSummaryNumber("in_stock_items", inStockRows.length);
         const inStockValue = pickSummaryNumber("in_stock_value", sumSpareValue(inStockRows, "stock_value"));
-        const stockedCount = pickSummaryNumber("stocked_spare_part_po_count", filtered.sparePoRows.filter((row) => row?.classification === "Stocked Spare Part Purchase").length);
-        const nonStockCount = pickSummaryNumber("non_stock_spare_part_po_count", filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase").length);
+        const stockedCount = pickSummaryNumber("stocked_spare_part_po_count", filtered.poRows.filter((row) => row?.classification === SPARE_CLASS_STOCK).length);
+        const nonStockCount = pickSummaryNumber("non_stock_spare_part_po_count", filtered.poRows.filter((row) => row?.classification === SPARE_CLASS_NON_STOCK).length);
         const servicesCount = pickSummaryNumber("non_spare_part_po_count", filtered.nonSpareRows.length);
-        const manualReviewCount = pickSummaryNumber("manual_review_po_items", filtered.poRows.filter((row) => row?.classification === "Manual Review").length);
         const inventoryQty = pickSummaryNumber("current_stock_quantity", filteredInventoryQty);
         const spareQty = pickSummaryNumber("gen_po_spare_part_quantity", sumSpareQuantity(filtered.sparePoRows, "quantity_ordered"));
-        const nonSpareQty = pickSummaryNumber("gen_po_non_spare_part_quantity", sumSpareQuantity(filtered.nonSpareRows, "quantity_ordered"));
-        const spareLineCount = pickSummaryNumber("gen_po_spare_part_line_count", filtered.sparePoRows.length);
+        const nonSpareQty = pickSummaryNumber("gen_po_non_spare_part_quantity", filteredSpecialQty);
+        const spareLineCount = pickSummaryNumber("gen_po_spare_part_line_count", filtered.poRows.length);
         const exactMatches = pickSummaryNumber("exact_item_code_matches", filtered.poRows.filter((row) => row?.inventory_match_status === "Exact Item Code Match").length);
         const descriptionMatches = pickSummaryNumber("description_matches", filtered.poRows.filter((row) => row?.inventory_match_status === "Description Match").length);
         const translationFailed = pickSummaryNumber("translation_failed_items", filtered.poRows.filter((row) => row?.translation_status === "Translation failed").length);
@@ -3934,7 +4003,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function renderSpareInventoryVsPurchaseChart(filtered) {
         const inventoryValue = sumSpareValue(filtered.inventory, "stock_value");
-        const nonStockValue = sumSpareValue(filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase"), "total_cost");
+        const nonStockValue = sumSpareValue(filtered.poRows.filter((row) => row?.classification === SPARE_CLASS_NON_STOCK), "total_cost");
         const nonSpareValue = sumSpareValue(filtered.nonSpareRows, "total_cost");
 
         if (inventoryValue !== null) {
@@ -3948,7 +4017,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
         renderSpareBarChart("spare-consumption-chart", [
             { label: "Current Stock Quantity", value: Number(sumSpareQuantity(filtered.inventory, "current_quantity") || 0) },
-            { label: "Gen PO Non-Stock Quantity", value: Number(sumSpareQuantity(filtered.sparePoRows.filter((row) => row?.classification === "Non-Stock Spare Part / Direct Purchase"), "quantity_ordered") || 0) },
+            { label: "Gen PO Non-Stock Quantity", value: Number(sumSpareQuantity(filtered.poRows.filter((row) => row?.classification === SPARE_CLASS_NON_STOCK), "quantity_ordered") || 0) },
             { label: "Gen PO Services / Non-Spare Quantity", value: Number(sumSpareQuantity(filtered.nonSpareRows, "quantity_ordered") || 0) },
         ], "No inventory or Gen PO quantity data available.", "Quantity", "Quantity");
     }
@@ -3957,28 +4026,28 @@ document.addEventListener("DOMContentLoaded", () => {
         const metric = state.sparePartsFilters.metric;
         const grouped = new Map();
         (filtered.poRows || []).forEach((row) => {
-            const key = row?.classification || "Unclassified";
+            const key = normalizeSpareClassification(row?.classification);
             grouped.set(key, (grouped.get(key) || 0) + getSpareMetricValue(row, metric));
         });
-        const rows = [...grouped.entries()].map(([label, value]) => ({ label: spareDisplayLabel(label), value: metric === "price" ? spConvert(value) : value }));
+        const orderedLabels = SPARE_CLASS_ORDER.filter((label) => grouped.has(label));
+        const extraLabels = [...grouped.keys()].filter((label) => !orderedLabels.includes(label));
+        const rows = orderedLabels.concat(extraLabels).map((label) => ({
+            label: spareDisplayLabel(label),
+            value: metric === "price" ? spConvert(grouped.get(label) || 0) : (grouped.get(label) || 0),
+        }));
         renderSparePieChart("spare-po-classification-chart", rows, "Gen PO file not uploaded.");
     }
 
     function renderSparePoTrendChart(filtered) {
         const metric = state.sparePartsFilters.metric;
-        const classifications = [
-            "Stocked Spare Part Purchase",
-            "Non-Stock Spare Part / Direct Purchase",
-            "Non-Spare Part / Service",
-            "Manual Review",
-        ];
+        const classifications = SPARE_CLASS_ORDER;
         const buckets = new Map();
         (filtered.poRows || []).forEach((row) => {
             const month = String(row?.po_date || row?.goods_received_date || "").slice(0, 7);
             if (!/^\d{4}-\d{2}$/.test(month)) return;
             if (!buckets.has(month)) buckets.set(month, {});
             const monthBucket = buckets.get(month);
-            const key = row?.classification || "Manual Review";
+            const key = normalizeSpareClassification(row?.classification);
             monthBucket[key] = (monthBucket[key] || 0) + getSpareMetricValue(row, metric);
         });
         const months = [...buckets.keys()].sort();
@@ -3997,8 +4066,8 @@ document.addEventListener("DOMContentLoaded", () => {
                         const value = buckets.get(month)?.[label] || 0;
                         return metric === "price" ? spConvert(value) : value;
                     }),
-                    borderColor: ["#2563eb", "#0f766e", "#f59e0b", "#dc2626"][index],
-                    backgroundColor: ["#2563eb", "#0f766e", "#f59e0b", "#dc2626"][index],
+                    borderColor: sparePieColor(label, index),
+                    backgroundColor: sparePieColor(label, index),
                     tension: 0.24,
                 })),
             },
@@ -4147,10 +4216,12 @@ document.addEventListener("DOMContentLoaded", () => {
             "Out of Stock": "#991b1b",
             "Overstock": "#2563eb",
             "Unknown Stock Threshold": "#f59e0b",
-            "Stocked Spare Part Purchase": "#10b981",
-            "Non-Stock Spare Part / Direct Purchase": "#2563eb",
-            "Non-Spare Part / Service": "#f59e0b",
-            "Manual Review": "#dc2626",
+            [SPARE_CLASS_STOCK]: "#10b981",
+            [SPARE_CLASS_NON_STOCK]: "#2563eb",
+            [SPARE_CLASS_SERVICE]: "#f59e0b",
+            [SPARE_CLASS_CAPEX]: "#8b5cf6",
+            [SPARE_CLASS_CONSUMABLE]: "#0f766e",
+            [SPARE_CLASS_OTHER]: "#dc2626",
         };
         const palette = ["#2563eb", "#8b5cf6", "#f59e0b", "#10b981", "#64748b", "#0f766e"];
         return colorMap[label] || palette[index % palette.length];
@@ -4308,8 +4379,8 @@ document.addEventListener("DOMContentLoaded", () => {
         const term = spareManualReviewSearchTerm;
         const rows = (spareManualReviewRowsCache || []).filter((row) => spareManualReviewRowMatches(row, term));
         const emptyMessage = term
-            ? `No manual review rows match "${term}".`
-            : "No manual review PO items for the selected filters.";
+            ? `No review rows match "${term}".`
+            : "No unclassified or flagged PO rows for the selected filters.";
         renderSpareTable("spare-manual-review-table-body", rows, 8, (row) => [
             row.po_number || "--",
             formatShortDate(row.po_date),
@@ -4318,7 +4389,7 @@ document.addEventListener("DOMContentLoaded", () => {
             row.translated_description || "--",
             formatSpareCurrency(row.total_cost),
             row.vendor_name || row.supplier || "--",
-            (row.review_reasons || []).join("; ") || row.classification_reason || "Manual Review",
+            (row.review_reasons || []).join("; ") || row.classification_reason || SPARE_CLASS_OTHER,
         ], emptyMessage);
         const countEl = document.getElementById("spare-manual-review-count");
         if (countEl) {
@@ -4362,10 +4433,9 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function spareDisplayLabel(value) {
-        const text = String(value || "Unclassified");
+        const text = normalizeSpareClassification(value);
         const labels = {
-            "Non-Spare Part / Service": "Services / Labour / Repair / Cleaning",
-            "Manual Review": "Manual Review / Unclassified",
+            [SPARE_CLASS_SERVICE]: "Services / Labour / Repair",
         };
         return labels[text] || text;
     }
@@ -5996,10 +6066,15 @@ document.addEventListener("DOMContentLoaded", () => {
             ? `${(summary.on_time_count || 0).toLocaleString()} / ${summary.evaluated_count.toLocaleString()} delivered`
             : "--");
         set("epo-kpi-avg-delay", summary.avg_delay_days != null ? `${summary.avg_delay_days} d` : "--");
-        set("epo-kpi-delayed-count", summary.delayed_count != null
-            ? `${summary.delayed_count.toLocaleString()} delayed POs` : "--");
+        set(
+            "epo-kpi-delayed-count",
+            `${summary.average_lead_time_days != null ? `Lead ${summary.average_lead_time_days} d` : "Lead --"} | ${
+                summary.delayed_count != null ? `${summary.delayed_count.toLocaleString()} delayed` : "Delayed --"
+            }`
+        );
         set("epo-kpi-awaiting", summary.awaiting_delivery != null
             ? Number(summary.awaiting_delivery).toLocaleString() : "--");
+        set("epo-kpi-open-value", summary.open_po_value != null ? `Open value ${epoFmt(summary.open_po_value)}` : "Open value --");
         set("epo-kpi-spend", epoFmt(summary.total_spend));
         const topType = (summary.spend_by_type || [])[0];
         set("epo-kpi-spend-sub", topType ? `${topType.type}: ${epoFmt(topType.total)}` : "--");
@@ -6263,11 +6338,11 @@ document.addEventListener("DOMContentLoaded", () => {
                 <td>${epoNum(s.total_pos)}</td>
                 <td>${epoNum(s.on_time)}</td>
                 <td>${epoNum(s.delayed)}</td>
-                <td>${epoNum(s.pending)}</td>
+                <td>${epoNum(s.pending)}<span class="table-subtext">${escapeHtml(epoFmt(s.open_value))}</span></td>
                 <td>${epoNum(s.avg_delay, 1)}</td>
-                <td style="color:${t.color};font-weight:600">${rateStr}</td>
+                <td>${epoNum(s.avg_lead_time, 1)}</td>
                 <td>${epoFmt(s.spend)}</td>
-                <td><span class="epo-tier-badge epo-tier-${t.tier}">${t.label}</span></td>
+                <td><span style="color:${t.color};font-weight:600">${rateStr}</span><span class="table-subtext">${escapeHtml(t.label)}</span></td>
             </tr>`;
         }).join("");
     }
@@ -6341,10 +6416,10 @@ document.addEventListener("DOMContentLoaded", () => {
             createChart("epo-chart-classification", {
                 type: "doughnut",
                 data: {
-                    labels: cats.map((c) => c.classification),
+                    labels: cats.map((c) => spareDisplayLabel(c.classification)),
                     datasets: [{
                         data: cats.map((c) => c.count),
-                        backgroundColor: [_epoChartTheme.blue, _epoChartTheme.teal, _epoChartTheme.amber, _epoChartTheme.slate],
+                        backgroundColor: cats.map((c, index) => sparePieColor(normalizeSpareClassification(c.classification), index)),
                     }],
                 },
                 options: { plugins: { legend: { position: "bottom", ...legendCfg } } },
@@ -6354,12 +6429,15 @@ document.addEventListener("DOMContentLoaded", () => {
         // Category: Parts (Stock vs Non-Stock)
         if (_epoVisible("epo-panel-category")) {
             const cats = payload.category_summary || [];
-            const partCats = cats.filter((c) => c.classification === "Stock" || c.classification === "Non-Stock");
+            const partCats = cats.filter((c) => {
+                const classification = normalizeSpareClassification(c.classification);
+                return classification === SPARE_CLASS_STOCK || classification === SPARE_CLASS_NON_STOCK;
+            });
             const partsBody = document.getElementById("epo-parts-cat-body");
             if (partsBody) {
                 partsBody.innerHTML = partCats.length
                     ? partCats.map((c) => `<tr>
-                        <td>${escapeHtml(c.classification)}</td>
+                        <td>${escapeHtml(spareDisplayLabel(c.classification))}</td>
                         <td>${epoNum(c.count)}</td>
                         <td>${epoFmt(c.spend)}</td>
                         <td>${c.on_time_rate != null ? `${c.on_time_rate}%` : "—"}</td>
@@ -6371,7 +6449,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 createChart("epo-chart-parts-spend", {
                     type: "bar",
                     data: {
-                        labels: partCats.map((c) => c.classification),
+                        labels: partCats.map((c) => spareDisplayLabel(c.classification)),
                         datasets: [{
                             label: "Spend (THB)",
                             data: partCats.map((c) => c.spend),
@@ -6390,7 +6468,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 createChart("epo-chart-parts-count", {
                     type: "doughnut",
                     data: {
-                        labels: partCats.map((c) => c.classification),
+                        labels: partCats.map((c) => spareDisplayLabel(c.classification)),
                         datasets: [{
                             data: partCats.map((c) => c.count),
                             backgroundColor: [_epoChartTheme.blue, _epoChartTheme.teal],

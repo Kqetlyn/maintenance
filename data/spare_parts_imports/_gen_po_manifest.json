@@ -1,0 +1,24 @@
+{
+  "Stage 2": {
+    "file_name": "Gen PO Stage 2 D365 Rev.00.xlsx",
+    "stored_path": "C:\\Users\\merri\\Downloads\\Maintenance\\maintenance\\data\\spare_parts_imports\\gen_po_stage2__Gen PO Stage 2 D365 Rev.00.xlsx",
+    "imported_at": "2026-06-18T13:03:51",
+    "row_count": 223,
+    "missing_required": [],
+    "missing_recommended": [
+      "Description",
+      "Group of cost",
+      "Sub-Cost"
+    ],
+    "issues": []
+  },
+  "Stage 1": {
+    "file_name": "Gen PO D365 Rev.03_1_.xlsx",
+    "stored_path": "C:\\Users\\merri\\Downloads\\Maintenance\\maintenance\\data\\spare_parts_imports\\gen_po_stage1__Gen PO D365 Rev.03_1_.xlsx",
+    "imported_at": "2026-06-18T13:04:36",
+    "row_count": 2268,
+    "missing_required": [],
+    "missing_recommended": [],
+    "issues": []
+  }
+}

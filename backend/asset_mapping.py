@@ -202,8 +202,9 @@ def load_asset_mapping(data_dir):
         display_name = _clean(cell(row, "Asset Name", "DisplayName", fallback_index=1), asset_id)
         stage = _normalize_stage(cell(row, "Stage", fallback_index=2))
         mapping_status = _stage_mapping_status(stage, asset_id)
-        machine_group = _clean(cell(row, "Main Asset Group", "MachineGroup", fallback_index=3), "Unknown / Review")
-        sub_asset_group = _clean(cell(row, "Sub Asset Group", fallback_index=4), "")
+        machine_group = _clean(cell(row, "Category", "Main Asset Group", fallback_index=3), "Unknown / Review")
+        asset_machine_group = _clean(cell(row, "Machine Group"), "")
+        sub_asset_group = _clean(cell(row, "Sub Asset Group", fallback_index=5), "")
         location = _clean(cell(row, "Location", fallback_index=5), "Unassigned")
         system_area = _clean(cell(row, "System/Area", "System Area", fallback_index=6), "")
         remarks = _clean(cell(row, "Remarks", fallback_index=7), "")
@@ -229,11 +230,13 @@ def load_asset_mapping(data_dir):
             "asset_id": asset_id,
             "display_name": display_name,
             "machine_group": machine_group,
+            "asset_machine_group": asset_machine_group,
             "location": location,
             "stage": stage,
             "mappedStage": stage,
             "mappedAssetName": display_name,
             "mappedMainAssetGroup": machine_group,
+            "mappedMachineGroup": asset_machine_group,
             "mappedSubAssetGroup": sub_asset_group,
             "mappedLocation": location,
             "mappedSystemArea": system_area,
@@ -316,6 +319,7 @@ def load_asset_mapping(data_dir):
             "mappedStage": stage,
             "mappedAssetName": display_name,
             "mappedMainAssetGroup": machine_group,
+            "mappedMachineGroup": asset_machine_group,
             "mappedSubAssetGroup": sub_asset_group,
             "mappedLocation": location,
             "mappedSystemArea": system_area,

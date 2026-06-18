@@ -329,7 +329,7 @@ def _read_asset_master_sheet(wb, out) -> dict:
         "id": _header_index(header, "Asset ID"),
         "name": _header_index(header, "Asset Name"),
         "stage": _header_index(header, "Stage"),
-        "main": _header_index(header, "Main Asset Group"),
+        "main": _header_index(header, "Category", "Main Asset Group"),
         "sub": _header_index(header, "Sub Asset Group"),
         "loc": _header_index(header, "Location"),
         "sys": _header_index(header, "System/Area", "System / Area"),
@@ -396,17 +396,19 @@ def _read_pm_feed_map_sheet(wb, out) -> dict:
 
 
 def _read_scope_map(wb, out) -> dict:
-    """Lists sheet: a 'Main Asset Group (for Scope map)' column -> 'Scope' column.
-    The task points at columns D/E; we locate them by header to be robust."""
+    """Lists sheet: a 'Category (for Scope map)' column -> 'Scope' column.
+    Also accepts the legacy column name 'Main Asset Group' for backward compatibility."""
     if "Lists" not in wb.sheetnames:
         out["errors"].append("Asset_Master: missing 'Lists' sheet (no scope map)")
         return {}
     rows = list(wb["Lists"].iter_rows(values_only=True))
-    hdr_idx, header = _find_header_row(rows, "Main Asset Group", "Scope")
+    hdr_idx, header = _find_header_row(rows, "Category", "Scope")
     if header is None:
-        out["errors"].append("Lists: no Main-Asset-Group -> Scope map (need the 'for Scope map' + 'Scope' columns)")
+        hdr_idx, header = _find_header_row(rows, "Main Asset Group", "Scope")
+    if header is None:
+        out["errors"].append("Lists: no Category -> Scope map (need the 'Category' + 'Scope' columns)")
         return {}
-    gi = _header_index(header, "Main Asset Group")
+    gi = _header_index(header, "Category", "Main Asset Group")
     si = _header_index(header, "Scope")
     scope_map = {}
     for row in rows[hdr_idx + 1:]:

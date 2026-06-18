@@ -253,8 +253,8 @@
                             <div class="kdi-analysis-card-head">
                                 <div>
                                     <div class="kdi-section-kicker">Section A</div>
-                                    <div class="kdi-analysis-card-title">MTTR by Machine Group</div>
-                                    <p class="kdi-analysis-card-subtitle">Highest average repair time appears first. Click a machine group row to drill into individual assets.</p>
+                                    <div class="kdi-analysis-card-title">MTTR by Machine Category</div>
+                                    <p class="kdi-analysis-card-subtitle">Highest average repair time appears first. Click a row to drill into individual assets.</p>
                                 </div>
                                 <span class="kpi-direction-pill kpi-direction-pill-warn">Lower is better</span>
                             </div>
@@ -264,31 +264,32 @@
                                 <div class="kdi-analysis-filter-control">
                                     <span class="kdi-filter-label">Rank By</span>
                                     <div class="kdi-rank-toggle-group" id="kdi-mttr-rank-toggle" role="group" aria-label="MTTR ranking mode">
-                                        <button type="button" class="kdi-rank-toggle active" data-kdi-rank="group">Machine Group</button>
+                                        <button type="button" class="kdi-rank-toggle active" data-kdi-rank="group">Machine Category</button>
+                                        <button type="button" class="kdi-rank-toggle" data-kdi-rank="machine-group">Machine Group</button>
                                         <button type="button" class="kdi-rank-toggle" data-kdi-rank="asset">Asset / Machine Name</button>
                                     </div>
                                 </div>
                                 <div class="kdi-analysis-filter-control">
-                                    <label class="kdi-filter-label" for="kdi-mttr-machine-group-filter">Group Filter</label>
+                                    <label class="kdi-filter-label" for="kdi-mttr-machine-group-filter">Category Filter</label>
                                     <select id="kdi-mttr-machine-group-filter" class="inline-select kdi-analysis-filter-select">
-                                        <option value="">All Groups</option>
+                                        <option value="">All Categories</option>
                                     </select>
                                 </div>
                             </div>
                             <div class="kdi-analysis-chart-wrap">
-                                <div class="kdi-chart-title" id="kdi-mttr-chart-title">MTTR by Machine Group — highest first</div>
+                                <div class="kdi-chart-title" id="kdi-mttr-chart-title">MTTR by Machine Category — highest first</div>
                                 <div class="chart-container kdi-chart-container" data-chart-id="kdiMttrGroupChart"><canvas id="kdiMttrGroupChart"></canvas></div>
                             </div>
                             <div class="kdi-analysis-table-wrap">
                                 <div class="kdi-table-title-row">
-                                    <span class="kdi-table-title" id="kdi-mttr-summary-title">MTTR Summary by Machine Group</span>
-                                    <input type="search" id="kdi-mttr-group-search" class="kdi-table-search" placeholder="Search groups…" aria-label="Search machine groups">
+                                    <span class="kdi-table-title" id="kdi-mttr-summary-title">MTTR Summary by Machine Category</span>
+                                    <input type="search" id="kdi-mttr-group-search" class="kdi-table-search" placeholder="Search…" aria-label="Search groups">
                                 </div>
                                 <div class="table-wrapper kdi-table-scroll-wrap">
                                     <table>
                                         <thead>
                                             <tr id="kdi-mttr-summary-head">
-                                                <th>Machine Group</th>
+                                                <th>Machine Category</th>
                                                 <th>MTTR</th>
                                                 <th>WO Count</th>
                                                 <th>Total Downtime</th>
@@ -305,8 +306,8 @@
                             <details class="kdi-asset-drilldown" id="kdi-mttr-asset-drilldown">
                                 <summary class="kdi-drilldown-summary">View individual assets (MTTR drill-down)</summary>
                                 <div class="kdi-asset-drilldown-filter-row">
-                                    <label class="inline-label" for="kdi-mttr-asset-group-filter">Machine Group</label>
-                                    <select id="kdi-mttr-asset-group-filter" class="inline-select"><option value="">All Groups</option></select>
+                                    <label class="inline-label" for="kdi-mttr-asset-group-filter">Machine Category</label>
+                                    <select id="kdi-mttr-asset-group-filter" class="inline-select"><option value="">All Categories</option></select>
                                     <input type="search" id="kdi-mttr-asset-search" class="kdi-table-search" placeholder="Search assets…" aria-label="Search assets">
                                 </div>
                                 <div class="table-wrapper kdi-table-scroll-wrap">
@@ -372,8 +373,8 @@
                             <div class="kdi-analysis-card-head">
                                 <div>
                                     <div class="kdi-section-kicker">Section B</div>
-                                    <div class="kdi-analysis-card-title">MTBF by Machine Group</div>
-                                    <p class="kdi-analysis-card-subtitle">Lowest average time between failures appears first. Click a machine group row to inspect the assets behind it.</p>
+                                    <div class="kdi-analysis-card-title">MTBF by Machine Category</div>
+                                    <p class="kdi-analysis-card-subtitle">Lowest average time between failures appears first. Click a row to inspect the assets behind it.</p>
                                 </div>
                                 <span class="kpi-direction-pill kpi-direction-pill-good">Higher is better</span>
                             </div>
@@ -383,32 +384,32 @@
                                 <div class="kdi-analysis-filter-control">
                                     <span class="kdi-filter-label">Rank By</span>
                                     <div class="kdi-rank-toggle-group" id="kdi-mtbf-rank-toggle" role="group" aria-label="MTBF ranking mode">
-                                        <button type="button" class="kdi-rank-toggle active" data-kdi-rank="group">Machine Group</button>
+                                        <button type="button" class="kdi-rank-toggle active" data-kdi-rank="group">Machine Category</button>
+                                        <button type="button" class="kdi-rank-toggle" data-kdi-rank="machine-group">Machine Group</button>
                                         <button type="button" class="kdi-rank-toggle" data-kdi-rank="asset">Asset / Machine Name</button>
                                     </div>
                                 </div>
                                 <div class="kdi-analysis-filter-control">
-                                    <label class="kdi-filter-label" for="kdi-mtbf-machine-group-filter">Group Filter</label>
+                                    <label class="kdi-filter-label" for="kdi-mtbf-machine-group-filter">Category Filter</label>
                                     <select id="kdi-mtbf-machine-group-filter" class="inline-select kdi-analysis-filter-select">
-                                        <option value="">All Groups</option>
+                                        <option value="">All Categories</option>
                                     </select>
                                 </div>
                             </div>
-                            <div id="kdi-mtbf-additional-kpis"></div>
                             <div class="kdi-analysis-chart-wrap">
-                                <div class="kdi-chart-title" id="kdi-mtbf-chart-title">MTBF by Machine Group — lowest first (needs most attention)</div>
+                                <div class="kdi-chart-title" id="kdi-mtbf-chart-title">MTBF by Machine Category — lowest first (needs most attention)</div>
                                 <div class="chart-container kdi-chart-container" data-chart-id="kdiMtbfGroupChart"><canvas id="kdiMtbfGroupChart"></canvas></div>
                             </div>
                             <div class="kdi-analysis-table-wrap">
                                 <div class="kdi-table-title-row">
-                                    <span class="kdi-table-title" id="kdi-mtbf-summary-title">MTBF Summary by Machine Group</span>
-                                    <input type="search" id="kdi-mtbf-group-search" class="kdi-table-search" placeholder="Search groups…" aria-label="Search machine groups">
+                                    <span class="kdi-table-title" id="kdi-mtbf-summary-title">MTBF Summary by Machine Category</span>
+                                    <input type="search" id="kdi-mtbf-group-search" class="kdi-table-search" placeholder="Search…" aria-label="Search groups">
                                 </div>
                                 <div class="table-wrapper kdi-table-scroll-wrap">
                                     <table>
                                         <thead>
                                             <tr id="kdi-mtbf-summary-head">
-                                                <th>Machine Group</th>
+                                                <th>Machine Category</th>
                                                 <th>MTBF</th>
                                                 <th>Failure / WO Count</th>
                                                 <th>Assets Included</th>
@@ -426,8 +427,8 @@
                             <details class="kdi-asset-drilldown" id="kdi-mtbf-asset-drilldown">
                                 <summary class="kdi-drilldown-summary">View individual assets (MTBF drill-down)</summary>
                                 <div class="kdi-asset-drilldown-filter-row">
-                                    <label class="inline-label" for="kdi-mtbf-asset-group-filter">Machine Group</label>
-                                    <select id="kdi-mtbf-asset-group-filter" class="inline-select"><option value="">All Groups</option></select>
+                                    <label class="inline-label" for="kdi-mtbf-asset-group-filter">Machine Category</label>
+                                    <select id="kdi-mtbf-asset-group-filter" class="inline-select"><option value="">All Categories</option></select>
                                     <input type="search" id="kdi-mtbf-asset-search" class="kdi-table-search" placeholder="Search assets…" aria-label="Search assets">
                                 </div>
                                 <div class="table-wrapper kdi-table-scroll-wrap">
@@ -451,64 +452,6 @@
                                 </div>
                             </details>
 
-                            <!-- MTBF Data Reliability Review -->
-                            <details class="card nested-card missing-data-card mtbf-reliability-card">
-                                <summary class="missing-data-summary">
-                                    <span class="card-title">MTBF Data Reliability Review</span>
-                                    <span class="missing-data-count-badge" id="mtbf-reliability-count">--</span>
-                                    <span class="missing-data-summary-hint">Excluded or suspicious WO pairs — click to expand</span>
-                                </summary>
-                                <p class="card-subtitle">
-                                    WO pairs that could <strong>not</strong> be included in the MTBF calculation
-                                    (missing Actual End Date, negative gap, general-area asset, suspicious short gap, etc.).
-                                    MTBF is calculated strictly as
-                                    <strong>Next WO Actual Start − Previous WO Actual End</strong>.
-                                    No start-to-start fallback is used. Review and annotate each pair below.
-                                </p>
-                                <div class="filter-toolbar missing-data-toolbar">
-                                    <div class="filter-group">
-                                        <label for="mtbf-reliability-filter">Exclusion Reason</label>
-                                        <select id="mtbf-reliability-filter" class="inline-select">
-                                            <option value="all">All Reasons</option>
-                                            <option value="Missing Previous">Missing Previous Actual End</option>
-                                            <option value="Missing Next">Missing Next Actual Start</option>
-                                            <option value="Negative">Negative or overlapping gap</option>
-                                            <option value="Suspicious short">Suspicious short gap</option>
-                                            <option value="General">General asset grouping</option>
-                                        </select>
-                                    </div>
-                                    <div class="filter-group filter-group-grow">
-                                        <label for="mtbf-reliability-search">Search</label>
-                                        <input type="text" id="mtbf-reliability-search" class="inline-select"
-                                            placeholder="Asset ID, WO ID, or keyword">
-                                    </div>
-                                </div>
-                                <div class="table-wrapper missing-data-table-wrapper" id="mtbf-reliability-table">
-                                    <table class="missing-data-table">
-                                        <thead>
-                                            <tr>
-                                                <th>Asset ID</th>
-                                                <th>Asset Name</th>
-                                                <th>Prev WO ID</th>
-                                                <th>Prev MR ID</th>
-                                                <th>Prev Actual Start</th>
-                                                <th>Prev Actual End</th>
-                                                <th>Next WO ID</th>
-                                                <th>Next MR ID</th>
-                                                <th>Next Actual Start</th>
-                                                <th>Calculated Gap</th>
-                                                <th>Exclusion Reason</th>
-                                                <th>Review Status</th>
-                                                <th>Remark</th>
-                                                <th>Follow-up Action</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="mtbf-reliability-body">
-                                            <tr><td colspan="14" class="empty-cell">MTBF has not been computed yet — open this section after loading data.</td></tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </details>
                         </div>
                     </div>
                 </div>
@@ -563,34 +506,25 @@
                 </div>
             </div>
             <div class="kpi-grid mr-tracking-kpi-grid">
-                <div class="kpi-card highlight-red mr-tracking-kpi">
-                    <div class="kpi-label">Outstanding MR to Acknowledge</div>
-                    <div class="kpi-value mini" id="mr-ack-outstanding">--</div>
-                    <div class="kpi-trend">Open MR without acknowledgement</div>
-                </div>
-                <div class="kpi-card highlight-amber mr-tracking-kpi">
-                    <div class="kpi-label">Open MR by Severity</div>
-                    <div class="mr-severity-kpi-grid">
-                        <div><span>Critical</span><strong id="mr-open-critical">--</strong></div>
-                        <div><span>High</span><strong id="mr-open-high">--</strong></div>
-                        <div><span>Medium</span><strong id="mr-open-medium">--</strong></div>
-                        <div><span>Low</span><strong id="mr-open-low">--</strong></div>
-                    </div>
+                <div class="kpi-card highlight-purple mr-tracking-kpi">
+                    <div class="kpi-label" id="mr-raised-year-label">Total MR Raised FYTD</div>
+                    <div class="kpi-value mini" id="mr-raised-this-year">--</div>
+                    <div class="kpi-trend" id="mr-raised-this-year-sub">Selected financial year</div>
                 </div>
                 <div class="kpi-card highlight-blue mr-tracking-kpi">
-                    <div class="kpi-label" id="mr-raised-month-label">MR Raised This Month</div>
-                    <div class="kpi-value mini" id="mr-raised-this-month">--</div>
-                    <div class="kpi-trend" id="mr-raised-this-month-sub">Selected month</div>
-                </div>
-                <div class="kpi-card highlight-purple mr-tracking-kpi">
-                    <div class="kpi-label" id="mr-raised-year-label">MR Raised This Year</div>
-                    <div class="kpi-value mini" id="mr-raised-this-year">--</div>
-                    <div class="kpi-trend" id="mr-raised-this-year-sub">Selected year</div>
+                    <div class="kpi-label">Open MR</div>
+                    <div class="kpi-value mini" id="mr-open-total">--</div>
+                    <div class="kpi-trend">New &amp; in-progress</div>
                 </div>
                 <div class="kpi-card highlight-red mr-tracking-kpi">
-                    <div class="kpi-label">Critical MR Raised</div>
-                    <div class="kpi-value mini" id="mr-critical-raised">--</div>
-                    <div class="kpi-trend" id="mr-critical-raised-sub">Critical in selected financial year</div>
+                    <div class="kpi-label">Critical Open MR</div>
+                    <div class="kpi-value mini" id="mr-open-critical">--</div>
+                    <div class="kpi-trend">Open MR classified as Critical</div>
+                </div>
+                <div class="kpi-card highlight-amber mr-tracking-kpi">
+                    <div class="kpi-label">Awaiting Acknowledgement</div>
+                    <div class="kpi-value mini" id="mr-ack-outstanding">--</div>
+                    <div class="kpi-trend">Open MR without acknowledgement</div>
                 </div>
             </div>
             <div class="mr-tracking-filter-row">
@@ -608,51 +542,68 @@
                     <label class="inline-label" for="mr-tracking-month">Month</label>
                     <select id="mr-tracking-month" class="inline-select"></select>
                 </div>
+                <div class="filter-inline mr-tracking-filter">
+                    <label class="inline-label" for="mr-tracking-source">Source</label>
+                    <select id="mr-tracking-source" class="inline-select">
+                        <option value="all">All Sources</option>
+                        <option value="normal">Normal MR</option>
+                        <option value="gemba">Gemba Walk</option>
+                    </select>
+                </div>
             </div>
             <div class="mr-tracking-summary" id="mr-tracking-summary">Loading MR tracking.</div>
             <div class="mr-tracking-quality hidden" id="mr-tracking-quality"></div>
             <div class="mr-tracking-chart-grid">
                 <div class="card nested-card mr-tracking-chart-card">
-                    <div class="card-title">MR Raised per Machine</div>
-                    <p class="card-subtitle" id="mr-machine-chart-note">Showing top 10 by MR count.</p>
-                    <div class="chart-container mr-tracking-chart" data-chart-id="mrRaisedMachineChart"><canvas id="mrRaisedMachineChart"></canvas></div>
+                    <div class="card-title">MR Pareto by Machine / Area</div>
+                    <p class="card-subtitle" id="mr-pareto-chart-note">Top 10 by MR count with cumulative %.</p>
+                    <div class="chart-container mr-tracking-chart" data-chart-id="mrParetoChart"><canvas id="mrParetoChart"></canvas></div>
                 </div>
                 <div class="card nested-card mr-tracking-chart-card">
-                    <div class="card-title">Open MR by Severity</div>
-                    <p class="card-subtitle">Only unresolved/open MR are included.</p>
-                    <div class="mr-tracking-card-filter-row">
-                        <div class="filter-inline mr-tracking-card-filter">
-                            <label class="inline-label" for="mr-tracking-severity">Severity</label>
-                            <select id="mr-tracking-severity" class="inline-select">
-                                <option value="all">All Severity</option>
-                                <option value="Critical">Critical</option>
-                                <option value="High">High</option>
-                                <option value="Medium">Medium</option>
-                                <option value="Low">Low</option>
-                                <option value="Unclassified">Unclassified</option>
-                            </select>
-                        </div>
+                    <div class="card-title">Monthly MR Raised by Severity</div>
+                    <p class="card-subtitle">Stacked monthly view — shows trend and severity mix in one view.</p>
+                    <div class="chart-container mr-tracking-chart" data-chart-id="mrMonthlySeverityChart"><canvas id="mrMonthlySeverityChart"></canvas></div>
+                </div>
+            </div>
+            <div class="card nested-card gemba-walk-section hidden" id="gemba-walk-section">
+                <div class="card-title" id="gemba-walk-section-title">Gemba Walk Findings</div>
+                <div class="kpi-grid gemba-kpi-grid">
+                    <div class="kpi-card highlight-purple">
+                        <div class="kpi-label">Total Findings</div>
+                        <div class="kpi-value mini" id="gemba-total">--</div>
+                        <div class="kpi-trend">In selected period</div>
                     </div>
-                    <div class="chart-container mr-tracking-chart" data-chart-id="mrOpenSeverityChart"><canvas id="mrOpenSeverityChart"></canvas></div>
-                </div>
-                <div class="card nested-card mr-tracking-chart-card">
-                    <div class="card-title">Critical MR Trend</div>
-                    <p class="card-subtitle" id="mr-critical-trend-note">Critical MR only.</p>
-                    <div class="mr-tracking-card-filter-row">
-                        <div class="filter-inline mr-tracking-card-filter">
-                            <label class="inline-label" for="mr-tracking-date-group">Date Grouping</label>
-                            <select id="mr-tracking-date-group" class="inline-select">
-                                <option value="monthly">Monthly</option>
-                                <option value="yearly">Yearly</option>
-                            </select>
-                        </div>
+                    <div class="kpi-card highlight-blue">
+                        <div class="kpi-label">Open Findings</div>
+                        <div class="kpi-value mini" id="gemba-open">--</div>
+                        <div class="kpi-trend">Not yet closed</div>
                     </div>
-                    <div class="chart-container mr-tracking-chart" data-chart-id="mrCriticalTrendChart"><canvas id="mrCriticalTrendChart"></canvas></div>
+                    <div class="kpi-card highlight-red">
+                        <div class="kpi-label">Critical / High</div>
+                        <div class="kpi-value mini" id="gemba-critical-high">--</div>
+                        <div class="kpi-trend">Open Critical or High severity</div>
+                    </div>
+                    <div class="kpi-card highlight-amber">
+                        <div class="kpi-label">Overdue (&gt;14 days)</div>
+                        <div class="kpi-value mini" id="gemba-overdue">--</div>
+                        <div class="kpi-trend">Open findings older than 14 days</div>
+                    </div>
+                    <div class="kpi-card highlight-green">
+                        <div class="kpi-label">Closure Rate</div>
+                        <div class="kpi-value mini" id="gemba-closure-rate">--%</div>
+                        <div class="kpi-trend">Finished / Total raised</div>
+                    </div>
                 </div>
-                <div class="card nested-card mr-tracking-chart-card">
-                    <div class="card-title">Monthly vs Cumulative MR Raised</div>
-                    <p class="card-subtitle">Bars show MR raised per month; line shows the running total. Cumulative resets every April for the financial year.</p>
-                    <div class="chart-container mr-tracking-chart" data-chart-id="mrMonthlyCumulativeChart"><canvas id="mrMonthlyCumulativeChart"></canvas></div>
+                <div class="mr-tracking-chart-grid">
+                    <div class="card nested-card mr-tracking-chart-card">
+                        <div class="card-title">Findings by Issue Category</div>
+                        <div class="chart-container mr-tracking-chart" data-chart-id="gembaCategoryChart"><canvas id="gembaCategoryChart"></canvas></div>
+                    </div>
+                    <div class="card nested-card mr-tracking-chart-card">
+                        <div class="card-title">Open Findings by Age</div>
+                        <p class="card-subtitle">Days since raised — open findings only.</p>
+                        <div class="chart-container mr-tracking-chart" data-chart-id="gembaAgingChart"><canvas id="gembaAgingChart"></canvas></div>
+                    </div>
                 </div>
             </div>
             <button type="button" class="topic-analysis-toggle" data-analysis-toggle aria-expanded="false">View Analysis</button>
@@ -2099,7 +2050,7 @@
     </main>
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
-    <script src="script.js?v=20260615-kdi-management-1" defer></script>
+    <script src="script.js?v=20260618-outstanding-sort-1" defer></script>
     <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
 </body>
 </html>

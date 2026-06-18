@@ -194,10 +194,9 @@ let mrMovementUserSelectedYear = false;
 let mrCarryoverFilter = "all";
 let mrCarryoverSort = "duration_desc";
 let mrTrackingEquipmentFilter = "all";
-let mrTrackingSeverityFilter = "all";
+let mrSourceFilter = "all";
 let mrTrackingSelectedYear = "";
 let mrTrackingSelectedMonth = "";
-let mrTrackingDateGrouping = "monthly";
 let mrMachineFilter = "all";
 let woSlaYearFilter = "";
 let woSlaMonthFilter = "all";
@@ -671,6 +670,48 @@ const MR_REMARKS_ALIASES = [
     "Comments",
     "comments",
 ];
+const GEMBA_KEYWORDS = ["gemba", "gamba"];
+
+const GEMBA_ISSUE_CATEGORY_RULES = [
+    { label: "Safety / Food Safety", keywords: ["unsafe", "guard", "emergency stop", "leakage risk", "obstruction", "access issue", "safety", "hazard", "fire", "ppe"] },
+    { label: "Hygiene / Foreign Body Prevention", keywords: ["hygiene", "cleanli", "5s", "foreign body", "foreign object", "housekeep", "contamina"] },
+    { label: "Utilities", keywords: ["compressed air", "boiler", "refrigerat", "electrical", "water", "wwtp", "generator", "mdb", "utilities", "utility", "transformer", "hvac", "chiller", "steam", "power"] },
+    { label: "Facility / Building", keywords: ["floor", "wall", "ceiling", "door", "drain", "lighting", "building", "pest", "structure", "window", "roof", "gutter", "sewer"] },
+    { label: "Production Equipment", keywords: ["machine", "equipment", "conveyor", "oven", "freezer", "packing", "slicer", "mixer", "pump", "motor", "belt", "line", "robot", "filler", "sealer", "blender", "kettle", "tunnel", "combi"] },
+];
+
+function detectMrSource(item) {
+    const text = [
+        item.remarks,
+        item.equipment,
+        item.row?.description_original,
+        item.row?.translated_description,
+        item.row?.maintenance_job_type,
+        item.row?.raw_functional_location,
+        item.row?.machine_equipment_name,
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (GEMBA_KEYWORDS.some((kw) => text.includes(kw))) return "Gemba Walk";
+    return "Other / Unclassified";
+}
+
+function detectGembaIssueCategory(item) {
+    const text = [
+        item.remarks,
+        item.equipment,
+        item.row?.description_original,
+        item.row?.translated_description,
+        item.row?.raw_functional_location,
+    ].filter(Boolean).join(" ").toLowerCase();
+    for (const { label, keywords } of GEMBA_ISSUE_CATEGORY_RULES) {
+        if (keywords.some((kw) => text.includes(kw))) return label;
+    }
+    return "Other / Unclassified";
+}
+
+function isGembaItem(item) {
+    return item.mrSource === "Gemba Walk";
+}
+
 const SLA_CREATED_DATE_ALIASES = [
     "request_created_time",
     "Request Created Date",
@@ -970,7 +1011,13 @@ function buildDowntimeMtbfHistoryUrl() {
     return `/api/downtime/mtbf-history?${query.toString()}`;
 }
 
+// Incremented by resetStageScopedCaches() so any in-flight all-year or MTBF
+// fetch started for the previous stage discards its result instead of writing
+// stale data into the shared cache.
+let _stageFetchGeneration = 0;
+
 function resetStageScopedCaches() {
+    _stageFetchGeneration++;
     allWorkOrderRowsCache = null;
     allWorkOrderRowsPromise = null;
     mtbfHistoryPayload = null;
@@ -1219,19 +1266,28 @@ function getFallbackAllWorkOrderRows() {
 async function loadAllWorkOrderRowsForMovement() {
     if (allWorkOrderRowsCache) return allWorkOrderRowsCache;
     if (allWorkOrderRowsPromise) return allWorkOrderRowsPromise;
+    // Capture generation so a stage change mid-flight does not pollute cache.
+    const gen = _stageFetchGeneration;
     allWorkOrderRowsPromise = fetch(buildDowntimeApiUrl({ period: "all_years", work_orders_only: "1" }), { cache: "no-store" })
         .then(async (response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const payload = await response.json();
+            if (_stageFetchGeneration !== gen) throw new Error("stage-changed");
             const rows = getWorkOrderRows(payload.management);
             if (!rows.length) throw new Error("No all-year work orders found");
             allWorkOrderRowsCache = rows;
             return rows;
         })
         .catch((error) => {
+            if (String(error.message).includes("stage-changed")) {
+                // Stage changed while this fetch was in flight — discard silently.
+                // The new stage's fetch will be started separately.
+                allWorkOrderRowsCache = null;
+                return [];
+            }
             console.warn("All-year MR movement source unavailable, falling back to loaded rows:", error);
             const rows = getFallbackAllWorkOrderRows();
-            allWorkOrderRowsCache = rows;
+            if (_stageFetchGeneration === gen) allWorkOrderRowsCache = rows;
             return rows;
         })
         .finally(() => {
@@ -1440,6 +1496,19 @@ function normalizeMrSeverity(value, row = {}) {
     if (normalized.includes("critical") || normalized.includes("semi")) return "Critical";
     if (row?.is_critical === true || row?.is_production_critical === true) return "Critical";
     return "Unclassified";
+}
+
+function formatMrSeverityCode(value, row = {}) {
+    const rawText = cleanMrValue(value).toUpperCase();
+    const directCodeMatch = rawText.match(/\bS([1-4])\b/);
+    if (directCodeMatch) return `S${directCodeMatch[1]}`;
+    const normalized = normalizeMrSeverity(value, row);
+    return ({
+        Critical: "S1",
+        High: "S2",
+        Medium: "S3",
+        Low: "S4",
+    })[normalized] || normalized;
 }
 
 function getSlaTargetByKey(key) {
@@ -1675,6 +1744,9 @@ function normalizeMrTrackingRows(rows = []) {
             missingEquipment: !equipmentRaw,
             missingSeverity: !cleanMrValue(severityRawField.value),
         });
+        const item = rowMap.get(keyInfo.key);
+        item.mrSource = detectMrSource(item);
+        item.gembaIssueCategory = item.mrSource === "Gemba Walk" ? detectGembaIssueCategory(item) : "";
     });
     const items = [...rowMap.values()];
     return {
@@ -1743,8 +1815,6 @@ function populateMrTrackingControls(items, selectedYear, rows = []) {
         mrTrackingEquipmentFilter = current === "all" || equipmentNames.includes(current) ? current : "all";
         equipmentSelect.value = mrTrackingEquipmentFilter;
     }
-    const severitySelect = document.getElementById("mr-tracking-severity");
-    if (severitySelect) severitySelect.value = mrTrackingSeverityFilter;
     const yearSelect = document.getElementById("mr-tracking-year");
     if (yearSelect) {
         const years = getMrAvailableYears(rows);
@@ -1768,14 +1838,17 @@ function populateMrTrackingControls(items, selectedYear, rows = []) {
         }
         monthSelect.value = String(mrTrackingSelectedMonth);
     }
-    const dateGroup = document.getElementById("mr-tracking-date-group");
-    if (dateGroup) dateGroup.value = mrTrackingDateGrouping;
+    const sourceSelect = document.getElementById("mr-tracking-source");
+    if (sourceSelect && sourceSelect.value !== mrSourceFilter) {
+        sourceSelect.value = mrSourceFilter;
+    }
 }
 
 function filterMrTrackingItems(items, { selectedYear = "all", selectedMonth = "all", applyYear = true, applyMonth = true } = {}) {
     return items.filter((item) => {
         if (mrTrackingEquipmentFilter !== "all" && item.equipmentKey !== mrTrackingEquipmentFilter) return false;
-        if (mrTrackingSeverityFilter !== "all" && item.severity !== mrTrackingSeverityFilter) return false;
+        if (mrSourceFilter === "gemba" && item.mrSource !== "Gemba Walk") return false;
+        if (mrSourceFilter === "normal" && item.mrSource === "Gemba Walk") return false;
         const needsYearMatch = applyYear && selectedYear !== "all";
         const needsMonthMatch = applyMonth && selectedMonth !== "all";
         if ((needsYearMatch || needsMonthMatch) && !item.raised.date) return false;
@@ -1833,6 +1906,47 @@ function buildMrTrackingModel(rows = []) {
     }, new Map()).entries()]
         .map(([label, count]) => ({ label, count }))
         .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
+    const SEVERITY_LEVELS = ["Critical", "High", "Medium", "Low", "Unclassified"];
+    const monthlyBySeverity = Object.fromEntries(
+        SEVERITY_LEVELS.map((sev) => [sev, orderMrCountsByFinancialCalendar(getMonthlyMrCounts(trendItems.filter((item) => item.severity === sev), selectedYear))])
+    );
+    const allGembaItems = normalized.items.filter(isGembaItem);
+    const gembaFiltered = filterMrTrackingItems(allGembaItems, { selectedYear, selectedMonth, applyYear: true, applyMonth: selectedMonth !== "all" });
+    const gembaOpen = gembaFiltered.filter(isMrOpenTracking);
+    const gembaCriticalHigh = gembaOpen.filter((item) => item.severity === "Critical" || item.severity === "High");
+    const gembaFinished = gembaFiltered.filter((item) => item.finished.date);
+    const gembaClosureRate = gembaFiltered.length ? Math.round((gembaFinished.length / gembaFiltered.length) * 100) : 0;
+    const now = new Date();
+    const gembaOverdue = gembaOpen.filter((item) => {
+        if (!item.raised.date) return false;
+        const ageDays = (now - item.raised.date) / (1000 * 60 * 60 * 24);
+        return ageDays > 14;
+    });
+    const gembaCategoryMap = gembaFiltered.reduce((map, item) => {
+        const cat = item.gembaIssueCategory || "Other / Unclassified";
+        map.set(cat, (map.get(cat) || 0) + 1);
+        return map;
+    }, new Map());
+    const gembaCategoryCounts = [...gembaCategoryMap.entries()].sort((a, b) => b[1] - a[1]).map(([label, count]) => ({ label, count }));
+    const gembaAgingBuckets = { "0–3 days": 0, "4–7 days": 0, "8–14 days": 0, ">14 days": 0 };
+    gembaOpen.forEach((item) => {
+        if (!item.raised.date) return;
+        const ageDays = (now - item.raised.date) / (1000 * 60 * 60 * 24);
+        if (ageDays <= 3) gembaAgingBuckets["0–3 days"] += 1;
+        else if (ageDays <= 7) gembaAgingBuckets["4–7 days"] += 1;
+        else if (ageDays <= 14) gembaAgingBuckets["8–14 days"] += 1;
+        else gembaAgingBuckets[">14 days"] += 1;
+    });
+    const gembaStats = {
+        total: gembaFiltered.length,
+        open: gembaOpen.length,
+        criticalHigh: gembaCriticalHigh.length,
+        overdue: gembaOverdue.length,
+        closureRate: gembaClosureRate,
+        categoryCounts: gembaCategoryCounts,
+        agingBuckets: gembaAgingBuckets,
+        hasData: allGembaItems.length > 0,
+    };
     return {
         ...normalized,
         selectedYear,
@@ -1849,15 +1963,18 @@ function buildMrTrackingModel(rows = []) {
         monthlyCounts,
         cumulativeCounts,
         machineCounts,
+        monthlyBySeverity,
+        gembaStats,
     };
 }
 
 function renderMrTrackingLoading(message = "Loading MR tracking.") {
-    ["mr-ack-outstanding", "mr-open-critical", "mr-open-high", "mr-open-medium", "mr-open-low", "mr-raised-this-month", "mr-raised-this-year", "mr-critical-raised"].forEach((id) => setText(id, "--"));
+    ["mr-ack-outstanding", "mr-open-critical", "mr-open-total", "mr-raised-this-year"].forEach((id) => setText(id, "--"));
     setText("mr-tracking-summary", message);
     const body = document.getElementById("mr-outstanding-body");
     if (body) body.innerHTML = `<tr><td colspan="10" class="empty-cell">${escapeHtml(message)}</td></tr>`;
-    ["mrRaisedMachineChart", "mrOpenSeverityChart", "mrCriticalTrendChart", "mrMonthlyCumulativeChart"].forEach((id) => renderEmptyChart(id, message));
+    ["mrParetoChart", "mrMonthlySeverityChart"].forEach((id) => renderEmptyChart(id, message));
+    document.getElementById("gemba-walk-section")?.classList.add("hidden");
 }
 
 function renderMrTrackingSection(rows = allWorkOrderRowsCache) {
@@ -1868,47 +1985,26 @@ function renderMrTrackingSection(rows = allWorkOrderRowsCache) {
     }
     const model = buildMrTrackingModel(rows);
     const selectedYearLabel = getMrTrackingYearLabel(model.selectedYear);
-    const scopeLabel = getMrTrackingScopeLabel(model.selectedYear, model.selectedMonth);
-    setText("mr-raised-month-label", model.selectedMonth === "all" ? "MR Raised in Scope" : "MR Raised This Month");
-    setText("mr-raised-year-label", model.selectedYear === "all" ? "MR Raised Across All Years" : "MR Raised This Year");
-    setText("mr-ack-outstanding", fmtNumber(model.outstandingItems.length));
-    setText("mr-open-critical", fmtNumber(model.openBySeverity.Critical || 0));
-    setText("mr-open-high", fmtNumber(model.openBySeverity.High || 0));
-    setText("mr-open-medium", fmtNumber(model.openBySeverity.Medium || 0));
-    setText("mr-open-low", fmtNumber(model.openBySeverity.Low || 0));
-    setText("mr-raised-this-month", fmtNumber(model.raisedThisMonth.length));
-    setText("mr-raised-this-month-sub", scopeLabel);
+    setText("mr-raised-year-label", model.selectedYear === "all" ? "Total MR Raised (All Years)" : "Total MR Raised FYTD");
     setText("mr-raised-this-year", fmtNumber(model.filteredYear.length));
     setText("mr-raised-this-year-sub", model.selectedYear === "all" ? "Raised date across all years" : `${selectedYearLabel} raised date`);
-    setText("mr-critical-raised", fmtNumber(model.criticalRaisedYear.length));
-    setText("mr-critical-raised-sub", `Critical in ${scopeLabel.toLowerCase()}`);
+    setText("mr-open-total", fmtNumber(model.openItems.length));
+    setText("mr-open-critical", fmtNumber(model.openBySeverity.Critical || 0));
+    setText("mr-ack-outstanding", fmtNumber(model.outstandingItems.length));
     renderMrTrackingSummary(model);
     renderMrTrackingQuality(model);
-    renderMrRaisedMachineChart(model);
-    renderMrOpenSeverityChart(model);
-    renderMrCriticalTrendChart(model);
-    renderMrMonthlyCumulativeChart(model);
+    renderMrParetoChart(model);
+    renderMrMonthlySeverityChart(model);
     renderMrOutstandingTable(model);
+    renderGembaWalkSection(model);
 }
 
 function renderMrTrackingSummary(model) {
     const topMachine = model.machineCounts[0];
     const scopeLabel = getMrTrackingScopeLabel(model.selectedYear, model.selectedMonth);
-    const selectedIndex = model.selectedMonth === "all"
-        ? Math.max(model.cumulativeCounts.length - 1, 0)
-        : getMrFinancialMonthPosition(model.selectedMonth || 1);
-    const currentCumulative = model.cumulativeCounts[selectedIndex] || 0;
-    const previousCumulative = selectedIndex > 0 ? model.cumulativeCounts[selectedIndex - 1] || 0 : 0;
-    let changeText = `The charts below are filtered to ${scopeLabel.toLowerCase()}.`;
-    if (model.selectedMonth !== "all" && previousCumulative > 0) {
-        const pct = ((currentCumulative - previousCumulative) / previousCumulative) * 100;
-        changeText = `Cumulative MR raised has ${pct >= 0 ? "increased" : "decreased"} by ${fmtPercent(Math.abs(pct))} compared with the previous month.`;
-    } else if (model.selectedMonth !== "all" && currentCumulative > 0) {
-        changeText = "Cumulative MR raised increased from zero compared with the previous month.";
-    }
     setText(
         "mr-tracking-summary",
-        `There are ${fmtNumber(model.outstandingItems.length)} outstanding MR awaiting acknowledgement. Critical MR account for ${fmtNumber(model.openBySeverity.Critical || 0)} open requests. The highest MR volume is from ${topMachine ? topMachine.label : "Data not available"} with ${fmtNumber(topMachine?.count || 0)} requests in ${scopeLabel.toLowerCase()}. ${changeText}`
+        `${fmtNumber(model.filteredYear.length)} MR raised in ${scopeLabel.toLowerCase()}. ${fmtNumber(model.openItems.length)} open — ${fmtNumber(model.openBySeverity.Critical || 0)} critical. ${fmtNumber(model.outstandingItems.length)} awaiting acknowledgement. Highest volume: ${topMachine ? topMachine.label : "Data not available"} (${fmtNumber(topMachine?.count || 0)}).`
     );
 }
 
@@ -1928,19 +2024,90 @@ function renderMrTrackingQuality(model) {
     node.classList.toggle("hidden", !parts.length);
 }
 
-function renderMrRaisedMachineChart(model) {
-    const canvas = ensureCanvas("mrRaisedMachineChart");
+function renderGembaWalkSection(model) {
+    const section = document.getElementById("gemba-walk-section");
+    if (!section) return;
+    const { gembaStats } = model;
+    const activeStage = getSelectedDowntimeStage();
+    // Gemba Walk is a Stage 2 activity. When Stage 1 is explicitly selected,
+    // hide the section even if records somehow slipped through.
+    if (activeStage === "Stage 1") {
+        section.classList.add("hidden");
+        return;
+    }
+    const stageLabel = activeStage === "Stage 2" ? "Stage 2 " : "";
+    const sectionTitle = document.getElementById("gemba-walk-section-title");
+    if (sectionTitle) sectionTitle.textContent = `${stageLabel}Gemba Walk Findings`;
+    if (!gembaStats.hasData) {
+        section.classList.add("hidden");
+        return;
+    }
+    section.classList.remove("hidden");
+    setText("gemba-total", fmtNumber(gembaStats.total));
+    setText("gemba-open", fmtNumber(gembaStats.open));
+    setText("gemba-critical-high", fmtNumber(gembaStats.criticalHigh));
+    setText("gemba-overdue", fmtNumber(gembaStats.overdue));
+    setText("gemba-closure-rate", `${gembaStats.closureRate}%`);
+    destroyChart("gembaCategoryChart");
+    const catCanvas = ensureCanvas("gembaCategoryChart");
+    if (catCanvas && gembaStats.categoryCounts.length) {
+        chartRefs.gembaCategoryChart = new Chart(catCanvas.getContext("2d"), {
+            type: "bar",
+            data: {
+                labels: gembaStats.categoryCounts.map((d) => d.label),
+                datasets: [{
+                    label: "Gemba Findings",
+                    data: gembaStats.categoryCounts.map((d) => d.count),
+                    backgroundColor: ["#6366f1", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#64748b"],
+                    borderRadius: 5,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                indexAxis: "y",
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ` ${ctx.parsed.x} finding${ctx.parsed.x !== 1 ? "s" : ""}` } } },
+                scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { ticks: { font: { size: 11 } } } },
+            },
+        });
+    } else if (catCanvas) {
+        renderEmptyChart("gembaCategoryChart", "No Gemba Walk findings for this period.");
+    }
+    destroyChart("gembaAgingChart");
+    const agingCanvas = ensureCanvas("gembaAgingChart");
+    if (agingCanvas) {
+        const bucketKeys = Object.keys(gembaStats.agingBuckets);
+        const bucketValues = Object.values(gembaStats.agingBuckets);
+        const agingColors = ["#10b981", "#f59e0b", "#f97316", "#ef4444"];
+        chartRefs.gembaAgingChart = new Chart(agingCanvas.getContext("2d"), {
+            type: "bar",
+            data: {
+                labels: bucketKeys,
+                datasets: [{ label: "Open Findings", data: bucketValues, backgroundColor: agingColors, borderRadius: 5 }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ` ${ctx.parsed.y} open` } } },
+                scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
+            },
+        });
+    }
+}
+
+function renderMrParetoChart(model) {
+    const canvas = ensureCanvas("mrParetoChart");
     if (!canvas) return;
-    destroyChart("mrRaisedMachineChart");
+    destroyChart("mrParetoChart");
     const scopeLabel = getMrTrackingScopeLabel(model.selectedYear, model.selectedMonth);
     if (mrTrackingEquipmentFilter !== "all") {
         const monthlyCounts = orderMrCountsByFinancialCalendar(getMonthlyMrCounts(model.filteredAll, model.selectedYear));
-        setText("mr-machine-chart-note", `MR trend for ${mrTrackingEquipmentFilter} in ${scopeLabel.toLowerCase()}.`);
+        setText("mr-pareto-chart-note", `MR trend for ${mrTrackingEquipmentFilter} in ${scopeLabel.toLowerCase()}.`);
         if (!monthlyCounts.some(Boolean)) {
-            renderEmptyChart("mrRaisedMachineChart", `No MR raised for this equipment in ${scopeLabel.toLowerCase()}.`);
+            renderEmptyChart("mrParetoChart", `No MR raised for this equipment in ${scopeLabel.toLowerCase()}.`);
             return;
         }
-        chartRefs.mrRaisedMachineChart = new Chart(canvas.getContext("2d"), {
+        chartRefs.mrParetoChart = new Chart(canvas.getContext("2d"), {
             type: "line",
             data: {
                 labels: MR_FINANCIAL_MONTH_LABELS,
@@ -1951,188 +2118,94 @@ function renderMrRaisedMachineChart(model) {
         return;
     }
     const topRows = model.machineCounts.slice(0, 10);
-    setText("mr-machine-chart-note", model.selectedMonth === "all" && model.selectedYear !== "all" ? "Showing top 10 by MR count." : `Showing top 10 by MR count for ${scopeLabel.toLowerCase()}.`);
+    const noteText = model.selectedMonth === "all" && model.selectedYear !== "all"
+        ? "Top 10 by MR count with cumulative %."
+        : `Top 10 by MR count — ${scopeLabel.toLowerCase()}.`;
+    setText("mr-pareto-chart-note", noteText);
     if (!topRows.length) {
-        renderEmptyChart("mrRaisedMachineChart", "No MR raised by machine for the selected filters.");
+        renderEmptyChart("mrParetoChart", "No MR raised by machine for the selected filters.");
         return;
     }
-    chartRefs.mrRaisedMachineChart = new Chart(canvas.getContext("2d"), {
+    const total = topRows.reduce((sum, row) => sum + row.count, 0);
+    let running = 0;
+    const cumulative = topRows.map((row) => {
+        running += row.count;
+        return total > 0 ? Math.round((running / total) * 100) : 0;
+    });
+    chartRefs.mrParetoChart = new Chart(canvas.getContext("2d"), {
         type: "bar",
         data: {
             labels: topRows.map((row) => row.label),
-            datasets: [{ label: "MR Raised", data: topRows.map((row) => row.count), backgroundColor: "#3b82f6", borderRadius: 8 }],
+            datasets: [
+                { type: "bar", label: "MR Raised", data: topRows.map((row) => row.count), backgroundColor: "#3b82f6", borderRadius: 6, maxBarThickness: 28, yAxisID: "y", order: 2 },
+                { type: "line", label: "Cumulative %", data: cumulative, borderColor: "#f59e0b", backgroundColor: "#f59e0b", tension: 0.25, yAxisID: "y1", order: 1, pointRadius: 3 },
+            ],
         },
         options: {
-            ...mrTrackingAxisOptions("MR Count"),
             indexAxis: "y",
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
             plugins: {
                 legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 10 } },
-                tooltip: { callbacks: { label: (context) => `${context.dataset.label}: ${fmtNumber(context.parsed.x ?? context.raw)}` } },
+                tooltip: {
+                    callbacks: {
+                        label: (context) => context.datasetIndex === 0
+                            ? `MR Raised: ${fmtNumber(context.parsed.x ?? context.raw)}`
+                            : `Cumulative: ${context.parsed.x ?? context.raw}%`,
+                    },
+                },
             },
             scales: {
-                x: { beginAtZero: true, ticks: { precision: 0, color: "#475569" }, grid: { color: "rgba(148, 163, 184, 0.18)" } },
+                x: { beginAtZero: true, ticks: { precision: 0, color: "#475569" }, grid: { color: "rgba(148,163,184,0.18)" } },
                 y: { ticks: { color: "#475569", autoSkip: false }, grid: { display: false } },
+                y1: { beginAtZero: true, max: 100, position: "right", title: { display: true, text: "Cumulative %", color: "#f59e0b" }, ticks: { precision: 0, color: "#f59e0b", callback: (v) => `${v}%` }, grid: { drawOnChartArea: false } },
             },
         },
     });
 }
 
-function renderMrOpenSeverityChart(model) {
-    const canvas = ensureCanvas("mrOpenSeverityChart");
+function renderMrMonthlySeverityChart(model) {
+    const canvas = ensureCanvas("mrMonthlySeverityChart");
     if (!canvas) return;
-    const labels = ["Critical", "High", "Medium", "Low", "Unclassified"];
-    const values = labels.map((label) => model.openBySeverity[label] || 0);
-    destroyChart("mrOpenSeverityChart");
-    if (!values.some(Boolean)) {
-        renderEmptyChart("mrOpenSeverityChart", "No open MR for the selected filters.");
+    destroyChart("mrMonthlySeverityChart");
+    const scopeLabel = getMrTrackingScopeLabel(model.selectedYear, model.selectedMonth);
+    if (!model.monthlyCounts.some(Boolean)) {
+        renderEmptyChart("mrMonthlySeverityChart", `No MR raised in ${scopeLabel.toLowerCase()}.`);
         return;
     }
-    chartRefs.mrOpenSeverityChart = new Chart(canvas.getContext("2d"), {
-        type: "doughnut",
-        data: {
-            labels,
-            datasets: [{
-                data: values,
-                backgroundColor: ["#ef4444", "#f59e0b", "#3b82f6", "#10b981", "#64748b"],
-                borderColor: "#fff",
-                borderWidth: 3,
-            }],
-        },
+    const SEVERITY_COLORS = { Critical: "#ef4444", High: "#f59e0b", Medium: "#3b82f6", Low: "#10b981", Unclassified: "#64748b" };
+    const datasets = Object.entries(model.monthlyBySeverity)
+        .filter(([, counts]) => counts.some(Boolean))
+        .map(([sev, counts]) => ({
+            label: sev,
+            data: counts,
+            backgroundColor: SEVERITY_COLORS[sev] || "#94a3b8",
+            borderRadius: 4,
+            maxBarThickness: 34,
+            stack: "severity",
+        }));
+    if (!datasets.length) {
+        renderEmptyChart("mrMonthlySeverityChart", "No severity data for the selected filters.");
+        return;
+    }
+    chartRefs.mrMonthlySeverityChart = new Chart(canvas.getContext("2d"), {
+        type: "bar",
+        data: { labels: MR_FINANCIAL_MONTH_LABELS, datasets },
         options: {
             responsive: true,
             maintainAspectRatio: false,
-            cutout: "62%",
+            interaction: { mode: "index", intersect: false },
             plugins: {
                 legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 10 } },
-                tooltip: { callbacks: { label: (context) => `${context.label}: ${fmtNumber(context.raw)}` } },
+                tooltip: { callbacks: { label: (context) => `${context.dataset.label}: ${fmtNumber(context.parsed.y ?? context.raw)}` } },
+            },
+            scales: {
+                x: { stacked: true, grid: { display: false }, ticks: { color: "#475569" } },
+                y: { stacked: true, beginAtZero: true, title: { display: true, text: "MR Count" }, ticks: { precision: 0, color: "#475569" }, grid: { color: "rgba(148,163,184,0.18)" } },
             },
         },
     });
-}
-
-function renderMrCriticalTrendChart(model) {
-    const canvas = ensureCanvas("mrCriticalTrendChart");
-    if (!canvas) return;
-    const criticalItems = model.filteredAll.filter((item) => item.severity === "Critical" && item.raised.date);
-    const scopeLabel = getMrTrackingScopeLabel(model.selectedYear, model.selectedMonth);
-    destroyChart("mrCriticalTrendChart");
-    if (!criticalItems.length) {
-        setText("mr-critical-trend-note", "Critical MR only.");
-        renderEmptyChart("mrCriticalTrendChart", "No critical MR for the selected filters.");
-        return;
-    }
-    if (mrTrackingDateGrouping === "yearly") {
-        const years = [...new Set(criticalItems.map((item) => getMrFinancialYearStart(item.raised.date)))].sort((a, b) => a - b);
-        setText(
-            "mr-critical-trend-note",
-            years.length > 1
-                ? (model.selectedMonth === "all" ? "Financial year-to-year comparison by month." : `${getMrTrackingMonthLabel(model.selectedMonth)} comparison across financial years.`)
-                : "Financial year-to-year comparison requires more than one year of MR data."
-        );
-        const colors = ["#ef4444", "#2563eb", "#f59e0b", "#10b981", "#8b5cf6", "#64748b"];
-        chartRefs.mrCriticalTrendChart = new Chart(canvas.getContext("2d"), {
-            type: "line",
-            data: {
-                labels: MR_FINANCIAL_MONTH_LABELS,
-                datasets: years.map((year, index) => ({
-                    label: getMrFinancialYearLabel(year),
-                    data: orderMrCountsByFinancialCalendar(getMonthlyMrCounts(criticalItems.filter((item) => getMrFinancialYearStart(item.raised.date) === year), year)),
-                    borderColor: colors[index % colors.length],
-                    backgroundColor: "transparent",
-                    tension: 0.25,
-                    pointRadius: 3,
-                })),
-            },
-            options: mrTrackingAxisOptions("Critical MR"),
-        });
-        return;
-    }
-    const monthlyCounts = orderMrCountsByFinancialCalendar(getMonthlyMrCounts(criticalItems, model.selectedYear));
-    setText(
-        "mr-critical-trend-note",
-        model.selectedYear === "all"
-            ? `Month-on-month critical MR aggregated across all years${model.selectedMonth !== "all" ? ` for ${getMrTrackingMonthLabel(model.selectedMonth)}` : ""}.`
-            : `Month-on-month critical MR for ${scopeLabel}.`
-    );
-    chartRefs.mrCriticalTrendChart = new Chart(canvas.getContext("2d"), {
-        type: "bar",
-        data: {
-            labels: MR_FINANCIAL_MONTH_LABELS,
-            datasets: [{ label: getMrTrackingYearLabel(model.selectedYear), data: monthlyCounts, backgroundColor: "#ef4444", borderRadius: 8 }],
-        },
-        options: mrTrackingAxisOptions("Critical MR"),
-    });
-}
-
-function renderMrMonthlyCumulativeChart(model) {
-    const canvas = ensureCanvas("mrMonthlyCumulativeChart");
-    if (!canvas) return;
-    destroyChart("mrMonthlyCumulativeChart");
-    const scopeLabel = getMrTrackingScopeLabel(model.selectedYear, model.selectedMonth);
-    if (!model.monthlyCounts.some(Boolean)) {
-        renderEmptyChart("mrMonthlyCumulativeChart", `No MR raised in ${scopeLabel.toLowerCase()}.`);
-        return;
-    }
-    chartRefs.mrMonthlyCumulativeChart = new Chart(canvas.getContext("2d"), {
-        type: "bar",
-        data: {
-            labels: MR_FINANCIAL_MONTH_LABELS,
-            datasets: [
-                {
-                    type: "bar",
-                    label: "Monthly MR",
-                    data: model.monthlyCounts,
-                    backgroundColor: "#3b82f6",
-                    borderRadius: 8,
-                    maxBarThickness: 34,
-                    yAxisID: "y",
-                    order: 2,
-                },
-                {
-                    type: "line",
-                    label: "Cumulative MR",
-                    data: model.cumulativeCounts,
-                    borderColor: "#0f766e",
-                    backgroundColor: "rgba(15,118,110,0.12)",
-                    fill: false,
-                    tension: 0.25,
-                    pointRadius: 3,
-                    yAxisID: "yCumulative",
-                    order: 1,
-                },
-            ],
-        },
-        options: mrTrackingDualAxisOptions("Monthly MR", "Cumulative MR"),
-    });
-}
-
-function mrTrackingDualAxisOptions(yTitle, yCumulativeTitle) {
-    return {
-        responsive: true,
-        maintainAspectRatio: false,
-        interaction: { mode: "index", intersect: false },
-        plugins: {
-            legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 10 } },
-            tooltip: { callbacks: { label: (context) => `${context.dataset.label}: ${fmtNumber(context.parsed.y ?? context.parsed.x ?? context.raw)}` } },
-        },
-        scales: {
-            x: { grid: { display: false }, ticks: { color: "#475569" } },
-            y: {
-                beginAtZero: true,
-                position: "left",
-                title: { display: Boolean(yTitle), text: yTitle, color: "#3b82f6" },
-                ticks: { precision: 0, color: "#3b82f6" },
-                grid: { color: "rgba(148, 163, 184, 0.18)" },
-            },
-            yCumulative: {
-                beginAtZero: true,
-                position: "right",
-                title: { display: Boolean(yCumulativeTitle), text: yCumulativeTitle, color: "#0f766e" },
-                ticks: { precision: 0, color: "#0f766e" },
-                grid: { display: false },
-            },
-        },
-    };
 }
 
 function mrTrackingAxisOptions(yTitle) {
@@ -2187,9 +2260,12 @@ function renderMrOutstandingTable(model) {
     const body = document.getElementById("mr-outstanding-body");
     if (!body) return;
     const rows = [...model.outstandingItems].sort((a, b) => {
+        // Latest raised date first; severity (Critical first) breaks ties on the same date.
+        const ta = a.raised && a.raised.date ? new Date(a.raised.date).getTime() : -Infinity;
+        const tb = b.raised && b.raised.date ? new Date(b.raised.date).getTime() : -Infinity;
+        if (tb !== ta) return tb - ta;
         const severityOrder = { Critical: 0, High: 1, Medium: 2, Low: 3, Unclassified: 4 };
-        return (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)
-            || (getMrWaitingDays(b) ?? -1) - (getMrWaitingDays(a) ?? -1);
+        return (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9);
     });
     if (!rows.length) {
         body.innerHTML = `<tr><td colspan="10" class="empty-cell">No open MR awaiting acknowledgement for the selected filters.</td></tr>`;
@@ -2201,7 +2277,7 @@ function renderMrOutstandingTable(model) {
             <td>${escapeHtml(item.equipment)}</td>
             <td>${escapeHtml(item.assetId)}</td>
             <td>${escapeHtml(item.raised.date ? fmtDateOnly(item.raised.date) : "Invalid Date")}</td>
-            <td>${escapeHtml(item.severity)}</td>
+            <td>${escapeHtml(formatMrSeverityCode(item.severity, item.row))}</td>
             <td>${escapeHtml(getMrAcknowledgementDisplay(item, model.hasAckTracking))}</td>
             <td>${escapeHtml(getMrAckDaysText(item))}</td>
             <td>${escapeHtml(item.status || "Data not available")}</td>
@@ -7639,14 +7715,20 @@ function getAllWorkOrdersForMtbf() {
 async function loadMtbfHistory() {
     if (mtbfHistoryPayload) return mtbfHistoryPayload;
     if (mtbfHistoryPromise) return mtbfHistoryPromise;
+    const gen = _stageFetchGeneration;
     mtbfHistoryPromise = fetch(buildDowntimeMtbfHistoryUrl(), { cache: "no-store" })
         .then((response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             return response.json();
         })
         .then((payload) => {
+            if (_stageFetchGeneration !== gen) return null;
             mtbfHistoryPayload = payload;
             return payload;
+        })
+        .catch((error) => {
+            console.warn("MTBF history load failed:", error);
+            return null;
         })
         .finally(() => {
             mtbfHistoryPromise = null;
@@ -7765,10 +7847,6 @@ function syncMtbfTrendModeLabels() {
 
 function computeMtbfFromWorkOrders(wos) {
     // Per-asset MTBF — strict end-to-start only (no start-to-start fallback).
-    // All excluded pairs are collected in the module-level mtbfExcludedPairs array
-    // so the MTBF Data Reliability Review table can show them.
-    mtbfExcludedPairs = [];
-
     const byAsset = new Map();
     wos.forEach((wo) => {
         const id = String(wo.asset_id || "").trim();
@@ -7794,59 +7872,13 @@ function computeMtbfFromWorkOrders(wos) {
         for (let i = 1; i < sorted.length; i++) {
             const prev = sorted[i - 1];
             const next = sorted[i];
-            const prevEnd   = getMtbfWorkOrderEnd(prev);    // strict — null if no actual end
+            const prevEnd = getMtbfWorkOrderEnd(prev);      // strict — null if no actual end
             const nextStart = getMtbfWorkOrderStart(next);
-            const prevStart = getMtbfWorkOrderStart(prev);
-
-            const pairKey = `${assetId}|${prev.work_order_id || i - 1}|${next.work_order_id || i}`;
-            const baseExclusion = {
-                assetId,
-                assetName: prev.asset_display_name || prev.machine_group || assetId,
-                prevWoId: prev.work_order_id || "--",
-                prevMrId: prev.request_id || prev.maintenance_order_id || "--",
-                prevActualStart: prevStart ? fmtDateTime(prevStart) : "--",
-                prevActualEnd: prevEnd ? fmtDateTime(prevEnd) : "--",
-                nextWoId: next.work_order_id || "--",
-                nextMrId: next.request_id || next.maintenance_order_id || "--",
-                nextActualStart: nextStart ? fmtDateTime(nextStart) : "--",
-                calculatedGap: "--",
-                pairKey,
-            };
-
-            // Exclusion: previous WO has no actual end date
-            if (!prevEnd) {
-                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Missing Previous Actual End" });
-                continue;
-            }
-            // Exclusion: next WO has no actual start date
-            if (!nextStart) {
-                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Missing Next Actual Start" });
-                continue;
-            }
+            if (!prevEnd || !nextStart) continue;
 
             const gapMs    = nextStart.getTime() - prevEnd.getTime();
             const gapHours = gapMs / 3600000;
-
-            baseExclusion.calculatedGap = gapHours >= 1
-                ? fmtDaysHours(gapHours)
-                : `${Math.round(gapHours * 60)} min`;
-
-            // Exclusion: negative or overlapping gap
-            if (gapHours <= 0) {
-                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Negative or overlapping gap" });
-                continue;
-            }
-            // Exclusion: effectively zero (≤ 1 min)
-            if (gapHours < MTBF_MIN_GAP_HOURS) {
-                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Suspicious short gap (≤ 1 min)" });
-                continue;
-            }
-
-            // Include gap — flag if suspiciously short (< 1 hour) but it is a valid end-to-start gap
-            const isSuspicious = gapHours < MTBF_SUSPICIOUS_GAP_HOURS;
-            if (isSuspicious) {
-                mtbfExcludedPairs.push({ ...baseExclusion, exclusionReason: "Suspicious short gap (< 1 h) — included in MTBF but flagged for review" });
-            }
+            if (gapHours <= MTBF_MIN_GAP_HOURS) continue;
             gaps.push(gapHours);
         }
 
@@ -7867,7 +7899,6 @@ function computeMtbfFromWorkOrders(wos) {
 }
 
 // MTBF constants
-const MTBF_SUSPICIOUS_GAP_HOURS = 1;   // gaps < 1 h are flagged as suspicious but still included if valid end-to-start
 const MTBF_MIN_GAP_HOURS       = 1 / 60; // absolute floor — gaps <= 1 min are excluded (effectively zero)
 
 // General-area pattern: "Production High Risk", "Work Area", etc. are
@@ -7878,37 +7909,6 @@ function isMtbfGeneralAreaWo(wo) {
     const name = [wo.machine_group, wo.asset_display_name, wo.machine_name, wo.raw_functional_location, wo.location]
         .filter(Boolean).join(" ");
     return MTBF_GENERAL_AREA_RE.test(name);
-}
-
-// In-memory store of excluded MTBF pairs; populated each time computeMtbfFromWorkOrders runs.
-let mtbfExcludedPairs = [];
-let mtbfExcludedPairsReview = loadMtbfExcludedPairsReview();
-
-const MTBF_RELIABILITY_REVIEW_KEY = "downtime.mtbfReliabilityReview.v1";
-const MTBF_REVIEW_STATUS_OPTIONS   = ["Open", "Checking", "Confirmed Issue", "Valid Record", "To Exclude", "Corrected"];
-
-function loadMtbfExcludedPairsReview() {
-    if (typeof window === "undefined" || !window.localStorage) return {};
-    try {
-        const p = JSON.parse(window.localStorage.getItem(MTBF_RELIABILITY_REVIEW_KEY) || "{}");
-        return p && typeof p === "object" && !Array.isArray(p) ? p : {};
-    } catch { return {}; }
-}
-function saveMtbfExcludedPairsReview() {
-    if (typeof window === "undefined" || !window.localStorage) return;
-    try { window.localStorage.setItem(MTBF_RELIABILITY_REVIEW_KEY, JSON.stringify(mtbfExcludedPairsReview)); }
-    catch (e) { console.warn("MTBF review save failed:", e); }
-}
-function getMtbfReviewRecord(key) {
-    const r = mtbfExcludedPairsReview[key] || {};
-    return { reviewStatus: MTBF_REVIEW_STATUS_OPTIONS.includes(r.reviewStatus) ? r.reviewStatus : "Open", remark: String(r.remark || ""), followUpAction: String(r.followUpAction || "") };
-}
-function setMtbfReviewField(key, field, value) {
-    const prev = getMtbfReviewRecord(key);
-    const next = { ...prev, [field]: value };
-    if (next.reviewStatus === "Open" && !next.remark.trim() && !next.followUpAction.trim()) delete mtbfExcludedPairsReview[key];
-    else mtbfExcludedPairsReview[key] = next;
-    saveMtbfExcludedPairsReview();
 }
 
 function getMtbfWorkOrderStart(wo) {
@@ -8024,68 +8024,7 @@ function getMtbfAssetRowsForPeriod() {
         if (year) return t.startsWith(year);
         return true;
     });
-    const rows = computeMtbfFromWorkOrders(filtered);
-    renderMtbfReliabilityReview();
-    return rows;
-}
-
-function renderMtbfReliabilityReview() {
-    const body = document.getElementById("mtbf-reliability-body");
-    const countEl = document.getElementById("mtbf-reliability-count");
-    if (!body) return;
-
-    const filterVal = document.getElementById("mtbf-reliability-filter")?.value || "all";
-    const searchVal = (document.getElementById("mtbf-reliability-search")?.value || "").trim().toLowerCase();
-
-    const pairs = mtbfExcludedPairs.filter((p) => {
-        if (filterVal !== "all" && !p.exclusionReason.toLowerCase().includes(filterVal.toLowerCase())) return false;
-        if (searchVal) {
-            const hay = [p.assetId, p.assetName, p.prevWoId, p.prevMrId, p.nextWoId, p.nextMrId, p.exclusionReason].join(" ").toLowerCase();
-            if (!hay.includes(searchVal)) return false;
-        }
-        return true;
-    });
-
-    if (countEl) countEl.textContent = `${fmtNumber(pairs.length)} of ${fmtNumber(mtbfExcludedPairs.length)} excluded / flagged pairs`;
-
-    if (!pairs.length) {
-        body.innerHTML = `<tr><td colspan="14" class="empty-cell">${
-            mtbfExcludedPairs.length
-                ? "No pairs match the current filter."
-                : "No excluded pairs — MTBF data is clean, or MTBF has not been computed yet."
-        }</td></tr>`;
-        return;
-    }
-
-    body.innerHTML = pairs.slice(0, 500).map((p) => {
-        const rec = getMtbfReviewRecord(p.pairKey);
-        const isSuspicious = p.exclusionReason.includes("suspicious") || p.exclusionReason.includes("Suspicious");
-        const rowCls = isSuspicious ? "" : "cleansing-cleared-row";   // highlight hard-excluded rows
-        const statusOpts = MTBF_REVIEW_STATUS_OPTIONS
-            .map((o) => `<option value="${escapeHtml(o)}"${o === rec.reviewStatus ? " selected" : ""}>${escapeHtml(o)}</option>`).join("");
-        return `
-            <tr class="${rowCls}">
-                <td>${escapeHtml(p.assetId)}</td>
-                <td>${escapeHtml(p.assetName)}</td>
-                <td>${escapeHtml(p.prevWoId)}</td>
-                <td>${escapeHtml(p.prevMrId)}</td>
-                <td>${escapeHtml(p.prevActualStart)}</td>
-                <td>${escapeHtml(p.prevActualEnd)}</td>
-                <td>${escapeHtml(p.nextWoId)}</td>
-                <td>${escapeHtml(p.nextMrId)}</td>
-                <td>${escapeHtml(p.nextActualStart)}</td>
-                <td>${escapeHtml(p.calculatedGap)}</td>
-                <td><span class="missing-field-tag">${escapeHtml(p.exclusionReason)}</span></td>
-                <td><select class="cleansing-input cleansing-status-select mtbf-review-input"
-                        data-mtbf-key="${escapeHtml(p.pairKey)}" data-mtbf-field="reviewStatus">${statusOpts}</select></td>
-                <td><input type="text" class="cleansing-input cleansing-text mtbf-review-input"
-                        data-mtbf-key="${escapeHtml(p.pairKey)}" data-mtbf-field="remark"
-                        value="${escapeHtml(rec.remark)}" placeholder="Remark"></td>
-                <td><input type="text" class="cleansing-input cleansing-text mtbf-review-input"
-                        data-mtbf-key="${escapeHtml(p.pairKey)}" data-mtbf-field="followUpAction"
-                        value="${escapeHtml(rec.followUpAction)}" placeholder="Action"></td>
-            </tr>`;
-    }).join("");
+    return computeMtbfFromWorkOrders(filtered);
 }
 
 function filterMtbfTrend(trend) {
@@ -8654,6 +8593,7 @@ function buildAssetListLookup() {
             const meta = {
                 asset_name: String(asset.label || "").trim(),
                 machine_name: machine.machine_name,
+                asset_machine_group: String(asset.mappedMachineGroup || "").trim(),
                 criticality: machine.criticality,
                 location: machine.location,
             };
@@ -8662,6 +8602,19 @@ function buildAssetListLookup() {
         });
     });
     return lookup;
+}
+
+function buildMachineGroupCategoryMap() {
+    const mgToCategory = new Map();
+    (assetListData || []).forEach((machine) => {
+        const cat = String(machine.machine_name || "").trim();
+        if (!cat) return;
+        (machine.assets || []).forEach((asset) => {
+            const mg = String(asset.mappedMachineGroup || "").trim();
+            if (mg) mgToCategory.set(mg, cat);
+        });
+    });
+    return mgToCategory;
 }
 
 function getCriticalAssetIdSet() {
@@ -9435,14 +9388,14 @@ function wireFilters() {
         mrCarryoverSort = event.target.value || "duration_desc";
         renderMrMovementSection(getCategoryScopedAllRows());
     });
+    document.getElementById("mr-tracking-source")?.addEventListener("change", (event) => {
+        mrSourceFilter = event.target.value || "all";
+        renderMrTrackingSection(getCategoryScopedAllRows());
+    });
     document.getElementById("mr-tracking-equipment")?.addEventListener("change", (event) => {
         mrTrackingEquipmentFilter = event.target.value || "all";
         renderMrTrackingSection(getCategoryScopedAllRows());
         renderWorkOrderResponseSection(getWorkOrderRows(getManagement()));
-    });
-    document.getElementById("mr-tracking-severity")?.addEventListener("change", (event) => {
-        mrTrackingSeverityFilter = event.target.value || "all";
-        renderMrTrackingSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-tracking-year")?.addEventListener("change", (event) => {
         mrTrackingSelectedYear = event.target.value || mrTrackingSelectedYear || "all";
@@ -9451,10 +9404,6 @@ function wireFilters() {
     });
     document.getElementById("mr-tracking-month")?.addEventListener("change", (event) => {
         mrTrackingSelectedMonth = event.target.value || mrTrackingSelectedMonth || "all";
-        renderMrTrackingSection(getCategoryScopedAllRows());
-    });
-    document.getElementById("mr-tracking-date-group")?.addEventListener("change", (event) => {
-        mrTrackingDateGrouping = event.target.value || "monthly";
         renderMrTrackingSection(getCategoryScopedAllRows());
     });
     document.getElementById("mr-machine-filter")?.addEventListener("change", (event) => {
@@ -12163,6 +12112,8 @@ let kdiMttrSelectedGroup = "";
 let kdiMtbfSelectedGroup = "";
 let kdiMttrRankMode = "group";
 let kdiMtbfRankMode = "group";
+let kdiMttrDrilldownMachineGroup = "";
+let kdiMtbfDrilldownMachineGroup = "";
 let kdiCurrentMttrData = null;
 let kdiCurrentMtbfData = null;
 
@@ -12213,11 +12164,11 @@ function kdiAssetMatchesSearch(entry, searchTerm) {
 function kdiPopulateMachineGroupSelect(selectId, entries = [], selectedValue = "") {
     const select = document.getElementById(selectId);
     if (!select) return "";
-    const groups = [...new Set(entries.map((entry) => String(entry?.group || "").trim()).filter(Boolean))]
+    const categories = [...new Set(entries.map((entry) => String(entry?.group || "").trim()).filter(Boolean))]
         .sort((a, b) => a.localeCompare(b));
-    const nextValue = groups.includes(selectedValue) ? selectedValue : "";
-    select.innerHTML = `<option value="">All Groups</option>` +
-        groups.map((group) => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join("");
+    const nextValue = categories.includes(selectedValue) ? selectedValue : "";
+    select.innerHTML = `<option value="">All Categories</option>` +
+        categories.map((cat) => `<option value="${escapeHtml(cat)}">${escapeHtml(cat)}</option>`).join("");
     select.value = nextValue;
     return nextValue;
 }
@@ -12288,6 +12239,7 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
                 assetId,
                 assetName: String(meta?.asset_name || meta?.machine_name || wo.machine_name || wo.asset_name || wo.equipment_name || assetId).trim(),
                 group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
+                assetMachineGroup: String(meta?.asset_machine_group || wo.asset_machine_group || "").trim(),
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 hours: [],
                 totalDowntimeHours: 0,
@@ -12376,6 +12328,78 @@ function kdiGroupMttrByMachineGroup(assetMap, critFilter) {
         .sort((a, b) => (b.avgMttr || 0) - (a.avgMttr || 0));
 }
 
+function kdiGroupMttrByMachineGroupLabel(assetMap, critFilter, categoryFilter = "") {
+    const groups = new Map();
+    assetMap.forEach((entry) => {
+        if (critFilter && entry.criticality !== critFilter) return;
+        if (categoryFilter && entry.group !== categoryFilter) return;
+        const key = entry.assetMachineGroup || "Unclassified";
+        if (!groups.has(key)) {
+            groups.set(key, { machineName: key, category: entry.group, criticality: entry.criticality, hours: [], assetIds: new Set(), missingCount: 0, totalDowntimeHours: 0 });
+        }
+        const g = groups.get(key);
+        g.assetIds.add(entry.assetId);
+        g.hours.push(...entry.hours);
+        g.missingCount += entry.missingCount;
+        g.totalDowntimeHours += entry.totalDowntimeHours || 0;
+        if (!g.criticality || g.criticality === "Unclassified") g.criticality = entry.criticality;
+    });
+    return [...groups.values()]
+        .map((g) => ({
+            machineName: g.machineName,
+            criticality: g.criticality || "Unclassified",
+            woCount: g.hours.length,
+            assetCount: g.assetIds.size,
+            avgMttr: g.hours.length > 0 ? g.hours.reduce((a, b) => a + b, 0) / g.hours.length : null,
+            medianMttr: median(g.hours),
+            highestMttr: g.hours.length > 0 ? Math.max(...g.hours) : null,
+            totalDowntimeHours: g.totalDowntimeHours,
+            missingCount: g.missingCount,
+        }))
+        .filter((g) => g.woCount > 0 || g.missingCount > 0)
+        .sort((a, b) => (b.avgMttr || 0) - (a.avgMttr || 0));
+}
+
+function kdiGroupMtbfByMachineGroupLabel(allAssets, critFilter, categoryFilter = "") {
+    const groups = new Map();
+    allAssets.forEach((entry) => {
+        if (critFilter && entry.criticality !== critFilter) return;
+        if (categoryFilter && entry.group !== categoryFilter) return;
+        const key = entry.assetMachineGroup || "Unclassified";
+        if (!groups.has(key)) {
+            groups.set(key, { machineName: key, criticality: entry.criticality, avgMtbfs: [], minMtbfs: [], maxMtbfs: [], assetCount: 0, assetsWithMtbf: 0, woCount: 0, gapCount: 0, insufficientCount: 0 });
+        }
+        const g = groups.get(key);
+        g.assetCount++;
+        g.woCount += entry.woCount || 0;
+        if (entry.hasMtbf) {
+            g.assetsWithMtbf++;
+            g.avgMtbfs.push(entry.avgMtbf);
+            g.minMtbfs.push(entry.minMtbf);
+            g.maxMtbfs.push(entry.maxMtbf);
+            g.gapCount += entry.gapCount;
+        } else {
+            g.insufficientCount++;
+        }
+        if (!g.criticality || g.criticality === "Unclassified") g.criticality = entry.criticality;
+    });
+    return [...groups.values()]
+        .map((g) => ({
+            machineName: g.machineName,
+            criticality: g.criticality || "Unclassified",
+            assetCount: g.assetCount,
+            assetsWithMtbf: g.assetsWithMtbf,
+            woCount: g.woCount,
+            gapCount: g.gapCount,
+            avgMtbf: g.avgMtbfs.length > 0 ? g.avgMtbfs.reduce((a, b) => a + b, 0) / g.avgMtbfs.length : null,
+            lowestMtbf: g.minMtbfs.length > 0 ? Math.min(...g.minMtbfs) : null,
+            highestMtbf: g.maxMtbfs.length > 0 ? Math.max(...g.maxMtbfs) : null,
+            insufficientCount: g.insufficientCount,
+        }))
+        .filter((g) => g.avgMtbf !== null)
+        .sort((a, b) => (a.avgMtbf || 0) - (b.avgMtbf || 0));
+}
+
 function kdiRenderMttrGroupChart(groups, assetRows = [], selectedGroup = "", rankMode = "group") {
     const id = "kdiMttrGroupChart";
     const canvas = ensureCanvas(id);
@@ -12384,11 +12408,15 @@ function kdiRenderMttrGroupChart(groups, assetRows = [], selectedGroup = "", ran
     destroyChart(id);
     const groupRows = selectedGroup ? groups.filter((row) => row.machineName === selectedGroup) : groups;
     const usingAssets = rankMode === "asset";
+    const usingMachineGroup = rankMode === "machine-group";
     const valid = (usingAssets ? assetRows.filter((row) => row.avgMttr !== null) : groupRows.filter((g) => g.avgMttr !== null)).slice(0, 14);
     if (title) {
+        const suffix = selectedGroup ? ` — ${selectedGroup}` : "";
         title.textContent = usingAssets
-            ? `MTTR by Asset / Machine Name${selectedGroup ? ` - ${selectedGroup}` : ""} - highest first`
-            : `MTTR by Machine Group${selectedGroup ? ` - ${selectedGroup}` : ""} - highest first`;
+            ? `MTTR by Asset / Machine Name${suffix} — highest first`
+            : usingMachineGroup
+                ? `MTTR by Machine Group${suffix} — highest first`
+                : `MTTR by Machine Category${suffix} — highest first`;
     }
     setChartContainerHeight(id, valid.length * 32 + 72);
     if (!valid.length) { renderEmptyChart(id, "No MTTR data for the selected filters"); return; }
@@ -12405,7 +12433,7 @@ function kdiRenderMttrGroupChart(groups, assetRows = [], selectedGroup = "", ran
             onClick: (_event, elements) => {
                 if (usingAssets || !elements.length) return;
                 const row = valid[elements[0].index];
-                if (row?.machineName) kdiOpenMttrGroupDrilldown(row.machineName);
+                if (row?.machineName) kdiOpenMttrGroupDrilldown(row.machineName, rankMode);
             },
             plugins: {
                 legend: { display: false },
@@ -12446,20 +12474,25 @@ function kdiRenderMttrSummaryTable(groups, assetRows = [], selectedGroup = "", r
     if (!tbody) return;
     const search = kdiNormalizeSearchTerm(searchInput?.value || "");
     const usingAssets = rankMode === "asset";
+    const usingMachineGroup = rankMode === "machine-group";
     const groupRows = selectedGroup ? groups.filter((row) => row.machineName === selectedGroup) : groups;
+    const suffix = selectedGroup ? ` — ${selectedGroup}` : "";
     if (title) {
         title.textContent = usingAssets
-            ? `MTTR Summary by Asset / Machine Name${selectedGroup ? ` - ${selectedGroup}` : ""}`
-            : `MTTR Summary by Machine Group${selectedGroup ? ` - ${selectedGroup}` : ""}`;
+            ? `MTTR Summary by Asset / Machine Name${suffix}`
+            : usingMachineGroup
+                ? `MTTR Summary by Machine Group${suffix}`
+                : `MTTR Summary by Machine Category${suffix}`;
     }
+    const dimLabel = usingMachineGroup ? "Machine Group" : "Machine Category";
     if (head) {
         head.innerHTML = usingAssets
             ? "<th>Asset Name</th><th>Asset ID</th><th>Criticality</th><th>WO Count</th><th>Avg MTTR</th><th>Total Downtime</th><th>Missing / Invalid</th>"
-            : "<th>Machine Group</th><th>MTTR</th><th>WO Count</th><th>Total Downtime</th><th>Assets Affected</th><th>Missing / Invalid</th>";
+            : `<th>${dimLabel}</th><th>MTTR</th><th>WO Count</th><th>Total Downtime</th><th>Assets Affected</th><th>Missing / Invalid</th>`;
     }
     if (searchInput) {
-        searchInput.placeholder = usingAssets ? "Search assets..." : "Search groups...";
-        searchInput.setAttribute("aria-label", usingAssets ? "Search assets" : "Search machine groups");
+        searchInput.placeholder = usingAssets ? "Search assets..." : `Search ${dimLabel.toLowerCase()}s…`;
+        searchInput.setAttribute("aria-label", usingAssets ? "Search assets" : `Search ${dimLabel.toLowerCase()}s`);
     }
     const visible = usingAssets
         ? (search
@@ -12502,7 +12535,7 @@ function kdiGetLaterDate(a, b) {
     return a > b ? a : b;
 }
 
-function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode = "mttr") {
+function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode = "mttr", machineGroupFilter = "") {
     const rowsById = new Map();
     const ensureRow = (entry) => {
         const key = String(entry?.assetId || entry?.assetName || "").trim() || `${entry?.group || "Unclassified"}:${rowsById.size}`;
@@ -12511,6 +12544,7 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
                 assetId: entry?.assetId || "--",
                 assetName: entry?.assetName || entry?.assetId || "--",
                 group: entry?.group || "Unclassified",
+                assetMachineGroup: entry?.assetMachineGroup || "",
                 criticality: entry?.criticality || "Unclassified",
                 woCount: 0,
                 mttrWoCount: 0,
@@ -12525,10 +12559,14 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
         const row = rowsById.get(key);
         if ((!row.assetName || row.assetName === row.assetId) && entry?.assetName) row.assetName = entry.assetName;
         if (!row.group || row.group === "Unclassified") row.group = entry?.group || row.group;
+        if (!row.assetMachineGroup && entry?.assetMachineGroup) row.assetMachineGroup = entry.assetMachineGroup;
         if ((!row.criticality || row.criticality === "Unclassified") && entry?.criticality) row.criticality = entry.criticality;
         return row;
     };
-    const includeEntry = (entry) => (!critFilter || entry?.criticality === critFilter) && (!selectedGroup || entry?.group === selectedGroup);
+    const includeEntry = (entry) =>
+        (!critFilter || entry?.criticality === critFilter) &&
+        (!selectedGroup || entry?.group === selectedGroup) &&
+        (!machineGroupFilter || (entry?.assetMachineGroup || "") === machineGroupFilter);
 
     kdiCurrentMttrData?.assetMap?.forEach((entry) => {
         if (!includeEntry(entry)) return;
@@ -12566,23 +12604,30 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
         });
 }
 
-function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critFilter = "", selectedGroup = "", sortMode = "mttr") {
+function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critFilter = "", selectedGroup = "", sortMode = "mttr", isMachineGroupMode = false) {
     const tbody = document.getElementById(tbodyId);
     const groupSelect = document.getElementById(groupSelectId);
     if (!tbody) return;
     const availableRows = kdiBuildCombinedAssetRows(critFilter, "", sortMode);
     if (groupSelect) {
-        const groups = [...new Set(availableRows.map((row) => row.group).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+        const values = isMachineGroupMode
+            ? [...new Set(availableRows.map((row) => row.assetMachineGroup).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+            : [...new Set(availableRows.map((row) => row.group).filter(Boolean))].sort((a, b) => a.localeCompare(b));
         const prev = groupSelect.value;
-        const preferredGroup = selectedGroup && groups.includes(selectedGroup) ? selectedGroup : prev;
-        groupSelect.innerHTML = `<option value="">All Groups</option>` +
-            groups.map((group) => `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`).join("");
-        groupSelect.value = groups.includes(preferredGroup) ? preferredGroup : "";
+        const preferred = selectedGroup && values.includes(selectedGroup) ? selectedGroup : prev;
+        const allLabel = isMachineGroupMode ? "All Machine Groups" : "All Groups";
+        groupSelect.innerHTML = `<option value="">${allLabel}</option>` +
+            values.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+        groupSelect.value = values.includes(preferred) ? preferred : "";
     }
-    const groupFilter = groupSelect?.value || "";
+    const activeFilter = groupSelect?.value || "";
     const drilldownSearch = kdiNormalizeSearchTerm(document.getElementById(searchId)?.value || "");
-    const rows = kdiBuildCombinedAssetRows(critFilter, groupFilter, sortMode)
-        .filter((row) => !drilldownSearch || kdiAssetMatchesSearch(row, drilldownSearch) || kdiNormalizeSearchTerm(row.group).includes(drilldownSearch));
+    const rows = kdiBuildCombinedAssetRows(
+        critFilter,
+        isMachineGroupMode ? "" : activeFilter,
+        sortMode,
+        isMachineGroupMode ? activeFilter : ""
+    ).filter((row) => !drilldownSearch || kdiAssetMatchesSearch(row, drilldownSearch) || kdiNormalizeSearchTerm(row.group).includes(drilldownSearch));
     if (!rows.length) {
         tbody.innerHTML = `<tr><td colspan="8" class="empty-cell">${drilldownSearch ? "No assets match the search." : "No data for the selected filter."}</td></tr>`;
         return;
@@ -12601,8 +12646,9 @@ function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critF
     `).join("");
 }
 
-function kdiRenderMttrAssetDrilldown(assetMap, critFilter, selectedGroup = "") {
-    kdiRenderCombinedAssetDrilldown("kdi-mttr-asset-table-body", "kdi-mttr-asset-group-filter", "kdi-mttr-asset-search", critFilter, selectedGroup, "mttr");
+function kdiRenderMttrAssetDrilldown(assetMap, critFilter, groupOrMgFilter = "") {
+    const isMachineGroupMode = kdiMttrRankMode === "machine-group";
+    kdiRenderCombinedAssetDrilldown("kdi-mttr-asset-table-body", "kdi-mttr-asset-group-filter", "kdi-mttr-asset-search", critFilter, groupOrMgFilter, "mttr", isMachineGroupMode);
 }
 
 // ── MTBF ─────────────────────────────────────────────────────────────────────
@@ -12626,6 +12672,7 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
                 assetId,
                 assetName: String(meta?.asset_name || meta?.machine_name || wo.machine_name || wo.asset_name || wo.equipment_name || assetId).trim(),
                 group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
+                assetMachineGroup: String(meta?.asset_machine_group || wo.asset_machine_group || "").trim(),
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 wos: [],
                 lastFailureDate: null,
@@ -12752,11 +12799,15 @@ function kdiRenderMtbfGroupChart(groups, assetRows = [], selectedGroup = "", ran
     destroyChart(id);
     const groupRows = selectedGroup ? groups.filter((row) => row.machineName === selectedGroup) : groups;
     const usingAssets = rankMode === "asset";
+    const usingMachineGroup = rankMode === "machine-group";
     const valid = (usingAssets ? assetRows : groupRows).slice(0, 14);
     if (title) {
+        const suffix = selectedGroup ? ` — ${selectedGroup}` : "";
         title.textContent = usingAssets
-            ? `MTBF by Asset / Machine Name${selectedGroup ? ` - ${selectedGroup}` : ""} - lowest first (needs most attention)`
-            : `MTBF by Machine Group${selectedGroup ? ` - ${selectedGroup}` : ""} - lowest first (needs most attention)`;
+            ? `MTBF by Asset / Machine Name${suffix} — lowest first (needs most attention)`
+            : usingMachineGroup
+                ? `MTBF by Machine Group${suffix} — lowest first (needs most attention)`
+                : `MTBF by Machine Category${suffix} — lowest first (needs most attention)`;
     }
     setChartContainerHeight(id, valid.length * 32 + 72);
     if (!valid.length) { renderEmptyChart(id, "No MTBF data for the selected filters"); return; }
@@ -12774,7 +12825,7 @@ function kdiRenderMtbfGroupChart(groups, assetRows = [], selectedGroup = "", ran
             onClick: (_event, elements) => {
                 if (usingAssets || !elements.length) return;
                 const row = valid[elements[0].index];
-                if (row?.machineName) kdiOpenMtbfGroupDrilldown(row.machineName);
+                if (row?.machineName) kdiOpenMtbfGroupDrilldown(row.machineName, rankMode);
             },
             plugins: {
                 legend: { display: false },
@@ -12815,20 +12866,25 @@ function kdiRenderMtbfSummaryTable(groups, assetRows = [], selectedGroup = "", r
     if (!tbody) return;
     const search = kdiNormalizeSearchTerm(searchInput?.value || "");
     const usingAssets = rankMode === "asset";
+    const usingMachineGroup = rankMode === "machine-group";
     const groupRows = selectedGroup ? groups.filter((row) => row.machineName === selectedGroup) : groups;
+    const suffix = selectedGroup ? ` — ${selectedGroup}` : "";
     if (title) {
         title.textContent = usingAssets
-            ? `MTBF Summary by Asset / Machine Name${selectedGroup ? ` - ${selectedGroup}` : ""}`
-            : `MTBF Summary by Machine Group${selectedGroup ? ` - ${selectedGroup}` : ""}`;
+            ? `MTBF Summary by Asset / Machine Name${suffix}`
+            : usingMachineGroup
+                ? `MTBF Summary by Machine Group${suffix}`
+                : `MTBF Summary by Machine Category${suffix}`;
     }
+    const dimLabel = usingMachineGroup ? "Machine Group" : "Machine Category";
     if (head) {
         head.innerHTML = usingAssets
             ? "<th>Asset Name</th><th>Asset ID</th><th>Criticality</th><th>WO Count</th><th>Repeat Failures</th><th>Avg MTBF</th><th>Lowest MTBF</th><th>Highest MTBF</th>"
-            : "<th>Machine Group</th><th>MTBF</th><th>Failure / WO Count</th><th>Assets Included</th><th>Repeat Failure Count</th><th>Lowest MTBF</th><th>Insufficient Data</th>";
+            : `<th>${dimLabel}</th><th>MTBF</th><th>Failure / WO Count</th><th>Assets Included</th><th>Repeat Failure Count</th><th>Lowest MTBF</th><th>Insufficient Data</th>`;
     }
     if (searchInput) {
-        searchInput.placeholder = usingAssets ? "Search assets..." : "Search groups...";
-        searchInput.setAttribute("aria-label", usingAssets ? "Search assets" : "Search machine groups");
+        searchInput.placeholder = usingAssets ? "Search assets..." : `Search ${dimLabel.toLowerCase()}s…`;
+        searchInput.setAttribute("aria-label", usingAssets ? "Search assets" : `Search ${dimLabel.toLowerCase()}s`);
     }
     const visible = usingAssets
         ? (search
@@ -12920,8 +12976,9 @@ function kdiRenderMtbfAdditionalKpis(groups, assetRows, selectedGroup = "", rank
     `;
 }
 
-function kdiRenderMtbfAssetDrilldown(assetResults, critFilter, selectedGroup = "") {
-    kdiRenderCombinedAssetDrilldown("kdi-mtbf-asset-table-body", "kdi-mtbf-asset-group-filter", "kdi-mtbf-asset-search", critFilter, selectedGroup, "mtbf");
+function kdiRenderMtbfAssetDrilldown(assetResults, critFilter, groupOrMgFilter = "") {
+    const isMachineGroupMode = kdiMtbfRankMode === "machine-group";
+    kdiRenderCombinedAssetDrilldown("kdi-mtbf-asset-table-body", "kdi-mtbf-asset-group-filter", "kdi-mtbf-asset-search", critFilter, groupOrMgFilter, "mtbf", isMachineGroupMode);
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
@@ -13064,14 +13121,16 @@ function updateKdiMttrAnalysis() {
     const crit = kdiMttrCriticalityFilter;
     const availableAssets = [...assetMap.values()].filter((entry) => !crit || entry.criticality === crit);
     kdiMttrSelectedGroup = kdiPopulateMachineGroupSelect("kdi-mttr-machine-group-filter", availableAssets, kdiMttrSelectedGroup);
-    const groups = kdiGroupMttrByMachineGroup(assetMap, crit);
+    const groups = kdiMttrRankMode === "machine-group"
+        ? kdiGroupMttrByMachineGroupLabel(assetMap, crit, kdiMttrSelectedGroup)
+        : kdiGroupMttrByMachineGroup(assetMap, crit);
     const assetRows = kdiBuildMttrAssetRows(assetMap, crit, kdiMttrSelectedGroup);
     kdiRenderCriticalityBtns("kdi-mttr-criticality-filter", crit, (v) => { kdiMttrCriticalityFilter = v; updateKdiMttrAnalysis(); });
     kdiRenderRankToggle("kdi-mttr-rank-toggle", kdiMttrRankMode, (mode) => { kdiMttrRankMode = mode; updateKdiMttrAnalysis(); });
     kdiRenderMttrGroupChart(groups, assetRows, kdiMttrSelectedGroup, kdiMttrRankMode);
     kdiRenderMttrSummaryTable(groups, assetRows, kdiMttrSelectedGroup, kdiMttrRankMode);
     const dd = document.getElementById("kdi-mttr-asset-drilldown");
-    if (dd?.open) kdiRenderMttrAssetDrilldown(assetMap, crit, kdiMttrSelectedGroup);
+    if (dd?.open) kdiRenderMttrAssetDrilldown(assetMap, crit, kdiMttrRankMode === "machine-group" ? kdiMttrDrilldownMachineGroup : kdiMttrSelectedGroup);
 }
 
 function updateKdiMtbfAnalysis() {
@@ -13080,17 +13139,17 @@ function updateKdiMtbfAnalysis() {
     const crit = kdiMtbfCriticalityFilter;
     const availableAssets = allAssets.filter((entry) => !crit || entry.criticality === crit);
     kdiMtbfSelectedGroup = kdiPopulateMachineGroupSelect("kdi-mtbf-machine-group-filter", availableAssets, kdiMtbfSelectedGroup);
-    const groups = kdiGroupMtbfByMachineGroup(allAssets, crit);
+    const groups = kdiMtbfRankMode === "machine-group"
+        ? kdiGroupMtbfByMachineGroupLabel(allAssets, crit, kdiMtbfSelectedGroup)
+        : kdiGroupMtbfByMachineGroup(allAssets, crit);
     const assetRows = kdiBuildMtbfAssetRows(allAssets, crit, kdiMtbfSelectedGroup);
     const filteredResults = assetResults.filter((entry) => (!crit || entry.criticality === crit) && (!kdiMtbfSelectedGroup || entry.group === kdiMtbfSelectedGroup));
     kdiRenderCriticalityBtns("kdi-mtbf-criticality-filter", crit, (v) => { kdiMtbfCriticalityFilter = v; updateKdiMtbfAnalysis(); });
     kdiRenderRankToggle("kdi-mtbf-rank-toggle", kdiMtbfRankMode, (mode) => { kdiMtbfRankMode = mode; updateKdiMtbfAnalysis(); });
-    kdiRenderMtbfAdditionalKpis(groups, kdiMtbfRankMode === "asset" ? assetRows : filteredResults, kdiMtbfSelectedGroup, kdiMtbfRankMode);
     kdiRenderMtbfGroupChart(groups, assetRows, kdiMtbfSelectedGroup, kdiMtbfRankMode);
     kdiRenderMtbfSummaryTable(groups, assetRows, kdiMtbfSelectedGroup, kdiMtbfRankMode);
     const dd = document.getElementById("kdi-mtbf-asset-drilldown");
-    if (dd?.open) kdiRenderMtbfAssetDrilldown(assetResults, crit, kdiMtbfSelectedGroup);
-    renderMtbfReliabilityReview();
+    if (dd?.open) kdiRenderMtbfAssetDrilldown(assetResults, crit, kdiMtbfRankMode === "machine-group" ? kdiMtbfDrilldownMachineGroup : kdiMtbfSelectedGroup);
 }
 
 function kdiSetSelectValueIfPresent(selectId, value) {
@@ -13102,28 +13161,50 @@ function kdiSetSelectValueIfPresent(selectId, value) {
 
 function kdiOpenMttrGroupDrilldown(group) {
     if (!group || !kdiCurrentMttrData) return;
-    kdiMttrRankMode = "group";
-    kdiMttrSelectedGroup = group;
-    updateKdiMttrAnalysis();
-    const dd = document.getElementById("kdi-mttr-asset-drilldown");
-    if (!dd) return;
-    dd.open = true;
-    kdiSetSelectValueIfPresent("kdi-mttr-asset-group-filter", group);
-    kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, group);
-    dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (kdiMttrRankMode === "machine-group") {
+        kdiMttrDrilldownMachineGroup = group;
+        updateKdiMttrAnalysis();
+        const dd = document.getElementById("kdi-mttr-asset-drilldown");
+        if (!dd) return;
+        dd.open = true;
+        kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, group);
+        dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } else {
+        kdiMttrRankMode = "group";
+        kdiMttrSelectedGroup = group;
+        kdiMttrDrilldownMachineGroup = "";
+        updateKdiMttrAnalysis();
+        const dd = document.getElementById("kdi-mttr-asset-drilldown");
+        if (!dd) return;
+        dd.open = true;
+        kdiSetSelectValueIfPresent("kdi-mttr-asset-group-filter", group);
+        kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, group);
+        dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
 }
 
 function kdiOpenMtbfGroupDrilldown(group) {
     if (!group || !kdiCurrentMtbfData) return;
-    kdiMtbfRankMode = "group";
-    kdiMtbfSelectedGroup = group;
-    updateKdiMtbfAnalysis();
-    const dd = document.getElementById("kdi-mtbf-asset-drilldown");
-    if (!dd) return;
-    dd.open = true;
-    kdiSetSelectValueIfPresent("kdi-mtbf-asset-group-filter", group);
-    kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, group);
-    dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    if (kdiMtbfRankMode === "machine-group") {
+        kdiMtbfDrilldownMachineGroup = group;
+        updateKdiMtbfAnalysis();
+        const dd = document.getElementById("kdi-mtbf-asset-drilldown");
+        if (!dd) return;
+        dd.open = true;
+        kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, group);
+        dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    } else {
+        kdiMtbfRankMode = "group";
+        kdiMtbfSelectedGroup = group;
+        kdiMtbfDrilldownMachineGroup = "";
+        updateKdiMtbfAnalysis();
+        const dd = document.getElementById("kdi-mtbf-asset-drilldown");
+        if (!dd) return;
+        dd.open = true;
+        kdiSetSelectValueIfPresent("kdi-mtbf-asset-group-filter", group);
+        kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, group);
+        dd.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
 }
 
 function kdiWireGroupDrilldown(tableBodyId, onOpen) {
@@ -13150,7 +13231,7 @@ function kdiWireStaticControls() {
         if (!btn || !panel) return;
         panel.classList.remove("hidden");
         btn.setAttribute("aria-expanded", "true");
-        btn.innerHTML = `${label} Machine Group View`;
+        btn.innerHTML = `${label} Analysis`;
         btn.addEventListener("click", () => {
             panel.classList.remove("hidden");
             updateFn();
@@ -13163,19 +13244,33 @@ function kdiWireStaticControls() {
 
     document.getElementById("kdi-mttr-asset-drilldown")?.addEventListener("toggle", () => {
         if (document.getElementById("kdi-mttr-asset-drilldown")?.open && kdiCurrentMttrData) {
-            kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, kdiMttrSelectedGroup);
+            const grpArg = kdiMttrRankMode === "machine-group" ? kdiMttrDrilldownMachineGroup : kdiMttrSelectedGroup;
+            kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, grpArg);
         }
     });
     document.getElementById("kdi-mtbf-asset-drilldown")?.addEventListener("toggle", () => {
         if (document.getElementById("kdi-mtbf-asset-drilldown")?.open && kdiCurrentMtbfData) {
-            kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, kdiMtbfSelectedGroup);
+            const grpArg = kdiMtbfRankMode === "machine-group" ? kdiMtbfDrilldownMachineGroup : kdiMtbfSelectedGroup;
+            kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, grpArg);
         }
     });
-    document.getElementById("kdi-mttr-asset-group-filter")?.addEventListener("change", () => {
-        if (kdiCurrentMttrData) kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, kdiMttrSelectedGroup);
+    document.getElementById("kdi-mttr-asset-group-filter")?.addEventListener("change", (event) => {
+        if (!kdiCurrentMttrData) return;
+        if (kdiMttrRankMode === "machine-group") {
+            kdiMttrDrilldownMachineGroup = event.target.value || "";
+            kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, kdiMttrDrilldownMachineGroup);
+        } else {
+            kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, kdiMttrSelectedGroup);
+        }
     });
-    document.getElementById("kdi-mtbf-asset-group-filter")?.addEventListener("change", () => {
-        if (kdiCurrentMtbfData) kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, kdiMtbfSelectedGroup);
+    document.getElementById("kdi-mtbf-asset-group-filter")?.addEventListener("change", (event) => {
+        if (!kdiCurrentMtbfData) return;
+        if (kdiMtbfRankMode === "machine-group") {
+            kdiMtbfDrilldownMachineGroup = event.target.value || "";
+            kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, kdiMtbfDrilldownMachineGroup);
+        } else {
+            kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, kdiMtbfSelectedGroup);
+        }
     });
     document.getElementById("kdi-mttr-machine-group-filter")?.addEventListener("change", (event) => {
         kdiMttrSelectedGroup = event.target.value || "";
@@ -13192,18 +13287,16 @@ function kdiWireStaticControls() {
         if (kdiCurrentMtbfData) updateKdiMtbfAnalysis();
     });
     document.getElementById("kdi-mttr-asset-search")?.addEventListener("input", () => {
-        if (kdiCurrentMttrData) kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, kdiMttrSelectedGroup);
+        if (kdiCurrentMttrData) {
+            const grpArg = kdiMttrRankMode === "machine-group" ? kdiMttrDrilldownMachineGroup : kdiMttrSelectedGroup;
+            kdiRenderMttrAssetDrilldown(kdiCurrentMttrData.assetMap, kdiMttrCriticalityFilter, grpArg);
+        }
     });
     document.getElementById("kdi-mtbf-asset-search")?.addEventListener("input", () => {
-        if (kdiCurrentMtbfData) kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, kdiMtbfSelectedGroup);
-    });
-    // MTBF Data Reliability Review controls
-    document.getElementById("mtbf-reliability-filter")?.addEventListener("change", renderMtbfReliabilityReview);
-    document.getElementById("mtbf-reliability-search")?.addEventListener("input", renderMtbfReliabilityReview);
-    document.getElementById("mtbf-reliability-table")?.addEventListener("change", (e) => {
-        const el = e.target.closest(".mtbf-review-input");
-        if (!el) return;
-        setMtbfReviewField(el.dataset.mtbfKey, el.dataset.mtbfField, el.value);
+        if (kdiCurrentMtbfData) {
+            const grpArg = kdiMtbfRankMode === "machine-group" ? kdiMtbfDrilldownMachineGroup : kdiMtbfSelectedGroup;
+            kdiRenderMtbfAssetDrilldown(kdiCurrentMtbfData.assetResults, kdiMtbfCriticalityFilter, grpArg);
+        }
     });
 }
 

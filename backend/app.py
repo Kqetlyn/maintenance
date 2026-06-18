@@ -387,6 +387,7 @@ def asset_list_api():
                     "mappedStage": e.get("mappedStage"),
                     "mappedAssetName": e.get("mappedAssetName") or e.get("asset_display_name"),
                     "mappedMainAssetGroup": e.get("mappedMainAssetGroup") or group.get("mappedMainAssetGroup"),
+                    "mappedMachineGroup": e.get("mappedMachineGroup") or "",
                     "mappedSubAssetGroup": e.get("mappedSubAssetGroup"),
                     "mappedLocation": e.get("mappedLocation") or group.get("mappedLocation"),
                     "mappedSystemArea": e.get("mappedSystemArea"),
@@ -555,6 +556,26 @@ def spare_parts_import_gen_po():
         any_ok = any_ok or res.get("ok")
         results.append(res)
     return jsonify({"ok": any_ok, "results": results}), (200 if any_ok else 400)
+
+
+@app.route("/api/spare-parts/procurement-reconciliation")
+def spare_parts_procurement_reconciliation():
+    stage, category, year, month = _spare_filters()
+    import indirect_po_service as ipo
+    return _cached_json(
+        ("spare-procurement-recon", stage, category, year, month),
+        lambda: ipo.build_procurement_reconciliation(stage, category, year, month),
+    )
+
+
+@app.route("/api/spare-parts/import-indirect-po", methods=["POST"])
+def spare_parts_import_indirect_po():
+    import indirect_po_service as ipo
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "message": "No Indirect PO file uploaded."}), 400
+    result = ipo.import_indirect_po(upload)
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 
 @app.route("/api/downtime/import-work-orders", methods=["GET", "POST"])

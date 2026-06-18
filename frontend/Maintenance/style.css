@@ -5009,6 +5009,32 @@ th {
 .spm-source-card.ok { border-left: 3px solid #10b981; }
 .spm-source-card.off { border-left: 3px solid #f59e0b; background: #fffbeb; }
 
+/* Procurement reconciliation colour tones */
+.spm-kpi-red { border-left: 3px solid #ef4444; }
+
+/* Procurement flow visual */
+.spm-flow-wrap { margin: 16px 0 4px; }
+.spm-flow-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; margin: 0 0 10px; }
+.spm-flow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.spm-flow-step { display: flex; flex-direction: column; align-items: center; padding: 10px 14px; border-radius: 8px; background: #f8fafc; border: 1px solid #e2e8f0; min-width: 120px; text-align: center; }
+.spm-flow-step-label { font-size: 0.68rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 4px; }
+.spm-flow-step-val { font-size: 0.88rem; font-weight: 700; color: #0f172a; }
+.spm-flow-step.step-po { border-color: #3b82f6; background: #eff6ff; }
+.spm-flow-step.step-gr { border-color: #10b981; background: #f0fdf4; }
+.spm-flow-step.step-gi { border-color: #8b5cf6; background: #f5f3ff; }
+.spm-flow-step.step-onhand { border-color: #f59e0b; background: #fffbeb; }
+.spm-flow-arrow { font-size: 1.1rem; color: #94a3b8; flex-shrink: 0; }
+.spm-flow-note { font-size: 0.72rem; color: #94a3b8; margin: 0; line-height: 1.5; }
+
+/* Procurement reconciliation summary */
+.spm-recon-section { margin-top: 20px; }
+.spm-recon-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #0f766e; margin: 0 0 10px; }
+
+/* Reconciliation colour key & chips */
+.spm-recon-key { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 14px; }
+.spm-recon-chip { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 999px; font-size: 0.67rem; font-weight: 600; color: #fff; white-space: nowrap; }
+.spm-recon-badge { display: inline-flex; align-items: center; padding: 2px 7px; border-radius: 999px; font-size: 0.66rem; font-weight: 600; color: #fff; white-space: nowrap; }
+
 @media (max-width: 768px) {
     .spm-actions { justify-content: stretch; }
     .spm-import-toggle { width: 100%; }

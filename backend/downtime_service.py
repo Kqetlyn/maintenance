@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import re
 import threading
@@ -17,6 +18,7 @@ except ImportError:
 from downtime_management import build_management_downtime_payload, enrich_work_order_records
 from asset_mapping import get_asset_mapping_meta as get_grouped_machine_mapping_meta
 
+_log = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
@@ -33,7 +35,7 @@ os.environ.setdefault("ARGOS_CHUNK_TYPE", "MINISBD")
 
 _DOWNTIME_CACHE = {}
 _WO_LOAD_CACHE = {"sig": None, "payload": None}
-DOWNTIME_CACHE_VERSION = "2026-05-15-work-orders-only"
+DOWNTIME_CACHE_VERSION = "2026-06-18-stage-text-detection"
 DOWNTIME_EXPORT_YEAR = 2026
 
 PRIMARY_WORK_ORDER_DOWNTIME_FILE = os.path.join(DATA_DIR, "data downtime.csv")
@@ -44,6 +46,29 @@ ASSET_MASTER_FILENAME = "Asset_Master.xlsx"
 ASSET_MASTER_RELATIVE_PATH = os.path.join("master", ASSET_MASTER_FILENAME)
 SLA_TARGETS_SHEET = "SLA_Targets"
 STAGE_FILTER_OPTIONS = ["Stage 1", "Stage 2", "Unmapped", "Missing Asset ID", "Needs Stage Review"]
+
+# ── Stage text-detection (explicit "Stage 1" / "Stage 2" in work order fields) ─────────
+# Require the word "stage" + digit so standalone severity codes "S1" / "S2" never match.
+# Patterns cover: "Stage 2", "Stage2", "STAGE 2", "Stage-2", "Stage 2 Gemba Walk",
+#                 "Gemba Walk Stage 2", etc.
+_STAGE2_TEXT_RE = re.compile(r"\bstage[\s_-]*2\b", re.IGNORECASE)
+_STAGE1_TEXT_RE = re.compile(r"\bstage[\s_-]*1\b", re.IGNORECASE)
+
+# Fields scanned for explicit stage text.  Severity/priority fields are intentionally
+# excluded to prevent "S2" severity from being misread as Stage 2.
+_STAGE_TEXT_FIELDS = (
+    "raw_functional_location",   # location code — most reliable stage signal
+    "description",               # cleaned remarks / description text
+    "location",                  # mapped location label
+    "mapped_location",
+    "mappedLocation",
+    "machine_name_display",
+    "machine_name",
+    "raw_machine_name",
+    "machine_group",
+    "job_trade",
+    "remarks",                   # raw remarks field if present on row
+)
 
 DEFAULT_SLA_TARGETS = [
     {
@@ -171,7 +196,8 @@ def get_asset_master_path(data_dir=DATA_DIR):
     return fallback
 
 
-def get_work_order_stage_scope(row):
+def _asset_mapped_stage(row):
+    """Read the asset-master-assigned stage from an enriched record (no text scanning)."""
     status = str(row.get("mappingStatus") or row.get("mapping_status") or "").strip()
     stage = str(row.get("mappedStage") or row.get("mapped_stage") or "").strip()
     if status in {"Unmapped", "Missing Asset ID"}:
@@ -183,11 +209,84 @@ def get_work_order_stage_scope(row):
     return stage or status or "Unmapped"
 
 
+def detect_stage_from_text(row):
+    """Return "Stage 1" or "Stage 2" if the MR/WO fields explicitly state a stage; else None.
+
+    Scans description, location, functional location, machine name, and related text
+    fields.  Severity/priority fields are deliberately excluded so that an "S2 severity"
+    code is never mistaken for Stage 2.  Only the word "stage" followed by 1 or 2 (with
+    optional separator) is accepted — e.g. "Stage 2 Gemba Walk", "Gemba Walk Stage 2",
+    "Stage-1", "Stage1", "STAGE 2".
+    """
+    combined = " ".join(str(row.get(f) or "") for f in _STAGE_TEXT_FIELDS if row.get(f))
+    if not combined.strip():
+        return None
+    # Check Stage 2 first — a record that explicitly says Stage 2 must not appear under Stage 1.
+    if _STAGE2_TEXT_RE.search(combined):
+        return "Stage 2"
+    if _STAGE1_TEXT_RE.search(combined):
+        return "Stage 1"
+    return None
+
+
+def resolve_work_order_stage(row):
+    """Central stage resolver — single source of truth for all downtime stage classification.
+
+    Priority:
+      1. Explicit stage text in description, location, or functional location fields.
+         Text detection takes precedence over asset mapping when the text clearly names
+         a stage (e.g. "Stage 2 Gemba Walk" → Stage 2 even if asset is mapped to Stage 1).
+      2. mappedStage from the Asset Master classification.
+      3. Existing mapping status (Unmapped / Missing Asset ID / Needs Stage Review).
+
+    Debug logging (Python DEBUG level on this module) shows:
+      - resolved stage and reason (text-detected vs asset-mapping)
+      - original asset_id, mappedStage, mapping status, and the text fields that triggered
+        the decision — useful for validating classification without changing production output.
+    """
+    text_stage = detect_stage_from_text(row)
+    if text_stage is not None:
+        _log.debug(
+            "resolve_stage=%s [text-detected] | asset_id=%s | mappedStage=%s | text_fields=%s",
+            text_stage,
+            row.get("asset_id") or row.get("machine_code"),
+            row.get("mappedStage"),
+            {f: row[f] for f in _STAGE_TEXT_FIELDS if row.get(f)},
+        )
+        return text_stage
+
+    asset_stage = _asset_mapped_stage(row)
+    _log.debug(
+        "resolve_stage=%s [asset-mapping] | asset_id=%s | mappedStage=%s | status=%s",
+        asset_stage,
+        row.get("asset_id") or row.get("machine_code"),
+        row.get("mappedStage"),
+        row.get("mappingStatus"),
+    )
+    return asset_stage
+
+
+def get_work_order_stage_scope(row):
+    """Return the resolved stage for a work order / MR record.
+
+    Delegates to resolve_work_order_stage() — the single authoritative resolver
+    that combines text-based stage detection with Asset Master classification.
+    All filtering and aggregation must go through this function.
+    """
+    return resolve_work_order_stage(row)
+
+
 def filter_work_orders_by_stage(records, stage_filter):
     normalized_stage = normalize_stage_filter(stage_filter)
     if not normalized_stage:
         return list(records or [])
-    return [row for row in records or [] if get_work_order_stage_scope(row) == normalized_stage]
+    # Use pre-computed resolved_stage when available (set by load_work_order_downtime);
+    # fall back to live resolution so callers that skip the annotator still work.
+    return [
+        row for row in records or []
+        if (row.get("resolved_stage") if row.get("resolved_stage") is not None
+            else get_work_order_stage_scope(row)) == normalized_stage
+    ]
 
 
 def get_period_days(period):
@@ -1328,6 +1427,13 @@ def load_work_order_downtime():
         }
 
     records = enrich_work_order_records(records, DATA_DIR)
+
+    # Annotate every record with the authoritative resolved_stage so all downstream
+    # calculations read the same value without re-running resolution logic.
+    # resolve_work_order_stage() combines text-based detection with asset mapping —
+    # see its docstring for priority rules.
+    for rec in records:
+        rec["resolved_stage"] = resolve_work_order_stage(rec)
 
     result = {
         "available": True,

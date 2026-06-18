@@ -55,7 +55,7 @@
     let mounted = false;
 
     function emptyCache() {
-        return { overview: null, received: null, issued: null, analysis: null, importStatus: null };
+        return { overview: null, received: null, issued: null, analysis: null, importStatus: null, procurement: null };
     }
 
     function el(tag, cls, text) {
@@ -251,6 +251,7 @@
         const grid = el("div", "spm-import-slots");
         grid.append(buildImportSlot("Stage 1", "Stage 1 Gen PO", "Import Stage 1 Gen PO", `${API}/import-stage-1-gen-po`));
         grid.append(buildImportSlot("Stage 2", "Stage 2 Gen PO", "Import Stage 2 Gen PO", `${API}/import-stage-2-gen-po`));
+        grid.append(buildImportSlot("Indirect PO", "Indirect PO (Official Procurement)", "Import Indirect PO", `${API}/import-indirect-po`));
         grid.append(buildImportSlot("Consumption", "Project Actual Transactions", "Import Consumption", `${API}/import-consumption`));
         grid.append(buildImportSlot("Inventory", "Inventory / Stock", "Import Inventory", `${API}/import-inventory`));
         panel.append(grid);
@@ -367,6 +368,26 @@
             }
         });
 
+        // Indirect PO slot
+        const indSlot = document.querySelector('.spm-import-slot[data-stage="Indirect PO"]');
+        if (indSlot) {
+            const indStatus = importStatus["Indirect PO"] || {};
+            const indBadge = indSlot.querySelector('[data-role="badge"]');
+            const indMeta = indSlot.querySelector('[data-role="meta"]');
+            if (indBadge) {
+                indBadge.textContent = indStatus.uploaded ? "Uploaded" : "Not uploaded";
+                indBadge.className = "spm-import-badge " + (indStatus.uploaded ? "ok" : "off");
+            }
+            if (indMeta) {
+                const bits = [];
+                if (indStatus.file_name) bits.push(indStatus.file_name);
+                if (indStatus.row_count != null) bits.push(num(indStatus.row_count) + " lines");
+                if (indStatus.imported_at) bits.push("imported " + String(indStatus.imported_at).slice(0, 16).replace("T", " "));
+                else if (indStatus.source === "auto-discovered") bits.push("auto-discovered in data/");
+                indMeta.innerHTML = bits.length ? bits.map(esc).join(" | ") : "No file yet — import to enable reconciliation.";
+            }
+        }
+
         // Consumption + Inventory slots map to their own status keys.
         [["Consumption", importStatus["Goods Issued"] || {}], ["Inventory", importStatus["Inventory"] || {}]].forEach(([key, status]) => {
             const slot = document.querySelector(`.spm-import-slot[data-stage="${key}"]`);
@@ -401,14 +422,15 @@
 
         try {
             const query = qs();
-            const [overview, received, issued, analysis, importStatus] = await Promise.all([
+            const [overview, received, issued, analysis, importStatus, procurement] = await Promise.all([
                 fetchJson(`${API}/overview${query}`),
                 fetchJson(`${API}/goods-received${query}`),
                 fetchJson(`${API}/goods-issued${query}`),
                 fetchJson(`${API}/item-vendor-analysis${query}`),
                 fetchJson(`${API}/import-status`),
+                fetchJson(`${API}/procurement-reconciliation${query}`).catch(() => null),
             ]);
-            cache = { overview, received, issued, analysis, importStatus };
+            cache = { overview, received, issued, analysis, importStatus, procurement };
             populateDateFilters(received, issued);
             renderStatus(overview, importStatus);
             refreshImportPanel(importStatus);
@@ -476,14 +498,20 @@
         if (!status) return;
         const receivedStatus = (overview && overview.goods_received_status) || {};
         const issuedStatus = (importStatus && importStatus["Goods Issued"]) || {};
+        const inventoryStatus = (importStatus && importStatus["Inventory"]) || {};
         const quality = (overview && overview.data_quality) || {};
         const s1 = receivedStatus["Stage 1"] || {};
         const s2 = receivedStatus["Stage 2"] || {};
+        const indirectStatus = (importStatus && importStatus["Indirect PO"]) || {};
         status.innerHTML =
-            `Sources: Gen PO Stage 1 & Stage 2 for PO/GRN. Project Actual Transactions for Goods Issued / Consumption. ` +
-            `<span class="spm-status-muted">Stage 1: ${esc(s1.file_name || "not loaded")} | Stage 2: ${esc(s2.file_name || "not loaded")} | Consumption: ${
+            `Sources: Gen PO Stage 1 &amp; Stage 2 for PO/GRN. Indirect PO for official procurement reference. Project Actual Transactions for GI / Consumption. Inventory is the stock snapshot. ` +
+            `<span class="spm-status-muted">Stage 1: ${esc(s1.file_name || "not loaded")} | Stage 2: ${esc(s2.file_name || "not loaded")} | Indirect PO: ${
+                indirectStatus.uploaded ? esc(num(indirectStatus.row_count) + " lines") : "not loaded"
+            } | Consumption: ${
                 issuedStatus.uploaded ? esc(num(issuedStatus.transaction_count) + " rows") : "not loaded"
-            } | Data quality: ${num(quality.missing_grn_number)} missing GRN, ${num(quality.rows_without_asset)} issued rows without mapped asset.</span>`;
+            } | Inventory: ${inventoryStatus.uploaded ? esc(num(inventoryStatus.row_count) + " rows") : "not loaded"} | Data quality: ${
+                num(quality.missing_received_date)
+            } missing GR dates, ${num(quality.rows_without_work_order)} GI rows without WO, ${num(quality.on_hand_missing_unit_cost_or_value)} on-hand rows without value.</span>`;
     }
 
     function setActiveTab(tab) {
@@ -595,6 +623,8 @@
 
         if (state.tab === "overview") root.append(renderOverviewSummary());
         else if (state.tab === "grgi") root.append(renderGrGiPanel());
+        else if (state.tab === "supplier") root.append(renderSupplierProcurementPanel());
+        else if (state.tab === "classification") root.append(renderClassificationReconPanel());
         else if (state.tab === "data_quality") root.append(renderDataQualityPanel());
     }
 
@@ -612,24 +642,92 @@
         const panel = el("section", "card-shell spm-compact-panel");
         const received = (cache.overview && cache.overview.goods_received_kpis) || {};
         const issued = (cache.overview && cache.overview.goods_issued_kpis) || {};
+        const balance = received.received_value != null && issued.total_issued_value != null
+            ? Number(received.received_value || 0) - Number(issued.total_issued_value || 0)
+            : null;
         const head = el("div", "section-head spm-panel-head");
         const copy = el("div");
         copy.append(el("h2", null, "GR / GI Snapshot"));
-        copy.append(el("p", "section-subtitle", "Compact receiving and consumption context for the overview below."));
+        copy.append(el("p", "section-subtitle", "Compact receiving, consumption, and balance context for the overview below."));
         head.append(copy);
         panel.append(head);
         panel.append(
             kpiGrid(
                 [
                     ["Goods Received / GRN", money(received.received_value), "green"],
-                    ["Pending GRN", money(received.pending_value), "amber"],
                     ["Goods Issued / Consumption", money(issued.total_issued_value), "blue"],
+                    ["GR-GI Balance", money(balance), balance == null ? "blue" : balance >= 0 ? "green" : "red"],
+                    ["Pending GRN", money(received.pending_value), "amber"],
+                    ["Received Lines", num(received.received_lines)],
+                    ["Issue Transactions", num(issued.issue_transactions)],
                     ["Top Consumed Part", issued.top_consumed_part || "--"],
                 ],
                 true
             )
         );
+
+        // Procurement flow visual
+        panel.append(renderProcurementFlow(received, issued));
+
+        // Procurement reconciliation cards (from Indirect PO)
+        const pk = (cache.overview && cache.overview.procurement_kpis) || {};
+        if (pk.available !== false) {
+            panel.append(renderProcurementReconCards(pk));
+        }
+
         return panel;
+    }
+
+    function renderProcurementFlow(received, issued) {
+        const wrap = el("div", "spm-flow-wrap");
+        wrap.append(el("p", "spm-flow-label", "Procurement Flow"));
+        const flow = el("div", "spm-flow");
+
+        function flowStep(label, value, cls) {
+            const step = el("div", "spm-flow-step " + cls);
+            step.append(el("span", "spm-flow-step-label", label));
+            step.append(el("strong", "spm-flow-step-val", value));
+            return step;
+        }
+        function arrow() {
+            const a = el("div", "spm-flow-arrow");
+            a.textContent = "→";
+            return a;
+        }
+
+        const pk = (cache.procurement && cache.procurement.kpis) || {};
+        const inv = (cache.overview && cache.overview.kpis) || {};
+
+        flow.append(flowStep("PO Ordered", money(pk.total_indirect_po_value), "step-po"));
+        flow.append(arrow());
+        flow.append(flowStep("GR Received", money(received.received_value), "step-gr"));
+        flow.append(arrow());
+        flow.append(flowStep("GI Consumed", money((cache.issued && cache.issued.kpis && cache.issued.kpis.total_issued_value) || null), "step-gi"));
+        flow.append(arrow());
+        flow.append(flowStep("On-hand Balance", "--", "step-onhand"));
+        wrap.append(flow);
+        wrap.append(el("p", "spm-flow-note", "PO Ordered = official Indirect PO committed value. GR = received per GRN. GI = issued/consumed per Project Actual Transactions. On-hand = current stock snapshot."));
+        return wrap;
+    }
+
+    function renderProcurementReconCards(pk) {
+        const section = el("div", "spm-recon-section");
+        section.append(el("p", "spm-recon-label", "Procurement Reconciliation (Indirect PO vs Engineering PO)"));
+        const matchRate = pk.match_rate_pct;
+        const matchTone = matchRate == null ? "" : matchRate >= 90 ? "green" : matchRate >= 70 ? "amber" : "red";
+        section.append(
+            kpiGrid(
+                [
+                    ["Official Indirect PO Value", money(pk.total_indirect_po_value), "blue"],
+                    ["Matched Engineering PO Value", money(pk.matched_engineering_po_value), "green"],
+                    ["Unmatched Procurement Value", money(pk.unmatched_procurement_value), "amber"],
+                    ["Price / Qty Mismatch Count", num(pk.price_qty_mismatch_count), pk.price_qty_mismatch_count > 0 ? "amber" : ""],
+                    ["Reconciliation Match Rate", pct(matchRate), matchTone],
+                ],
+                true
+            )
+        );
+        return section;
     }
 
     function renderGrGiPanel() {
@@ -638,6 +736,10 @@
         const issued = cache.issued || {};
         const gr = received.kpis || {};
         const gi = issued.kpis || {};
+        const quality = (cache.overview || {}).data_quality || {};
+        const balance = gr.received_value != null && gi.total_issued_value != null
+            ? Number(gr.received_value || 0) - Number(gi.total_issued_value || 0)
+            : null;
 
         const head = el("div", "section-head spm-panel-head");
         const copy = el("div");
@@ -650,10 +752,12 @@
             kpiGrid(
                 [
                     ["Goods Received / GRN", money(gr.received_value), "green"],
-                    ["Pending GRN", money(gr.pending_value), "amber"],
                     ["Goods Issued / Consumption", money(gi.total_issued_value), "blue"],
+                    ["GR-GI Balance", money(balance), balance == null ? "blue" : balance >= 0 ? "green" : "red"],
+                    ["Pending GRN", money(gr.pending_value), "amber"],
+                    ["Received Lines", num(gr.received_lines)],
                     ["Issue Transactions", num(gi.issue_transactions)],
-                    ["Internal Non_Bill Value", money(gi.internal_non_billable_value), "amber"],
+                    ["GI Non-Item Rows Excluded", num(quality.non_item_rows), "amber"],
                 ],
                 true
             )
@@ -662,7 +766,7 @@
             el(
                 "p",
                 "spm-data-note",
-                "Non_Bill marks internal or non-billable usage classification. It does not define Goods Issued by itself."
+                "Balance = Goods Received / GRN minus Goods Issued / Consumption. Positive means receipts are ahead of usage; negative means stock drawdown."
             )
         );
 
@@ -694,20 +798,24 @@
         panel.append(
             kpiGrid(
                 [
-                    ["Missing GRN No.", num(quality.missing_grn_number), "amber"],
-                    ["Missing PO Date", num(quality.missing_date), "amber"],
-                    ["Missing KPI Status", num(quality.missing_kpi_status), "amber"],
-                    ["Rows Without Qty", num(quality.rows_without_qty), "amber"],
-                    ["Rows Without Asset", num(quality.rows_without_asset), "amber"],
-                    ["Rows Without Value", num(quality.rows_without_total), "amber"],
-                    ["Unclassified PO Rows", num(quality.unclassified_count), "amber"],
-                    ["Unclassified Issued Rows", num(quality.unclassified_asset_count), "amber"],
+                    ["PO Missing Item No.", num(quality.missing_item_number), "amber"],
+                    ["PO Missing Value", num(quality.missing_total_price ?? quality.rows_without_total), "amber"],
+                    ["PO Missing Vendor", num(quality.missing_vendor), "amber"],
+                    ["PO Missing GR Date", num(quality.missing_received_date), "amber"],
+                    ["GI Missing Project Date", num(quality.rows_without_date), "amber"],
+                    ["GI Missing WO Ref", num(quality.rows_without_work_order), "amber"],
+                    ["GI Non-Item Rows", num(quality.non_item_rows), "amber"],
+                    ["On-hand Missing Qty", num(quality.on_hand_missing_quantity), "amber"],
+                    ["On-hand Missing Value", num(quality.on_hand_missing_unit_cost_or_value), "amber"],
+                    ["Other / Unclassified PO", num(quality.unclassified_po_rows ?? quality.unclassified_count), "amber"],
+                    ["GI Missing Asset Link", num(quality.rows_without_asset), "amber"],
                 ],
                 true
             )
         );
 
         panel.append(importStatusList());
+        panel.append(dataQualityNotes());
         panel.append(
             tableSection(
                 "High Purchase / Low Issue Review",
@@ -726,16 +834,37 @@
     function importStatusList() {
         const section = el("div", "spm-source-grid");
         const status = cache.importStatus || {};
-        ["Stage 1", "Stage 2", "Goods Issued"].forEach((key) => {
+        ["Stage 1", "Stage 2", "Goods Issued", "Inventory"].forEach((key) => {
             const item = status[key] || {};
             const card = el("article", "spm-source-card " + (item.uploaded ? "ok" : "off"));
             card.append(el("strong", null, key));
-            card.append(el("span", null, item.uploaded ? (item.file_name || `${num(item.transaction_count)} transactions`) : "Not loaded"));
+            card.append(
+                el(
+                    "span",
+                    null,
+                    item.uploaded
+                        ? (item.file_name || (key === "Goods Issued" ? `${num(item.transaction_count)} transactions` : `${num(item.row_count)} rows`))
+                        : "Not loaded"
+                )
+            );
             if ((item.missing_required || []).length) {
                 card.append(el("small", null, "Missing: " + item.missing_required.join(", ")));
             }
             section.append(card);
         });
+        return section;
+    }
+
+    function dataQualityNotes() {
+        const section = el("div", "spm-table-section");
+        section.append(el("h3", "spm-subtitle", "Calculation Notes"));
+        [
+            "On-hand list is treated as a current stock snapshot, not a movement history.",
+            "Project Actual Transactions is used for Goods Issued / consumption.",
+            "Gen PO is used for PO, GR, and purchase value.",
+            "Service, labour, and repair rows are kept separate from spare-part consumption.",
+            "When item numbers are missing, description-based matching is less reliable.",
+        ].forEach((text) => section.append(el("p", "spm-data-note", text)));
         return section;
     }
 
@@ -842,11 +971,22 @@
         charts.grgi = new Chart(canvas.getContext("2d"), {
             type: "bar",
             data: {
-                labels: months,
+                labels: months.map(monthLabel),
                 datasets: [
                     { label: "Received / GRN", data: months.map((month) => grnMap[month] || 0), backgroundColor: "#10b981", borderRadius: 4, maxBarThickness: 18 },
                     { label: "Pending GRN", data: months.map((month) => pendingMap[month] || 0), backgroundColor: "#f59e0b", borderRadius: 4, maxBarThickness: 18 },
                     { label: "Goods Issued", data: months.map((month) => giMap[month] || 0), backgroundColor: "#3b82f6", borderRadius: 4, maxBarThickness: 18 },
+                    {
+                        type: "line",
+                        label: "GR-GI Balance",
+                        data: months.map((month) => (grnMap[month] || 0) - (giMap[month] || 0)),
+                        borderColor: "#0f172a",
+                        backgroundColor: "#0f172a",
+                        borderWidth: 2,
+                        tension: 0.22,
+                        pointRadius: 3,
+                        yAxisID: "y",
+                    },
                 ],
             },
             options: {
@@ -862,6 +1002,190 @@
                 },
             },
         });
+    }
+
+    function renderSupplierProcurementPanel() {
+        const panel = el("section", "card-shell spm-compact-panel");
+        const head = el("div", "section-head spm-panel-head");
+        const copy = el("div");
+        copy.append(el("h2", null, "Supplier & Vendor Performance (Indirect PO)"));
+        copy.append(el("p", "section-subtitle", "Official vendor and PO value from the Indirect PO file. Engineering KPIs below come from the Gen PO files."));
+        head.append(copy);
+        panel.append(head);
+
+        const pk = (cache.procurement && cache.procurement.kpis) || {};
+        const vendors = (cache.procurement && cache.procurement.vendor_performance) || [];
+
+        if (!pk.total_indirect_lines && !vendors.length) {
+            panel.append(el("p", "spm-muted", "No Indirect PO data loaded. Import the Indirect PO file via Manage Imports to enable vendor reconciliation."));
+            return panel;
+        }
+
+        // Summary KPIs
+        panel.append(
+            kpiGrid(
+                [
+                    ["Total Indirect PO Value", money(pk.total_indirect_po_value), "blue"],
+                    ["PO Lines", num(pk.total_indirect_lines)],
+                    ["Matched to Engineering PO", num(pk.matched_lines)],
+                    ["Reconciliation Match Rate", pct(pk.match_rate_pct), pk.match_rate_pct >= 80 ? "green" : "amber"],
+                    ["Price / Qty Mismatches", num(pk.price_qty_mismatch_count), pk.price_qty_mismatch_count > 0 ? "amber" : ""],
+                ],
+                true
+            )
+        );
+
+        // Status breakdown
+        const breakdown = (pk.status_breakdown || []).slice(0, 8);
+        if (breakdown.length) {
+            const bSection = el("div", "spm-table-section");
+            bSection.append(el("h3", "spm-subtitle", "Reconciliation Status Breakdown"));
+            const breakdownGrid = el("div", "spm-barlist");
+            const maxCount = Math.max(...breakdown.map((b) => b.count), 1);
+            breakdown.forEach((b) => {
+                const row = el("div", "spm-bar-row");
+                row.append(el("span", "spm-bar-label", b.label));
+                const track = el("div", "spm-bar-track");
+                const fill = el("div", "spm-bar-fill");
+                fill.style.width = Math.max(2, (b.count / maxCount) * 100) + "%";
+                fill.style.background = b.label.includes("Mismatch") || b.label === "Requires Review" ? "#f59e0b"
+                    : b.label === "Matched - Same Value" ? "#10b981"
+                    : b.label.includes("Only") ? "#6b7280" : "#3b82f6";
+                track.append(fill);
+                row.append(track, el("span", "spm-bar-val", num(b.count) + " lines"));
+                breakdownGrid.append(row);
+            });
+            bSection.append(breakdownGrid);
+            panel.append(bSection);
+        }
+
+        // Vendor table
+        if (vendors.length) {
+            const tSection = el("div", "spm-table-section");
+            tSection.append(el("h3", "spm-subtitle", `Vendor Performance — Indirect PO (${num(vendors.length)} vendors)`));
+            const wrap = el("div", "table-wrapper spm-table-wrap");
+            const cols = [
+                ["Vendor", "vendor"],
+                ["Total PO Value", "total_po_value", "money"],
+                ["PO Count", "po_count", "num"],
+                ["Line Count", "line_count", "num"],
+                ["Avg PO Value", "avg_po_value", "money"],
+                ["Mismatches", "mismatch_count", "num"],
+                ["Procurement Only", "procurement_only_count", "num"],
+            ];
+            wrap.innerHTML =
+                `<table class="spm-table"><thead><tr>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>` +
+                vendors.slice(0, 50).map((v) =>
+                    `<tr>${cols.map((c) => `<td>${esc(cellVal(v[c[1]], c[2]))}</td>`).join("")}</tr>`
+                ).join("") +
+                "</tbody></table>";
+            tSection.append(wrap);
+            panel.append(tSection);
+        }
+
+        // Procurement category breakdown
+        const procCats = (cache.procurement && cache.procurement.procurement_categories) || [];
+        if (procCats.length) {
+            panel.append(barCard("PO Value by Procurement Category", procCats, money));
+        }
+
+        // Flag breakdown (SPARE, MAINT, etc.)
+        const flags = (cache.procurement && cache.procurement.flags) || [];
+        if (flags.length) {
+            const flagSection = el("div", "spm-table-section");
+            flagSection.append(el("h3", "spm-subtitle", "PO Value by Flag"));
+            flagSection.append(barCard("", flags.slice(0, 12), money));
+            panel.append(flagSection);
+        }
+
+        return panel;
+    }
+
+    function renderClassificationReconPanel() {
+        const panel = el("section", "card-shell spm-compact-panel");
+        const head = el("div", "section-head spm-panel-head");
+        const copy = el("div");
+        copy.append(el("h2", null, "Procurement Reconciliation — Gen PO Classification"));
+        copy.append(el("p", "section-subtitle", "Engineering classification is preserved. Indirect PO official values are shown alongside for reconciliation. Differences are flagged — not auto-corrected."));
+        head.append(copy);
+        panel.append(head);
+
+        const engRows = (cache.procurement && cache.procurement.engineering_with_reconciliation) || [];
+        const pk = (cache.procurement && cache.procurement.kpis) || {};
+
+        if (!engRows.length && !pk.available) {
+            panel.append(el("p", "spm-muted", "No Indirect PO data loaded. Import the Indirect PO file via Manage Imports to enable reconciliation fields."));
+            return panel;
+        }
+
+        // Reconciliation summary cards
+        if (pk.available !== false) {
+            panel.append(renderProcurementReconCards(pk));
+        }
+
+        // Status colour key
+        const key = el("div", "spm-recon-key");
+        [
+            ["Matched - Same Value", "#10b981"],
+            ["Matched - Price Mismatch", "#f59e0b"],
+            ["Matched - Qty Mismatch", "#f59e0b"],
+            ["Matched - Amount Mismatch", "#f59e0b"],
+            ["Requires Review", "#ef4444"],
+            ["Engineering Copy Only", "#6b7280"],
+            ["Indirect PO Only", "#3b82f6"],
+        ].forEach(([label, color]) => {
+            const chip = el("span", "spm-recon-chip");
+            chip.style.background = color;
+            chip.textContent = label;
+            key.append(chip);
+        });
+        panel.append(key);
+
+        if (engRows.length) {
+            const tSection = el("div", "spm-table-section");
+            tSection.append(el("h3", "spm-subtitle", `Engineering Gen PO with Reconciliation (${num(engRows.length)} lines)`));
+            const wrap = el("div", "table-wrapper spm-table-wrap");
+            const cols = [
+                ["Stage", "stage"],
+                ["PO No.", "po_no"],
+                ["PR No.", "pr_no"],
+                ["Description", "description"],
+                ["Vendor (Eng)", "vendor"],
+                ["Official Vendor", "official_vendor"],
+                ["Eng. Value", "engineering_copy_value", "money"],
+                ["Official Indirect PO Value", "official_indirect_po_value", "money"],
+                ["Difference", "value_difference", "money"],
+                ["Status", "recon_status"],
+                ["Category", "category"],
+                ["Group of Cost", "group_of_cost"],
+            ];
+            const statusColor = (s) => {
+                if (!s || s === "Engineering Copy Only") return "#6b7280";
+                if (s === "Matched - Same Value") return "#10b981";
+                if (s === "Requires Review") return "#ef4444";
+                return "#f59e0b";
+            };
+            wrap.innerHTML =
+                `<table class="spm-table"><thead><tr>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>` +
+                engRows.slice(0, 200).map((r) =>
+                    `<tr>${cols.map((c) => {
+                        const raw = r[c[1]];
+                        if (c[1] === "recon_status") {
+                            return `<td><span class="spm-recon-badge" style="background:${statusColor(raw)}">${esc(raw || "--")}</span></td>`;
+                        }
+                        if (c[2] === "money" && c[1] === "value_difference" && raw != null) {
+                            const tone = Math.abs(raw) < 1 ? "color:#10b981" : raw > 0 ? "color:#f59e0b" : "color:#ef4444";
+                            return `<td style="${tone}">${esc(money(raw))}</td>`;
+                        }
+                        return `<td>${esc(cellVal(raw, c[2]))}</td>`;
+                    }).join("")}</tr>`
+                ).join("") +
+                "</tbody></table>";
+            tSection.append(wrap);
+            panel.append(tSection);
+        }
+
+        return panel;
     }
 
     window.renderSpareMgmt = function () {

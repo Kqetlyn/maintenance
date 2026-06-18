@@ -1,0 +1,45 @@
+{
+  "scope": "Stage 1",
+  "date_reviewed": "2026-05-18",
+  "overall_verdict": "Amber",
+  "summary": "Multiple recurring issues across different areas, including high-risk and medium-risk areas.",
+  "items": [
+    {
+      "asset_name": "Production High Risk area",
+      "scope": "Stage 1",
+      "rag": "Red",
+      "suggested_severity": "S4",
+      "recurrence": true,
+      "recurrence_note": "3rd time in 90 days",
+      "escalation_flag": true,
+      "reason": "Recurring high-risk issue with water leakage."
+    },
+    {
+      "asset_name": "Production Low Risk area",
+      "scope": "Stage 1",
+      "rag": "Amber",
+      "suggested_severity": "S4",
+      "recurrence": true,
+      "recurrence_note": "3rd time in 255 days",
+      "escalation_flag": false,
+      "reason": "Recurring low-risk issues with maintenance tasks."
+    },
+    {
+      "asset_name": "Production Medium Risk area",
+      "scope": "Stage 1",
+      "rag": "Amber",
+      "suggested_severity": "S4",
+      "recurrence": true,
+      "recurrence_note": "3rd time in 42 days",
+      "escalation_flag": false,
+      "reason": "Recurring medium-risk issue with air blast freezer."
+    }
+  ],
+  "watchlist": [
+    "Production High Risk area",
+    "Production Low Risk area",
+    "Production Medium Risk area"
+  ],
+  "generated_at": "2026-06-14T11:55:54",
+  "provider": "ollama"
+}

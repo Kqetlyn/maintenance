@@ -52,6 +52,7 @@ _GEN_PO_PATTERNS = {
     "Stage 1": [r"^po[_ ]?list", r"gen\s*po\s*d365", r"gen\s*po(?!\s*stage)", r"gen[_ ]po[_ ]translated"],
 }
 _GEN_PO_ENV = {"Stage 1": "SPARE_PARTS_PO_STAGE1_PATH", "Stage 2": "SPARE_PARTS_PO_STAGE2_PATH"}
+_WORKBOOK_STAGE_CACHE: dict[str, tuple[tuple[int, int], str | None]] = {}
 
 _VIEW_CACHE: dict = {}
 
@@ -102,6 +103,12 @@ def resolve_gen_po_file(stage: str) -> Path | None:
     matches = []
     for f in _candidate_files():
         name = f.stem
+        inferred_stage = _infer_stage_from_workbook(f)
+        if inferred_stage and inferred_stage != stage:
+            continue
+        if inferred_stage == stage:
+            matches.append(f)
+            continue
         if any(op.search(name) for op in other_pats) and not any(p.search(name) for p in pats):
             continue
         if any(p.search(name) for p in pats):
@@ -109,6 +116,36 @@ def resolve_gen_po_file(stage: str) -> Path | None:
     if not matches:
         return None
     return max(matches, key=lambda p: p.stat().st_mtime)
+
+
+def _infer_stage_from_workbook(path: Path) -> str | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    cache_key = str(path.resolve())
+    sig = (st.st_mtime_ns, st.st_size)
+    cached = _WORKBOOK_STAGE_CACHE.get(cache_key)
+    if cached and cached[0] == sig:
+        return cached[1]
+
+    def _sheet_norm(value) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
+
+    inferred = None
+    try:
+        xl = pd.ExcelFile(path)
+        sheet_names = {_sheet_norm(name) for name in xl.sheet_names}
+        stage2_names = {_sheet_norm(name) for name in _GEN_PO_SHEETS.get("Stage 2", [])}
+        stage1_names = {_sheet_norm(name) for name in _GEN_PO_SHEETS.get("Stage 1", [])}
+        if sheet_names & stage2_names:
+            inferred = "Stage 2"
+        elif sheet_names & stage1_names:
+            inferred = "Stage 1"
+    except Exception:
+        inferred = None
+    _WORKBOOK_STAGE_CACHE[cache_key] = (sig, inferred)
+    return inferred
 
 
 def _read_gen_po_sheet(path: Path, stage: str) -> pd.DataFrame:
@@ -230,18 +267,21 @@ def _parse_goods_received_stage(path: Path, stage: str) -> tuple[list[dict], lis
     c_item = _col(df, "Item number", "Item")
     c_group = _col(df, "Group of cost")
     c_sub = _col(df, "Sub-Cost", "Sub Cost")
+    c_type = _col(df, "Type of cost")
     c_desc = _col(df, "Description", "TRANSPORTATION/Description", "TRANSPORTATION Description")
     c_qty = _col(df, "Qty'", "Qty", "Quantity")
     c_unit = _col(df, "Unit")
     c_price = _col(df, "Price/Unit", "Price Unit")
     c_total = _col(df, "Total price", "Total Price")
     c_vendor = _col(df, "Vendor name", "Vendor")
+    c_machine = _col(df, "PD Machine", "Machine", "Asset")
     c_status = _col(df, "PR PO GRN Status")
     c_grn = _col(df, "GRN No.", "GRN No")
     c_billdate = _col(df, "Date recive bill", "Date receive bill")
     c_grnpo = _col(df, "GRN-PO date (Day)", "GRN-PO date", "GRN PO date")
     c_kpi = _col(df, "KPI Status")
     c_cust = _col(df, "Customer_Group", "Customer Group")  # Stage 2 only
+    c_note = _col(df, "Note")
 
     rows = []
     for _, r in df.iterrows():
@@ -267,12 +307,14 @@ def _parse_goods_received_stage(path: Path, stage: str) -> tuple[list[dict], lis
             "item_number": _clean(r.get(c_item)) if c_item else "",
             "group_of_cost": group_of_cost,
             "sub_cost": sub_cost,
+            "type_of_cost": _clean(r.get(c_type)) if c_type else "",
             "description": desc,
             "qty": _num(r.get(c_qty)) if c_qty else None,
             "unit": _clean(r.get(c_unit)) if c_unit else "",
             "price_unit": _num(r.get(c_price)) if c_price else None,
             "total_price": total,
             "vendor": _clean(r.get(c_vendor)) if c_vendor else "",
+            "pd_machine": _clean(r.get(c_machine)) if c_machine else "",
             "grn_status_raw": raw_status,
             "grn_status": _grn_status_clean(raw_status),
             "completed": completed,
@@ -283,6 +325,7 @@ def _parse_goods_received_stage(path: Path, stage: str) -> tuple[list[dict], lis
             "on_time": kpi.lower() == "ontime",
             "over_delivery": "over" in kpi.lower(),
             "customer_group": _clean(r.get(c_cust)) if c_cust else "",
+            "note": _clean(r.get(c_note)) if c_note else "",
             "category": _po_category(group_of_cost, sub_cost, desc),
             "year": str(dgen.year) if dgen else "",
             "month": f"{dgen.year}-{dgen.month:02d}" if dgen else "",
@@ -367,7 +410,9 @@ def import_gen_po(stage: str, file_storage) -> dict:
 
     missing_required = [c for c in _GEN_PO_REQUIRED if _col(df, c) is None]
     missing_recommended = [c for c in _GEN_PO_RECOMMENDED if _col(df, c) is None]
-    rows, issues = _parse_goods_received_stage(stored, stage)
+    # Use df already in hand — avoids a second full Excel read inside _parse_goods_received_stage.
+    # The view cache is cleared so the next GET rebuilds from the saved file.
+    row_count = len(df)
 
     man = _load_manifest()
     prev = (man.get(stage) or {}).get("stored_path")
@@ -380,21 +425,21 @@ def import_gen_po(stage: str, file_storage) -> dict:
         "file_name": orig,
         "stored_path": str(stored),
         "imported_at": datetime.now().isoformat(timespec="seconds"),
-        "row_count": len(rows),
+        "row_count": row_count,
         "missing_required": missing_required,
         "missing_recommended": missing_recommended,
-        "issues": issues,
+        "issues": [],
     }
     _save_manifest(man)
     _VIEW_CACHE.pop("gr", None)  # force rebuild on next request
 
-    ok = (not missing_required) and len(rows) > 0
-    msg = f"Imported {len(rows)} {stage} PO lines from {orig}."
+    ok = (not missing_required) and row_count > 0
+    msg = f"Imported {row_count} {stage} PO lines from {orig}."
     if missing_required:
         msg += f" Missing required column(s): {', '.join(missing_required)}."
     if missing_recommended:
         msg += f" Optional column(s) not found: {', '.join(missing_recommended)}."
-    return {"ok": ok, "stage": stage, "file_name": orig, "row_count": len(rows),
+    return {"ok": ok, "stage": stage, "file_name": orig, "row_count": row_count,
             "missing_required": missing_required, "missing_recommended": missing_recommended,
             "imported_at": man[stage]["imported_at"], "message": msg}
 
@@ -442,6 +487,11 @@ def get_import_status() -> dict:
         "file_name": inv_path.name if inv_path.exists() else None,
         "message": "Inventory master present" if inv_path.exists() else "No inventory file imported yet.",
     }
+    try:
+        import indirect_po_service as ipo
+        out["Indirect PO"] = ipo.get_indirect_po_import_status()
+    except Exception:
+        out["Indirect PO"] = {"uploaded": False, "message": "Indirect PO module not available."}
     return out
 
 
@@ -531,6 +581,8 @@ def build_goods_received(stage=None, category=None, year=None, month=None) -> di
     missing_total = sum(1 for r in rows if r["total_price"] is None)
     missing_stage = sum(1 for r in rows if not r.get("stage"))
     unclassified = sum(1 for r in rows if r.get("category") == "Unclassified")
+    missing_vendor = sum(1 for r in rows if not r.get("vendor"))
+    missing_item_number = sum(1 for r in rows if not r.get("item_number"))
     return {
         "kpis": {
             "total_po_value": round(total_po, 2),
@@ -555,8 +607,11 @@ def build_goods_received(stage=None, category=None, year=None, month=None) -> di
             "missing_grn_number": missing_grn_no,
             "missing_date": missing_date,
             "missing_date_receive_bill": missing_bill_date,
+            "missing_received_date": missing_bill_date,
             "missing_kpi_status": missing_kpi,
             "missing_total_price": missing_total,
+            "missing_vendor": missing_vendor,
+            "missing_item_number": missing_item_number,
             "missing_stage": missing_stage,
             "pending_grn_count": len(pending),
             "unclassified_count": unclassified,
@@ -572,6 +627,8 @@ def _is_non_billable(line_property) -> bool:
 
 def build_goods_issued(stage=None, category=None, year=None, month=None) -> dict:
     all_rows, status = get_goods_issued_rows()
+    import spare_parts_service as sp
+    pt_payload = sp.build_project_transactions_payload()
     rows = _apply_filters(all_rows, None, category, year, month)  # consumption has no stage dimension
     total_val = sum(r["total_consumption"] or 0 for r in rows)
     total_qty = sum(r["issued_qty"] or 0 for r in rows)
@@ -581,6 +638,7 @@ def build_goods_issued(stage=None, category=None, year=None, month=None) -> dict
     no_date = sum(1 for r in rows if not r.get("project_date"))
     no_total = sum(1 for r in rows if r["total_consumption"] is None)
     unclassified = sum(1 for r in rows if r.get("category") == "Unclassified")
+    payload_summary = pt_payload.get("summary") or {}
     cat_val = {}
     for r in rows:
         cat_val[r["category"]] = cat_val.get(r["category"], 0.0) + (r["total_consumption"] or 0)
@@ -608,6 +666,8 @@ def build_goods_issued(stage=None, category=None, year=None, month=None) -> dict
             "rows_without_asset": no_asset,
             "rows_without_date": no_date,
             "rows_without_total": no_total,
+            "rows_without_work_order": payload_summary.get("missing_work_order_reference_rows", 0),
+            "non_item_rows": payload_summary.get("non_item_rows", 0),
             "unclassified_asset_count": unclassified,
         },
     }
@@ -616,9 +676,23 @@ def build_goods_issued(stage=None, category=None, year=None, month=None) -> dict
 def build_overview(stage=None, category=None, year=None, month=None) -> dict:
     gr = build_goods_received(stage, category, year, month)
     gi = build_goods_issued(stage, category, year, month)
+    import spare_parts_service as sp
+    spare_payload = sp.build_spare_parts_payload()
+    inventory_rows = (spare_payload.get("inventory") or {}).get("records") or []
+    inventory_missing_qty = sum(1 for row in inventory_rows if row.get("current_quantity") is None)
+    inventory_missing_value = sum(1 for row in inventory_rows if row.get("stock_value") is None and row.get("unit_cost") is None)
+    unclassified_po_rows = ((spare_payload.get("po_classification") or {}).get("summary") or {}).get("other_unclassified_po_count", 0)
     top_vendor = gr["top_vendors"][0] if gr["top_vendors"] else None
     top_cost = gr["top_cost_groups"][0] if gr["top_cost_groups"] else None
     top_item = gi["top_items_by_value"][0] if gi["top_items_by_value"] else None
+
+    # Indirect PO procurement reconciliation KPIs (lightweight — uses cached reconciliation)
+    try:
+        import indirect_po_service as ipo
+        procurement_kpis = ipo.get_procurement_kpis_for_overview(year=year, month=month)
+    except Exception:
+        procurement_kpis = {"available": False}
+
     return {
         # Section A — Goods Received / Purchasing (Gen PO Stage 1 & 2)
         "goods_received_kpis": {
@@ -658,8 +732,15 @@ def build_overview(stage=None, category=None, year=None, month=None) -> dict:
         "goods_received_status": gr["source_status"],
         "goods_issued_status": gi["source_status"],
         "import_status": get_import_status(),
-        "data_quality": {**gr["data_quality"], **gi["data_quality"]},
+        "data_quality": {
+            **gr["data_quality"],
+            **gi["data_quality"],
+            "on_hand_missing_quantity": inventory_missing_qty,
+            "on_hand_missing_unit_cost_or_value": inventory_missing_value,
+            "unclassified_po_rows": unclassified_po_rows,
+        },
         "filters_applied": {"stage": stage or "all", "category": category or "all", "year": year or "all", "month": month or "all"},
+        "procurement_kpis": procurement_kpis,
     }
 
 

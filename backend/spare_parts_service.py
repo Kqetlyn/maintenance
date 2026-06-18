@@ -199,8 +199,10 @@ FLEXIBLE_COLUMN_ALIASES = {
     "equipment_type": ["Equipment Type", "Machine Type", "Equipment Group", "Machine Group", "Main Asset Group", "Sub Asset Group"],
     "gl_account": ["GL Account", "Procurement Category"],
     "goods_received_date": ["Goods Received Date", "Received Date", "GR Date"],
+    "grn_no": ["GRN No.", "GRN No"],
     "grn_status": ["GRN Status", "PR PO GRN Status"],
     "group_of_cost": ["Group of Cost", "Group of cost"],
+    "grn_po_days": ["GRN-PO date (Day)", "GRN-PO date", "GRN PO date"],
     "inventory_value": ["Inventory value", "Inventory Value", "Stock Value", "Total Value"],
     "issue_date": ["Issue Date", "Used Date", "Transaction Date"],
     "item_group": ["Item Group", "Group", "Product Group"],
@@ -208,6 +210,7 @@ FLEXIBLE_COLUMN_ALIASES = {
     "issued_by": ["Issued By", "Requested By", "Requestor", "Requester"],
     "last_updated": ["Last Updated Date", "Last Updated", "Modified Date"],
     "location": ["Location", "Store Location", "Warehouse", "Bin Location", "Building"],
+    "lead_time_days": ["Lead time delivery (day)", "Lead time delivery"],
     "maintenance_type": ["Maintenance Type", "Job Trade", "PM Type"],
     "max_stock": ["Maximum", "Max", "Maximum Quantity", "Maximum Stock", "Recommended Quantity", "Maximum Stock Level", "Max Stock"],
     "min_stock": ["Minimum", "Min", "Minimum Quantity", "Minimum Stock", "Reorder Point", "Minimum Stock Level", "Min Stock"],
@@ -224,10 +227,12 @@ FLEXIBLE_COLUMN_ALIASES = {
     "reserved_physical": ["Reserved physical", "Physical reserved", "Reserved Quantity"],
     "search_name": ["Search name", "Search Name"],
     "supplier": ["Supplier", "Vendor", "Vendor name", "Vendor Name"],
+    "sub_cost": ["Sub-Cost", "Sub Cost"],
     "total_available": ["Total available", "Available quantity", "Stock balance", "Total Available"],
     "total_cost": ["Total Cost", "Total price", "Total Price", "Amount"],
     "transaction_date": ["Transaction Date", "Issue Date", "Used Date", "Date"],
     "transaction_type": ["Transaction Type", "Movement Type", "Type"],
+    "type_of_cost": ["Type of Cost", "Type of cost"],
     "unit": ["Unit of Measure", "Unit", "Unit of measure", "Inventory unit", "UOM"],
     "unit_cost": ["Unit Cost", "Price", "Average Cost", "Item Cost", "Unit Price", "Cost", "Unit price", "Price/Unit"],
     "work_order_id": ["Work Order ID", "WO ID", "WorkOrderID", "PR No.", "Request ID"],
@@ -1090,6 +1095,145 @@ def _review_reasons_for_po(row):
     return list(dict.fromkeys(reasons))
 
 
+PURCHASE_CLASS_STOCK = "Stock Spare Part"
+PURCHASE_CLASS_NON_STOCK = "Non-Stock Spare Part"
+PURCHASE_CLASS_SERVICE = "Service / Labour / Repair"
+PURCHASE_CLASS_CAPEX = "CAPEX"
+PURCHASE_CLASS_CONSUMABLE = "Consumable / Chemical"
+PURCHASE_CLASS_OTHER = "Other / Unclassified"
+PURCHASE_CLASS_ORDER = [
+    PURCHASE_CLASS_STOCK,
+    PURCHASE_CLASS_NON_STOCK,
+    PURCHASE_CLASS_SERVICE,
+    PURCHASE_CLASS_CAPEX,
+    PURCHASE_CLASS_CONSUMABLE,
+    PURCHASE_CLASS_OTHER,
+]
+_PO_SERVICE_KEYWORDS = tuple(sorted(set(NON_SPARE_PART_KEYWORDS + (
+    "installation",
+    "job",
+    "maintenance service",
+    "overhaul",
+    "repair",
+    "transportation",
+    "work",
+))))
+_PO_CAPEX_KEYWORDS = (
+    "capex",
+    "budget",
+    "unbudget",
+    "project asset",
+    "equipment purchase",
+    "machine purchase",
+    "new equipment",
+)
+_PO_CONSUMABLE_KEYWORDS = (
+    "chemical",
+    "coolant",
+    "gas",
+    "grease",
+    "lubricant",
+    "oil",
+    "refrigerant",
+    "salt",
+    "solution",
+)
+_PO_SPARE_HINTS = (
+    "direct replacement",
+    "electrical part",
+    "material",
+    "mechanical part",
+    "replacement part",
+    "spare part",
+)
+_PO_RECEIVED_STATUS_KEYWORDS = (
+    "closed",
+    "grn already",
+    "receive bill and grn already",
+    "received",
+    "recive bill and grn already",
+)
+_PO_OPEN_STATUS_KEYWORDS = (
+    "open",
+    "pending",
+    "waitting",
+    "waiting",
+    "not receive",
+    "not received",
+)
+
+
+def _text_contains_any(text: str, keywords) -> bool:
+    return any(keyword in text for keyword in keywords if keyword)
+
+
+def _po_received_status(raw_status: str | None) -> bool:
+    status_text = _normalize_phrase(raw_status)
+    return bool(status_text and _text_contains_any(status_text, _PO_RECEIVED_STATUS_KEYWORDS))
+
+
+def _po_open_status(raw_status: str | None) -> bool:
+    status_text = _normalize_phrase(raw_status)
+    return bool(status_text and _text_contains_any(status_text, _PO_OPEN_STATUS_KEYWORDS))
+
+
+def _classify_purchase_line(
+    *,
+    code,
+    description,
+    translated_description,
+    group_of_cost,
+    translated_group_of_cost,
+    type_of_cost="",
+    sub_cost="",
+    unit="",
+    supplier_name="",
+    pd_machine="",
+    translated_pd_machine="",
+    inventory_match=None,
+):
+    inventory_match = inventory_match or {}
+    match_record = inventory_match.get("record")
+    match_status = inventory_match.get("match_status")
+    match_reason = inventory_match.get("reason") or "Matched against current inventory"
+    match_confidence = inventory_match.get("confidence") or "Medium"
+
+    code_clean = _clean_code(code)
+    combined_text = _combined_keyword_text(
+        translated_description or description,
+        translated_group_of_cost or group_of_cost,
+        type_of_cost,
+        sub_cost,
+        unit,
+        supplier_name,
+        translated_pd_machine or pd_machine,
+    )
+    has_service_keyword = _text_contains_any(combined_text, _PO_SERVICE_KEYWORDS)
+    has_capex_keyword = _text_contains_any(combined_text, _PO_CAPEX_KEYWORDS)
+    has_consumable_keyword = _text_contains_any(combined_text, _PO_CONSUMABLE_KEYWORDS)
+    has_spare_keyword = _text_contains_any(combined_text, SPARE_PART_KEYWORDS) or _text_contains_any(combined_text, _PO_SPARE_HINTS)
+
+    if match_record and match_status == "Exact Item Code Match":
+        return PURCHASE_CLASS_STOCK, "High", match_reason
+    if code_clean.startswith("SFST34"):
+        return PURCHASE_CLASS_STOCK, "Medium", "Item number prefix suggests a stocked spare part"
+    if match_record and not (has_service_keyword or has_capex_keyword or has_consumable_keyword):
+        return PURCHASE_CLASS_STOCK, match_confidence, match_reason
+    if has_capex_keyword:
+        return PURCHASE_CLASS_CAPEX, "High", "CAPEX or project-asset keyword matched type, group, or description"
+    if has_service_keyword:
+        return PURCHASE_CLASS_SERVICE, "High", "Service, labour, repair, cleaning, or contractor keyword matched the purchase context"
+    if has_consumable_keyword:
+        return PURCHASE_CLASS_CONSUMABLE, "High", "Consumable, chemical, refrigerant, oil, or gas keyword matched the purchase context"
+    if code_clean.startswith("SFST81") or code_clean.startswith("SFST82"):
+        return PURCHASE_CLASS_NON_STOCK, "High", "Item number prefix suggests a non-stock or direct-purchase spare part"
+    if has_spare_keyword:
+        return PURCHASE_CLASS_NON_STOCK, "Medium", "Part, material, or replacement keyword matched the purchase context"
+    if clean_text(description or translated_description) and clean_text(group_of_cost or type_of_cost or supplier_name or pd_machine):
+        return PURCHASE_CLASS_NON_STOCK, "Low", "Purchase context exists, but the row does not match current on-hand inventory"
+    return PURCHASE_CLASS_OTHER, "Low", "The row could not be reliably classified from the available fields"
+
+
 def _classify_po_item(code, description, master_codes, work_order_id=None, asset_id=None, source_classification=None):
     raw_class = clean_text(source_classification)
     if raw_class in {"Spare Part", "Non-Spare Part", "Manual Review"}:
@@ -1309,6 +1453,8 @@ def _build_po_records(path: Path | None, source_status, master_codes):
         translated_group_of_cost, group_translation_status = _safe_translate_text(group_of_cost)
         pd_machine = clean_text(_value_from_row(row, lookup, "pd_machine") or _value_from_row(row, lookup, "asset_id"))
         translated_pd_machine, machine_translation_status = _safe_translate_text(pd_machine)
+        type_of_cost = clean_text(_value_from_row(row, lookup, "type_of_cost"))
+        sub_cost = clean_text(_value_from_row(row, lookup, "sub_cost"))
         quantity = _clean_numeric(_value_from_row(row, lookup, "quantity_ordered") or _value_from_row(row, lookup, "quantity"))
         unit_cost = _clean_numeric(_value_from_row(row, lookup, "unit_cost"))
         total_cost = _clean_numeric(_value_from_row(row, lookup, "total_cost"))
@@ -1317,15 +1463,10 @@ def _build_po_records(path: Path | None, source_status, master_codes):
         work_order_id = clean_text(_value_from_row(row, lookup, "work_order_id"))
         asset_id = _clean_code(_value_from_row(row, lookup, "asset_id"))
         supplier_name = clean_text(_value_from_row(row, lookup, "supplier"))
+        unit = clean_text(_value_from_row(row, lookup, "unit"))
         clean_description = _normalize_part_name(translated_description or description)
-        keyword_text = _combined_keyword_text(
-            translated_description or description,
-            translated_group_of_cost or group_of_cost,
-            translated_pd_machine or pd_machine,
-        )
         inventory_match_status = "No Inventory Match"
         inventory_match_reason = "No inventory item code or strong description match was found"
-        inventory_match_record = None
         inventory_match_confidence = "Low"
         if master_codes:
             # backward-compatible master-code check remains available for callers that only pass code sets
@@ -1333,48 +1474,39 @@ def _build_po_records(path: Path | None, source_status, master_codes):
                 inventory_match_status = "Exact Item Code Match"
                 inventory_match_reason = "Gen PO item code matched the Dynamics inventory item master"
                 inventory_match_confidence = "High"
-
-        has_spare_keyword = any(keyword in keyword_text for keyword in SPARE_PART_KEYWORDS)
-        has_non_spare_keyword = any(keyword in keyword_text for keyword in NON_SPARE_PART_KEYWORDS)
-        hints_spare_context = any(term in keyword_text for term in (" spare part", " mechanical part", " electrical part", " refrigerant", " cooling part", " consumable part"))
-        hints_service_context = any(term in keyword_text for term in (
-            " service", " labour", " labor", " inspection", " rental", " contractor",
-            " civil", " training", " stationnary", " office", " annual cost",
-            " maintenance", " repair", " cleaning", " installation", " calibration",
-        ))
-
-        if inventory_match_status == "Exact Item Code Match":
-            classification = "Stocked Spare Part Purchase"
-            confidence = "High"
-            reason = inventory_match_reason
-        elif has_non_spare_keyword and not has_spare_keyword:
-            classification = "Non-Spare Part / Service"
-            confidence = "High"
-            reason = "Service or non-spare keyword matched the description or cost context"
-        elif has_spare_keyword:
-            classification = "Non-Stock Spare Part / Direct Purchase"
-            confidence = "Medium" if hints_spare_context else "Low"
-            reason = "Spare-part or maintenance-material keyword matched the description"
-        elif hints_spare_context and not hints_service_context and clean_description:
-            classification = "Non-Stock Spare Part / Direct Purchase"
-            confidence = "Low"
-            reason = "Cost context suggests a maintenance material, but the description is weak"
-        elif hints_service_context:
-            classification = "Non-Spare Part / Service"
-            confidence = "Medium"
-            reason = "Cost context suggests service, civil work, or another non-spare purchase"
-        elif clean_description and (group_of_cost or pd_machine or supplier_name or total_cost is not None):
-            classification = "Non-Stock Spare Part / Direct Purchase"
-            confidence = "Low"
-            reason = "Purchase context is present, but no inventory match or service keyword was found"
-        else:
-            classification = "Manual Review"
-            confidence = "Manual Review"
-            reason = "The item could not be confidently classified from item code, description, or cost context"
+        classification, confidence, reason = _classify_purchase_line(
+            code=code,
+            description=description,
+            translated_description=translated_description,
+            group_of_cost=group_of_cost,
+            translated_group_of_cost=translated_group_of_cost,
+            type_of_cost=type_of_cost,
+            sub_cost=sub_cost,
+            unit=unit,
+            supplier_name=supplier_name,
+            pd_machine=pd_machine,
+            translated_pd_machine=translated_pd_machine,
+            inventory_match={
+                "record": {"code": code} if inventory_match_status == "Exact Item Code Match" else None,
+                "match_status": inventory_match_status,
+                "confidence": inventory_match_confidence,
+                "reason": inventory_match_reason,
+            },
+        )
+        status_text = clean_text(_value_from_row(row, lookup, "grn_status"))
+        goods_received_date = _date_iso(_value_from_row(row, lookup, "goods_received_date"))
+        po_date = _date_iso(_value_from_row(row, lookup, "po_date"))
+        completed = _po_received_status(status_text)
+        delivery_flag = "Pending"
+        if completed:
+            kpi_status = clean_text(_value_from_row(row, lookup, "kpi_status"))
+            delivery_flag = "Ontime" if "ontime" in kpi_status.lower() else "Delivered"
+            if "over" in kpi_status.lower() or "delay" in kpi_status.lower():
+                delivery_flag = "Delayed"
 
         records.append({
-            "po_date": _date_iso(_value_from_row(row, lookup, "po_date")),
-            "goods_received_date": _date_iso(_value_from_row(row, lookup, "goods_received_date")),
+            "po_date": po_date,
+            "goods_received_date": goods_received_date,
             "po_number": po_number,
             "code": code,
             "description": description or code or "Unmatched",
@@ -1383,7 +1515,7 @@ def _build_po_records(path: Path | None, source_status, master_codes):
             "clean_description": clean_description or _normalize_part_name(description or code),
             "quantity_ordered": quantity,
             "quantity_received": _clean_numeric(_value_from_row(row, lookup, "quantity_received")) or quantity,
-            "unit": clean_text(_value_from_row(row, lookup, "unit")),
+            "unit": unit,
             "unit_cost": unit_cost,
             "total_cost": total_cost,
             "supplier": supplier_name or "Unmatched",
@@ -1392,9 +1524,12 @@ def _build_po_records(path: Path | None, source_status, master_codes):
             "asset_id": asset_id,
             "group_of_cost": group_of_cost,
             "translated_group_of_cost": translated_group_of_cost or group_of_cost,
+            "type_of_cost": type_of_cost,
+            "sub_cost": sub_cost,
             "pd_machine": pd_machine,
             "translated_pd_machine": translated_pd_machine or pd_machine,
             "classification": classification,
+            "purchase_classification": classification,
             "confidence": confidence,
             "classification_reason": reason,
             "translation_status": "Translation failed" if "Translation failed" in {translation_status, group_translation_status, machine_translation_status} else ("Translated" if "Translated" in {translation_status, group_translation_status, machine_translation_status} else "No translation needed"),
@@ -1405,15 +1540,22 @@ def _build_po_records(path: Path | None, source_status, master_codes):
             "inventory_match_name": None,
             "department": clean_text(_value_from_row(row, lookup, "department")),
             "gl_account": clean_text(_value_from_row(row, lookup, "gl_account")),
-            "grn_status": clean_text(_value_from_row(row, lookup, "grn_status")),
+            "grn_no": clean_text(_value_from_row(row, lookup, "grn_no")),
+            "grn_status": status_text,
             "kpi_status": clean_text(_value_from_row(row, lookup, "kpi_status")),
+            "source_stage": "Unmapped Stage",
+            "completed": completed,
+            "delivery_flag": delivery_flag,
+            "lead_time_days": _clean_numeric(_value_from_row(row, lookup, "lead_time_days")),
+            "actual_lead_days": _clean_numeric(_value_from_row(row, lookup, "grn_po_days")),
+            "used_po_date_as_gr_fallback": bool(completed and not goods_received_date and po_date),
             "source_file": source_status.get("file_name"),
         })
     return records
 
 
 def _is_spare_purchase_classification(classification: str | None) -> bool:
-    return classification in {"Stocked Spare Part Purchase", "Non-Stock Spare Part / Direct Purchase"}
+    return classification in {PURCHASE_CLASS_STOCK, PURCHASE_CLASS_NON_STOCK}
 
 
 def _refine_po_records_with_inventory(po_records, inventory_records):
@@ -1433,19 +1575,166 @@ def _refine_po_records_with_inventory(po_records, inventory_records):
         row["inventory_match_code"] = matched_record.get("code") if matched_record else None
         row["inventory_match_name"] = matched_record.get("name") if matched_record else None
 
-        if matched_record and row.get("classification") != "Non-Spare Part / Service":
-            row["classification"] = "Stocked Spare Part Purchase"
+        if matched_record and row.get("classification") not in {PURCHASE_CLASS_SERVICE, PURCHASE_CLASS_CAPEX, PURCHASE_CLASS_CONSUMABLE}:
+            row["classification"] = PURCHASE_CLASS_STOCK
+            row["purchase_classification"] = PURCHASE_CLASS_STOCK
             row["confidence"] = match.get("confidence") or row.get("confidence")
             row["classification_reason"] = match.get("reason") or row.get("classification_reason")
-        elif row.get("classification") == "Manual Review" and row.get("inventory_match_status") == "No Inventory Match":
-            row["confidence"] = "Manual Review"
+        elif row.get("classification") == PURCHASE_CLASS_OTHER and row.get("inventory_match_status") == "No Inventory Match":
+            row["confidence"] = "Low"
 
         review_reasons = _review_reasons_for_po(row)
-        if row.get("classification") == "Manual Review" and row.get("classification_reason"):
+        if row.get("classification") == PURCHASE_CLASS_OTHER and row.get("classification_reason"):
             review_reasons.append(row.get("classification_reason"))
         row["review_reasons"] = list(dict.fromkeys(review_reasons))
-        row["needs_manual_review"] = bool(row["review_reasons"])
+        row["needs_manual_review"] = bool(row["review_reasons"]) or row.get("classification") == PURCHASE_CLASS_OTHER
     return po_records
+
+
+def _load_stage_goods_received_rows():
+    try:
+        import spare_parts_views as spv
+    except Exception:
+        return [], {}
+    try:
+        rows, status = spv.get_goods_received_rows()
+        return rows or [], status or {}
+    except Exception:
+        return [], {}
+
+
+def _stage_po_source_signatures():
+    try:
+        import spare_parts_views as spv
+    except Exception:
+        return ()
+    signatures = []
+    for stage in ("Stage 1", "Stage 2"):
+        try:
+            signatures.append(_file_signature(spv.resolve_gen_po_file(stage)))
+        except Exception:
+            signatures.append(None)
+    return tuple(signatures)
+
+
+def _build_po_records_from_stage_rows(received_rows, inventory_records, stage_status=None):
+    stage_status = stage_status or {}
+    inventory_index = _build_inventory_indexes(inventory_records)
+    records = []
+    for row in received_rows or []:
+        code = _clean_code(row.get("item_number"))
+        description = clean_text(row.get("description"))
+        po_number = clean_text(row.get("po_no"))
+        if not code and not description and not po_number:
+            continue
+        translated_description, translation_status = _safe_translate_text(description)
+        group_of_cost = clean_text(row.get("group_of_cost"))
+        translated_group_of_cost, group_translation_status = _safe_translate_text(group_of_cost)
+        pd_machine = clean_text(row.get("pd_machine"))
+        translated_pd_machine, machine_translation_status = _safe_translate_text(pd_machine)
+        type_of_cost = clean_text(row.get("type_of_cost"))
+        sub_cost = clean_text(row.get("sub_cost"))
+        unit = clean_text(row.get("unit"))
+        supplier_name = clean_text(row.get("vendor"))
+        quantity = _clean_numeric(row.get("qty"))
+        unit_cost = _clean_numeric(row.get("price_unit"))
+        total_cost = _clean_numeric(row.get("total_price"))
+        if total_cost is None and quantity is not None and unit_cost is not None:
+            total_cost = round(float(quantity) * float(unit_cost), 2)
+
+        match = _find_inventory_match(
+            code,
+            _normalize_part_name(translated_description or description),
+            translated_description or description,
+            description,
+            inventory_index,
+        )
+        matched_record = match.get("record")
+        classification, confidence, reason = _classify_purchase_line(
+            code=code,
+            description=description,
+            translated_description=translated_description,
+            group_of_cost=group_of_cost,
+            translated_group_of_cost=translated_group_of_cost,
+            type_of_cost=type_of_cost,
+            sub_cost=sub_cost,
+            unit=unit,
+            supplier_name=supplier_name,
+            pd_machine=pd_machine,
+            translated_pd_machine=translated_pd_machine,
+            inventory_match=match,
+        )
+
+        status_text = clean_text(row.get("grn_status_raw") or row.get("grn_status"))
+        kpi_status = clean_text(row.get("kpi_status"))
+        po_date = _date_iso(row.get("date_gen_po"))
+        goods_received_date = _date_iso(row.get("date_receive_bill"))
+        completed = bool(row.get("completed")) or _po_received_status(status_text)
+        lead_time_days = _clean_numeric(row.get("lead_time_days"))
+        actual_lead_days = _clean_numeric(row.get("grn_po_days"))
+        delay_days = None
+        delivery_flag = "Pending"
+        if completed:
+            if actual_lead_days is not None and lead_time_days is not None:
+                delay_days = max(0, round(float(actual_lead_days) - float(lead_time_days), 1))
+                delivery_flag = "Ontime" if delay_days <= 0 else "Delayed"
+            elif "over" in kpi_status.lower() or "delay" in kpi_status.lower():
+                delivery_flag = "Delayed"
+            elif "ontime" in kpi_status.lower():
+                delivery_flag = "Ontime"
+            else:
+                delivery_flag = "Delivered"
+        source_stage = clean_text(row.get("stage")) or "Unmapped Stage"
+        records.append({
+            "po_date": po_date,
+            "goods_received_date": goods_received_date,
+            "po_number": po_number,
+            "code": code,
+            "description": description or code or "Unmatched",
+            "original_description": description or code or "Unmatched",
+            "translated_description": translated_description or description or code or "Unmatched",
+            "clean_description": _normalize_part_name(translated_description or description or code),
+            "quantity_ordered": quantity,
+            "quantity_received": quantity if completed else None,
+            "unit": unit,
+            "unit_cost": unit_cost,
+            "total_cost": total_cost,
+            "supplier": supplier_name or "Unmatched",
+            "vendor_name": supplier_name or "Unmatched",
+            "work_order_id": clean_text(row.get("pr_no")),
+            "asset_id": _clean_code(pd_machine),
+            "group_of_cost": group_of_cost,
+            "translated_group_of_cost": translated_group_of_cost or group_of_cost,
+            "type_of_cost": type_of_cost,
+            "sub_cost": sub_cost,
+            "pd_machine": pd_machine,
+            "translated_pd_machine": translated_pd_machine or pd_machine,
+            "classification": classification,
+            "purchase_classification": classification,
+            "confidence": confidence,
+            "classification_reason": reason,
+            "translation_status": "Translation failed" if "Translation failed" in {translation_status, group_translation_status, machine_translation_status} else ("Translated" if "Translated" in {translation_status, group_translation_status, machine_translation_status} else "No translation needed"),
+            "inventory_match_status": match.get("match_status"),
+            "inventory_match_confidence": match.get("confidence"),
+            "inventory_match_reason": match.get("reason"),
+            "inventory_match_code": matched_record.get("code") if matched_record else None,
+            "inventory_match_name": matched_record.get("name") if matched_record else None,
+            "department": clean_text(row.get("customer_group")),
+            "gl_account": "",
+            "grn_no": clean_text(row.get("grn_no")),
+            "grn_status": status_text,
+            "kpi_status": kpi_status,
+            "source_file": (stage_status.get(source_stage, {}) or {}).get("file_name"),
+            "source_stage": source_stage,
+            "completed": completed,
+            "delivery_flag": delivery_flag,
+            "delay_days": delay_days,
+            "lead_time_days": lead_time_days,
+            "actual_lead_days": actual_lead_days,
+            "used_po_date_as_gr_fallback": bool(completed and not goods_received_date and po_date),
+            "note": clean_text(row.get("note")),
+        })
+    return records
 
 
 def _set_max_date(target, candidate):
@@ -1726,7 +2015,11 @@ def _build_structured_spare_parts_payload(paths, source_status):
         errors.append(f"Work Order Data: {exc}")
         work_order_records = []
     try:
-        po_records = _build_po_records(paths.get("po_list"), source_status.get("po_list", {}), master_codes)
+        stage_po_rows, stage_po_status = _load_stage_goods_received_rows()
+        if stage_po_rows:
+            po_records = _build_po_records_from_stage_rows(stage_po_rows, inventory_records, stage_po_status)
+        else:
+            po_records = _build_po_records(paths.get("po_list"), source_status.get("po_list", {}), master_codes)
     except Exception as exc:
         errors.append(f"Gen PO: {exc}")
         po_records = []
@@ -1741,11 +2034,13 @@ def _build_structured_spare_parts_payload(paths, source_status):
     healthy_records = [row for row in health_valid_records if row.get("stock_health_healthy")]
     turnover_days = [row["turnover_days"] for row in turnover_records if row.get("turnover_days") is not None]
 
-    stocked_spare_records = [row for row in po_records if row.get("classification") == "Stocked Spare Part Purchase"]
-    non_stock_spare_records = [row for row in po_records if row.get("classification") == "Non-Stock Spare Part / Direct Purchase"]
-    non_spare_service_records = [row for row in po_records if row.get("classification") == "Non-Spare Part / Service"]
-    manual_review_records = [row for row in po_records if row.get("needs_manual_review") or row.get("classification") == "Manual Review"]
-    classified_manual_review_records = [row for row in po_records if row.get("classification") == "Manual Review"]
+    stocked_spare_records = [row for row in po_records if row.get("classification") == PURCHASE_CLASS_STOCK]
+    non_stock_spare_records = [row for row in po_records if row.get("classification") == PURCHASE_CLASS_NON_STOCK]
+    non_spare_service_records = [row for row in po_records if row.get("classification") == PURCHASE_CLASS_SERVICE]
+    capex_records = [row for row in po_records if row.get("classification") == PURCHASE_CLASS_CAPEX]
+    consumable_records = [row for row in po_records if row.get("classification") == PURCHASE_CLASS_CONSUMABLE]
+    classified_manual_review_records = [row for row in po_records if row.get("classification") == PURCHASE_CLASS_OTHER]
+    manual_review_records = [row for row in po_records if row.get("needs_manual_review") or row.get("classification") == PURCHASE_CLASS_OTHER]
     external_spare_records = [row for row in po_records if _is_spare_purchase_classification(row.get("classification"))]
 
     internal_drawn_value = sum(float(row.get("value") or 0) for row in movement_records if row.get("value") is not None)
@@ -1755,6 +2050,8 @@ def _build_structured_spare_parts_payload(paths, source_status):
     stocked_po_value = round(sum(float(row.get("total_cost") or 0) for row in stocked_spare_records if row.get("total_cost") is not None), 2) if stocked_spare_records else None
     non_stock_po_value = round(sum(float(row.get("total_cost") or 0) for row in non_stock_spare_records if row.get("total_cost") is not None), 2) if non_stock_spare_records else None
     non_spare_po_value = round(sum(float(row.get("total_cost") or 0) for row in non_spare_service_records if row.get("total_cost") is not None), 2) if non_spare_service_records else None
+    capex_po_value = round(sum(float(row.get("total_cost") or 0) for row in capex_records if row.get("total_cost") is not None), 2) if capex_records else None
+    consumable_po_value = round(sum(float(row.get("total_cost") or 0) for row in consumable_records if row.get("total_cost") is not None), 2) if consumable_records else None
     dependency_pct = (
         round((float(external_value or 0) / (float(external_value or 0) + float(inventory_value))) * 100, 1)
         if inventory_value not in (None, 0) and external_value is not None
@@ -1766,7 +2063,7 @@ def _build_structured_spare_parts_payload(paths, source_status):
 
     comparison_notes = [
         "Dynamics inventory represents current in-store stock. Gen PO represents external purchase records. Gen PO includes spare parts, direct purchases, services, and other non-spare items, so PO rows are classified before comparison.",
-        "External purchase comparison excludes PO rows classified as service/non-spare part unless selected in filters.",
+        "External purchase comparison excludes service, CAPEX, consumable, and unclassified PO rows unless selected in filters.",
     ]
     if not exact_code_matches and po_records:
         comparison_notes.append("No inventory-code matches found; using description and keyword classification.")
@@ -1862,12 +2159,19 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "spare_part_po_value": external_value,
                 "stocked_spare_part_po_value": stocked_po_value,
                 "non_stock_spare_part_po_value": non_stock_po_value,
+                "service_labour_repair_po_value": non_spare_po_value,
                 "non_spare_part_po_value": non_spare_po_value,
+                "capex_po_value": capex_po_value,
+                "consumable_po_value": consumable_po_value,
                 "manual_review_items": len(manual_review_records),
                 "spare_part_po_count": len(external_spare_records),
                 "stocked_spare_part_po_count": len(stocked_spare_records),
                 "non_stock_spare_part_po_count": len(non_stock_spare_records),
+                "service_labour_repair_po_count": len(non_spare_service_records),
                 "non_spare_part_po_count": len(non_spare_service_records),
+                "capex_po_count": len(capex_records),
+                "consumable_po_count": len(consumable_records),
+                "other_unclassified_po_count": len(classified_manual_review_records),
                 "exact_item_code_matches": exact_code_matches,
                 "description_matches": description_matches,
                 "translation_failed_items": translation_failed,
@@ -1894,6 +2198,9 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "stocked_spare_part_po_value": stocked_po_value,
                 "non_stock_spare_part_po_value": non_stock_po_value,
                 "non_spare_part_service_po_value": non_spare_po_value,
+                "service_labour_repair_po_value": non_spare_po_value,
+                "capex_po_value": capex_po_value,
+                "consumable_po_value": consumable_po_value,
                 "manual_review_po_items": len(classified_manual_review_records),
                 "external_purchase_dependency_pct": dependency_pct,
                 "inventory_value_unavailable": inventory_value is None,
@@ -1916,6 +2223,7 @@ def build_spare_parts_payload():
     cache_signature = (
         _file_signature(D365_SPARE_PARTS_PATH),
         _file_signature(GEN_PO_SPARE_PARTS_PATH),
+        _stage_po_source_signatures(),
         *(_file_signature(path) for path in future_paths.values()),
     )
     cached = _SPARE_PARTS_CACHE.get(cache_signature)
@@ -3171,17 +3479,21 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
 
     errors: list[str] = []
     records: list[dict] = []
+    non_item_rows = 0
 
-    def _col(row: "pd.Series", idx: int) -> str:
+    n_cols = raw.shape[1]
+
+    def _col(row: tuple, idx: int) -> str:
         try:
-            v = row.iloc[idx] if idx < len(row) else ""
+            v = row[idx + 1] if idx < n_cols else ""  # +1: index is row[0] in itertuples
             s = str(v).strip()
             return s if s not in ("nan", "None") else ""
         except Exception:
             return ""
 
-    for _, row in raw.iterrows():
+    for row in raw.itertuples():
         if _col(row, _COL_TTYPE).lower() != "item":
+            non_item_rows += 1
             continue
         project = _col(row, _COL_PROJECT)
         if not project or project == "5":
@@ -3190,7 +3502,7 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
         if not name_raw:
             continue
 
-        date_raw = row.iloc[_COL_DATE] if _COL_DATE < len(row) else None
+        date_raw = row[_COL_DATE + 1] if _COL_DATE < n_cols else None  # +1: index offset in itertuples
         trans_id = _col(row, _COL_TRANS_ID)
         line_prop = _col(row, _COL_LINE_PROP)
         desc_raw = _col(row, _COL_DESC)
@@ -3303,6 +3615,8 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
     thai_count = sum(1 for r in records if r["has_thai"])
     unlinked = sum(1 for r in records if r["link_status"] in ("Unlinked", "Work order data unavailable"))
     coding_mismatches = sum(1 for r in records if r.get("possible_asset_coding_mismatch"))
+    missing_project_date_rows = sum(1 for r in records if not r.get("project_date"))
+    missing_work_order_reference_rows = sum(1 for r in records if not r.get("work_order_id"))
 
     monthly: dict[str, float] = {}
     for r in records:
@@ -3469,6 +3783,9 @@ def _build_project_transactions_payload_from_path(path: Path | None) -> dict:
             "thai_description_count": thai_count,
             "unlinked_count": unlinked,
             "coding_mismatch_count": coding_mismatches,
+            "non_item_rows": non_item_rows,
+            "missing_project_date_rows": missing_project_date_rows,
+            "missing_work_order_reference_rows": missing_work_order_reference_rows,
             "avg_consumption_per_wo": round(total_val / unique_wo, 2) if unique_wo else 0,
         },
         "charts": {
@@ -4042,13 +4359,15 @@ def _epo_parse_int_days(raw) -> int | None:
 
 def build_external_po_payload() -> dict:
     data_dir_path = Path(__file__).resolve().parent.parent / "data"
-    future_paths, _ = _resolve_future_sources(data_dir_path)
-    path = future_paths.get("po_list") or GEN_PO_SPARE_PARTS_PATH
-    if not path or not path.exists():
-        return {"status": "missing", "records": [], "summary": {}, "data_quality": [], "filters": {}}
-    _EPO_CACHE_V = 1
+    future_paths, future_source_status = _resolve_future_sources(data_dir_path)
+    _EPO_CACHE_V = 2
     try:
-        current_mtime = (_EPO_CACHE_V, _file_signature(path))
+        current_mtime = (
+            _EPO_CACHE_V,
+            _stage_po_source_signatures(),
+            *(_file_signature(path) for path in future_paths.values()),
+            _file_signature(GEN_PO_SPARE_PARTS_PATH),
+        )
         if _EPO_CACHE["result"] is not None and _EPO_CACHE["mtime"] == current_mtime:
             return _EPO_CACHE["result"]
     except OSError:
@@ -4061,84 +4380,37 @@ def build_external_po_payload() -> dict:
             _EPO_CACHE["mtime"] = current_mtime
             return persistent_cached
 
-    try:
-        df = pd.read_excel(path, sheet_name="Gen PO in D365 Rev.01", dtype=str)
-    except Exception as exc:
-        return {"status": "error", "error": str(exc), "records": [], "summary": {}, "data_quality": [], "filters": {}}
-
-    df.columns = [str(c).strip() for c in df.columns]
+    spare_payload = build_spare_parts_payload()
+    source_records = (spare_payload.get("po_classification") or {}).get("records") or []
+    if not source_records:
+        source_meta = future_source_status.get("po_list", {})
+        return {
+            "status": "missing",
+            "error": source_meta.get("message") or "Gen PO file not uploaded",
+            "records": [],
+            "summary": {},
+            "data_quality": [],
+            "filters": {},
+        }
 
     records: list[dict] = []
-    for _, row in df.iterrows():
-        pr_no = _epo_col(row, "PR No.")
-        po_no = _epo_col(row, "PO No.")
-        desc_raw = _epo_col(row, "Description")
-        if not pr_no and not po_no and not desc_raw:
-            continue
-
+    for source in source_records:
+        desc_raw = clean_text(source.get("original_description") or source.get("description"))
+        desc_out = _epo_apply_thai_glossary(clean_text(source.get("translated_description") or source.get("description")))
+        group_raw = clean_text(source.get("group_of_cost"))
+        group_out = _epo_apply_thai_glossary(clean_text(source.get("translated_group_of_cost") or source.get("group_of_cost")))
+        vendor_clean = clean_text(source.get("vendor_name") or source.get("supplier"))
+        total_price_val = _clean_numeric(source.get("total_cost"))
+        lead_time_days = _clean_numeric(source.get("lead_time_days"))
+        actual_lead_days = _clean_numeric(source.get("actual_lead_days"))
+        delay_days = _clean_numeric(source.get("delay_days"))
+        delivery_flag = clean_text(source.get("delivery_flag")) or ("Pending" if not source.get("completed") else "Delivered")
+        is_pending = delivery_flag == "Pending"
         has_thai_desc = bool(_THAI_RE.search(desc_raw))
-        desc_out = desc_raw
-        if has_thai_desc and desc_raw:
-            try:
-                t = _translate_desc(desc_raw)
-                if t and t != desc_raw:
-                    desc_out = t
-            except Exception:
-                pass
-        # Final pass over the manual glossary to catch any phrases the
-        # automatic translator missed.
-        desc_out = _epo_apply_thai_glossary(desc_out)
-
-        group_raw = _epo_col(row, "Group of cost")
-        has_thai_group = bool(_THAI_RE.search(group_raw))
-        group_out = group_raw
-        if has_thai_group and group_raw:
-            try:
-                t = _translate_desc(group_raw)
-                if t and t != group_raw:
-                    group_out = t
-            except Exception:
-                pass
-        group_out = _epo_apply_thai_glossary(group_out)
-
-        type_raw = _epo_col(row, "Type of cost")
-        type_clean = _TYPE_CLEAN.get(type_raw, type_raw.strip()) if type_raw else ""
-
-        vendor_raw = _epo_col(row, "Vendor name")
-        # Strip leading vendor code "V1234567 - "
-        vendor_clean = re.sub(r"^V\d+\s*-\s*", "", vendor_raw).strip() if vendor_raw else ""
-
-        grn_no = _epo_col(row, "GRN No.")
-        item_number = _epo_col(row, "Item number")
-
-        lead_time_days = _epo_parse_int_days(_epo_col(row, "Lead time delivery (day)"))
-        actual_lead_days = _epo_parse_int_days(_epo_col(row, "GRN-PO date (Day)"))
-        status_text = _epo_col(row, "PR PO GRN Status").strip()
-        kpi_text = _epo_col(row, "KPI Status").strip()
-
-        is_pending = "waitting" in status_text.lower() or "waiting" in status_text.lower()
-        delay_days: int | None = None
-        delivery_flag = "Pending"
-        if not is_pending and actual_lead_days is not None and lead_time_days is not None:
-            diff = actual_lead_days - lead_time_days
-            if diff <= 0:
-                delivery_flag = "Ontime"
-                delay_days = 0
-            else:
-                delivery_flag = "Delayed"
-                delay_days = diff
-        elif not is_pending and kpi_text:
-            delivery_flag = "Ontime" if "ontime" in kpi_text.lower() else "Delayed"
-            delay_days = 0 if delivery_flag == "Ontime" else None
-
-        classification = _epo_classify_item(item_number, desc_out, group_out)
-        total_price_val = _epo_parse_float(_epo_col(row, "Total price"))
-
-        # Per-row badge flags surfaced in the dashboard (matches user spec)
         row_flags: list[str] = []
         if delivery_flag == "Delayed":
             row_flags.append("delayed")
-        if delivery_flag == "Pending":
+        if is_pending:
             row_flags.append("pending")
         if lead_time_days is not None and lead_time_days > 60:
             row_flags.append("long_lead")
@@ -4146,178 +4418,184 @@ def build_external_po_payload() -> dict:
             row_flags.append("high_value")
         if has_thai_desc:
             row_flags.append("thai_desc")
-
+        if source.get("used_po_date_as_gr_fallback"):
+            row_flags.append("gr_date_fallback")
         records.append({
-            "pr_no": pr_no,
-            "po_no": po_no,
-            "grn_no": grn_no,
-            "item_number": item_number,
+            "stage": clean_text(source.get("source_stage")) or "Unmapped Stage",
+            "pr_no": clean_text(source.get("work_order_id")),
+            "po_no": clean_text(source.get("po_number")),
+            "grn_no": clean_text(source.get("grn_no")),
+            "item_number": clean_text(source.get("code")),
             "description_raw": desc_raw,
             "description": desc_out,
             "has_thai": has_thai_desc,
             "group_of_cost_raw": group_raw,
             "group_of_cost": group_out,
-            "pd_machine": _epo_col(row, "PD Machine"),
-            "type_of_cost": type_clean,
-            "qty": _epo_parse_float(_epo_col(row, "Qty'")),
-            "unit": _epo_norm_unit(_epo_col(row, "Unit")),
-            "price_unit": _epo_parse_float(_epo_col(row, "Price/Unit")),
+            "pd_machine": clean_text(source.get("pd_machine")),
+            "type_of_cost": _TYPE_CLEAN.get(clean_text(source.get("type_of_cost")), clean_text(source.get("type_of_cost"))),
+            "qty": _clean_numeric(source.get("quantity_ordered")),
+            "unit": _epo_norm_unit(clean_text(source.get("unit"))),
+            "price_unit": _clean_numeric(source.get("unit_cost")),
             "total_price": total_price_val,
             "vendor": vendor_clean,
-            "vendor_raw": vendor_raw,
-            "status": status_text,
-            "date_pr": _epo_parse_date(_epo_col(row, "DMY Create PR")),
-            "date_po": _epo_parse_date(_epo_col(row, "Date Gen PO")),
-            "date_grn": _epo_parse_date(_epo_col(row, "Date recive bill")),
+            "vendor_raw": vendor_clean,
+            "status": clean_text(source.get("grn_status")),
+            "date_pr": "",
+            "date_po": _date_iso(source.get("po_date")),
+            "date_grn": _date_iso(source.get("goods_received_date")),
+            "effective_gr_date": _date_iso(source.get("goods_received_date")) or (_date_iso(source.get("po_date")) if source.get("used_po_date_as_gr_fallback") else ""),
             "lead_time": lead_time_days,
             "actual_lead": actual_lead_days,
-            "kpi": kpi_text,
-            "note": _epo_col(row, "Note"),
-            "classification": classification,
+            "kpi": clean_text(source.get("kpi_status")),
+            "note": clean_text(source.get("note")),
+            "classification": clean_text(source.get("purchase_classification") or source.get("classification")) or PURCHASE_CLASS_OTHER,
             "delivery_flag": delivery_flag,
             "delay_days": delay_days,
             "is_pending": is_pending,
             "row_flags": row_flags,
+            "used_po_date_as_gr_fallback": bool(source.get("used_po_date_as_gr_fallback")),
         })
 
-    # ── Summary ────────────────────────────────────────────────────────────────
     total_spend = sum(r["total_price"] or 0 for r in records if r["total_price"] is not None)
+    open_po_value = round(sum(r["total_price"] or 0 for r in records if r["delivery_flag"] == "Pending"), 2)
     spend_by_type: dict[str, float] = {}
     for r in records:
         t = r["type_of_cost"] or "Unclassified"
         spend_by_type[t] = spend_by_type.get(t, 0) + (r["total_price"] or 0)
 
     unique_pos = len({r["po_no"] for r in records if r["po_no"]})
-    awaiting = sum(1 for r in records if "waitting" in (r["status"] or "").lower())
+    awaiting = sum(1 for r in records if r["delivery_flag"] == "Pending")
     kpi_rows = [r for r in records if r["kpi"]]
     over_kpi = sum(1 for r in kpi_rows if "over" in (r["kpi"] or "").lower())
     over_rate = round(over_kpi / len(kpi_rows) * 100, 1) if kpi_rows else 0
 
-    # ── Data quality ───────────────────────────────────────────────────────────
-    QUALITY_RULES = [
-        ("pr_after_po",      "PR date after PO date",          "Check entry in D365"),
-        ("received_no_grn",  "Received but no GRN No.",         "Missing GRN — request from supplier"),
-        ("po_no_vendor",     "PO with no vendor",               "Assign vendor"),
-        ("no_type",          "Type of cost missing",            "Classify spend type"),
-        ("no_pr",            "PR No. missing",                  "Link to PR"),
-        ("no_price",         "Total price missing",             "Enter price"),
-        ("over_delivery",    "Over-delivery",                   "Review supplier lead time"),
+    quality_rules = [
+        ("missing_item_number", "Item number missing", "Review description-based classification"),
+        ("missing_total_price", "Total price missing", "Enter price / line amount in the source"),
+        ("missing_vendor", "Vendor missing", "Assign the supplier or vendor"),
+        ("missing_received_date", "Received row missing GR date", "Enter Date receive bill for completed deliveries"),
+        ("gr_date_fallback", "GR date fell back to PO date", "Confirm the actual Date receive bill"),
+        ("missing_po_date", "PO date missing", "Confirm Date Gen PO"),
+        ("unclassified_rows", "Other / Unclassified rows", "Review purchase classification"),
     ]
-    quality_by_rule: dict[str, list] = {r[0]: [] for r in QUALITY_RULES}
-
-    for i, r in enumerate(records):
-        if r["date_pr"] and r["date_po"] and r["date_pr"] > r["date_po"]:
-            quality_by_rule["pr_after_po"].append(i)
-        if "recive" in (r["status"] or "").lower() and not r["grn_no"]:
-            quality_by_rule["received_no_grn"].append(i)
-        if r["po_no"] and not r["vendor"]:
-            quality_by_rule["po_no_vendor"].append(i)
-        if not r["type_of_cost"]:
-            quality_by_rule["no_type"].append(i)
-        if not r["pr_no"]:
-            quality_by_rule["no_pr"].append(i)
-        if r["total_price"] is None:
-            quality_by_rule["no_price"].append(i)
-        if "over" in (r["kpi"] or "").lower():
-            quality_by_rule["over_delivery"].append(i)
-
+    quality_by_rule: dict[str, list] = {rule_id: [] for rule_id, _, _ in quality_rules}
+    for index, row in enumerate(records):
+        if not row["item_number"]:
+            quality_by_rule["missing_item_number"].append(index)
+        if row["total_price"] is None:
+            quality_by_rule["missing_total_price"].append(index)
+        if row["po_no"] and not row["vendor"]:
+            quality_by_rule["missing_vendor"].append(index)
+        if row["delivery_flag"] != "Pending" and not row["date_grn"]:
+            quality_by_rule["missing_received_date"].append(index)
+        if row["used_po_date_as_gr_fallback"]:
+            quality_by_rule["gr_date_fallback"].append(index)
+        if not row["date_po"]:
+            quality_by_rule["missing_po_date"].append(index)
+        if row["classification"] == PURCHASE_CLASS_OTHER:
+            quality_by_rule["unclassified_rows"].append(index)
     total_flagged = len({idx for idxs in quality_by_rule.values() for idx in idxs})
-
     data_quality = [
         {
-            "rule": rule_id, "label": label, "action": action,
+            "rule": rule_id,
+            "label": label,
+            "action": action,
             "count": len(quality_by_rule[rule_id]),
             "row_indices": quality_by_rule[rule_id],
         }
-        for rule_id, label, action in QUALITY_RULES
+        for rule_id, label, action in quality_rules
         if quality_by_rule[rule_id]
     ]
 
-    # ── Supplier Delivery KPI dashboard analytics ──────────────────────────────
     delivered = [r for r in records if r["delivery_flag"] in ("Ontime", "Delayed")]
     on_time_rows = [r for r in delivered if r["delivery_flag"] == "Ontime"]
     delayed_rows = [r for r in delivered if r["delivery_flag"] == "Delayed"]
     pending_rows = [r for r in records if r["delivery_flag"] == "Pending"]
     on_time_rate = round(len(on_time_rows) / len(delivered) * 100, 1) if delivered else 0.0
-    avg_delay = (
-        round(sum(r["delay_days"] for r in delayed_rows if r["delay_days"] is not None) / len(delayed_rows), 1)
-        if delayed_rows else 0.0
-    )
+    avg_delay = round(sum(r["delay_days"] for r in delayed_rows if r["delay_days"] is not None) / len([r for r in delayed_rows if r["delay_days"] is not None]), 1) if [r for r in delayed_rows if r["delay_days"] is not None] else 0.0
+    completed_with_lead = [r for r in records if r["actual_lead"] is not None]
+    avg_lead_time = round(sum(r["actual_lead"] for r in completed_with_lead) / len(completed_with_lead), 1) if completed_with_lead else None
 
-    # ── Supplier performance aggregation ───────────────────────────────────────
-    from collections import defaultdict
     sup_agg: dict[str, dict] = defaultdict(lambda: {
-        "total_pos": 0, "on_time": 0, "delayed": 0, "pending": 0,
-        "delay_days_sum": 0, "delay_count": 0, "spend": 0.0,
+        "total_pos": 0,
+        "on_time": 0,
+        "delayed": 0,
+        "pending": 0,
+        "delay_days_sum": 0.0,
+        "delay_count": 0,
+        "lead_days_sum": 0.0,
+        "lead_count": 0,
+        "spend": 0.0,
+        "open_value": 0.0,
     })
     for r in records:
         vendor_key = r["vendor"] or "Unknown"
-        s = sup_agg[vendor_key]
-        s["total_pos"] += 1
-        s["spend"] += r["total_price"] or 0
-        flag = r["delivery_flag"]
-        if flag == "Ontime":
-            s["on_time"] += 1
-        elif flag == "Delayed":
-            s["delayed"] += 1
+        bucket = sup_agg[vendor_key]
+        bucket["total_pos"] += 1
+        bucket["spend"] += r["total_price"] or 0
+        if r["delivery_flag"] == "Ontime":
+            bucket["on_time"] += 1
+        elif r["delivery_flag"] == "Delayed":
+            bucket["delayed"] += 1
             if r["delay_days"] is not None:
-                s["delay_days_sum"] += r["delay_days"]
-                s["delay_count"] += 1
-        elif flag == "Pending":
-            s["pending"] += 1
+                bucket["delay_days_sum"] += r["delay_days"]
+                bucket["delay_count"] += 1
+        elif r["delivery_flag"] == "Pending":
+            bucket["pending"] += 1
+            bucket["open_value"] += r["total_price"] or 0
+        if r["actual_lead"] is not None:
+            bucket["lead_days_sum"] += r["actual_lead"]
+            bucket["lead_count"] += 1
 
     supplier_performance = []
-    for vendor, s in sup_agg.items():
-        evaluated = s["on_time"] + s["delayed"]
-        rate = round(s["on_time"] / evaluated * 100, 1) if evaluated else None
-        avg_d = round(s["delay_days_sum"] / s["delay_count"], 1) if s["delay_count"] else 0.0
+    for vendor, bucket in sup_agg.items():
+        evaluated = bucket["on_time"] + bucket["delayed"]
+        rate = round(bucket["on_time"] / evaluated * 100, 1) if evaluated else None
+        avg_d = round(bucket["delay_days_sum"] / bucket["delay_count"], 1) if bucket["delay_count"] else 0.0
+        avg_lead = round(bucket["lead_days_sum"] / bucket["lead_count"], 1) if bucket["lead_count"] else None
         supplier_performance.append({
             "vendor": vendor,
-            "total_pos": s["total_pos"],
-            "on_time": s["on_time"],
-            "delayed": s["delayed"],
-            "pending": s["pending"],
+            "total_pos": bucket["total_pos"],
+            "on_time": bucket["on_time"],
+            "delayed": bucket["delayed"],
+            "pending": bucket["pending"],
             "avg_delay": avg_d,
+            "avg_lead_time": avg_lead,
             "on_time_rate": rate,
-            "spend": round(s["spend"], 2),
+            "spend": round(bucket["spend"], 2),
+            "open_value": round(bucket["open_value"], 2),
         })
-    supplier_performance.sort(key=lambda x: -x["spend"])
+    supplier_performance.sort(key=lambda row: (-row["spend"], row["vendor"]))
 
-    # ── Category analysis (Stock vs Non-Stock parts) ───────────────────────────
-    cat_agg: dict[str, dict] = defaultdict(lambda: {
-        "count": 0, "spend": 0.0, "on_time": 0, "delayed": 0,
-    })
+    cat_agg: dict[str, dict] = defaultdict(lambda: {"count": 0, "spend": 0.0, "on_time": 0, "delayed": 0})
     for r in records:
-        c = cat_agg[r["classification"]]
-        c["count"] += 1
-        c["spend"] += r["total_price"] or 0
+        bucket = cat_agg[r["classification"]]
+        bucket["count"] += 1
+        bucket["spend"] += r["total_price"] or 0
         if r["delivery_flag"] == "Ontime":
-            c["on_time"] += 1
+            bucket["on_time"] += 1
         elif r["delivery_flag"] == "Delayed":
-            c["delayed"] += 1
+            bucket["delayed"] += 1
     category_summary = []
-    for cls in ("Stock", "Non-Stock", "Service", "Other"):
+    for cls in PURCHASE_CLASS_ORDER:
         if cls not in cat_agg:
             continue
-        c = cat_agg[cls]
-        evaluated = c["on_time"] + c["delayed"]
-        rate = round(c["on_time"] / evaluated * 100, 1) if evaluated else None
+        bucket = cat_agg[cls]
+        evaluated = bucket["on_time"] + bucket["delayed"]
+        rate = round(bucket["on_time"] / evaluated * 100, 1) if evaluated else None
         category_summary.append({
             "classification": cls,
-            "count": c["count"],
-            "spend": round(c["spend"], 2),
+            "count": bucket["count"],
+            "spend": round(bucket["spend"], 2),
             "on_time_rate": rate,
         })
 
-    # ── Services breakdown by Group of cost ────────────────────────────────────
-    services_by_group: dict[str, dict] = defaultdict(lambda: {
-        "count": 0, "spend": 0.0, "on_time": 0, "delayed": 0,
-    })
+    services_by_group: dict[str, dict] = defaultdict(lambda: {"count": 0, "spend": 0.0, "on_time": 0, "delayed": 0})
     for r in records:
-        if r["classification"] != "Service":
+        if r["classification"] != PURCHASE_CLASS_SERVICE:
             continue
-        g = r["group_of_cost"] or "Unclassified"
-        bucket = services_by_group[g]
+        group_key = r["group_of_cost"] or "Unclassified"
+        bucket = services_by_group[group_key]
         bucket["count"] += 1
         bucket["spend"] += r["total_price"] or 0
         if r["delivery_flag"] == "Ontime":
@@ -4325,42 +4603,59 @@ def build_external_po_payload() -> dict:
         elif r["delivery_flag"] == "Delayed":
             bucket["delayed"] += 1
     service_groups = []
-    for g, b in services_by_group.items():
-        evaluated = b["on_time"] + b["delayed"]
-        rate = round(b["on_time"] / evaluated * 100, 1) if evaluated else None
+    for group_key, bucket in services_by_group.items():
+        evaluated = bucket["on_time"] + bucket["delayed"]
+        rate = round(bucket["on_time"] / evaluated * 100, 1) if evaluated else None
         service_groups.append({
-            "group": g, "count": b["count"], "spend": round(b["spend"], 2),
+            "group": group_key,
+            "count": bucket["count"],
+            "spend": round(bucket["spend"], 2),
             "on_time_rate": rate,
         })
-    service_groups.sort(key=lambda x: -x["spend"])
+    service_groups.sort(key=lambda row: (-row["spend"], row["group"]))
 
-    # ── Monthly spend trend (by PO date) ───────────────────────────────────────
-    monthly: dict[str, float] = defaultdict(float)
+    monthly_spend: dict[str, float] = defaultdict(float)
+    monthly_received: dict[str, float] = defaultdict(float)
+    monthly_open: dict[str, float] = defaultdict(float)
     for r in records:
-        d = r["date_po"]
-        if not d or len(d) < 7:
-            continue
-        monthly[d[:7]] += r["total_price"] or 0
-    monthly_trend = [
-        {"month": k, "spend": round(v, 2)}
-        for k, v in sorted(monthly.items())
-    ]
+        if r["date_po"] and len(r["date_po"]) >= 7:
+            monthly_spend[r["date_po"][:7]] += r["total_price"] or 0
+            if r["delivery_flag"] == "Pending":
+                monthly_open[r["date_po"][:7]] += r["total_price"] or 0
+        effective_gr_date = r.get("effective_gr_date") or r.get("date_grn")
+        if effective_gr_date and len(effective_gr_date) >= 7 and r["delivery_flag"] != "Pending":
+            monthly_received[effective_gr_date[:7]] += r["total_price"] or 0
+    monthly_trend = [{"month": key, "spend": round(value, 2)} for key, value in sorted(monthly_spend.items())]
+    monthly_received_value = [{"month": key, "value": round(value, 2)} for key, value in sorted(monthly_received.items())]
+    monthly_open_value = [{"month": key, "value": round(value, 2)} for key, value in sorted(monthly_open.items())]
 
-    # ── Top 10 vendors by spend ────────────────────────────────────────────────
     top_vendors = sorted(
-        ({"vendor": v, "spend": round(s["spend"], 2)} for v, s in sup_agg.items()),
-        key=lambda x: -x["spend"],
+        ({"vendor": vendor, "spend": round(bucket["spend"], 2)} for vendor, bucket in sup_agg.items()),
+        key=lambda row: -row["spend"],
+    )[:10]
+    top_delayed_vendors = sorted(
+        (
+            {
+                "vendor": vendor,
+                "delayed": bucket["delayed"],
+                "avg_delay": round(bucket["delay_days_sum"] / bucket["delay_count"], 1) if bucket["delay_count"] else 0.0,
+                "open_value": round(bucket["open_value"], 2),
+            }
+            for vendor, bucket in sup_agg.items()
+            if bucket["delayed"] or bucket["pending"]
+        ),
+        key=lambda row: (-row["delayed"], -row["avg_delay"], -row["open_value"]),
     )[:10]
 
-    # ── Filters ────────────────────────────────────────────────────────────────
     result = {
         "status": "ok",
         "records": records,
         "summary": {
             "total_spend": round(total_spend, 2),
+            "open_po_value": open_po_value,
             "spend_by_type": sorted(
-                [{"type": k, "total": round(v, 2)} for k, v in spend_by_type.items()],
-                key=lambda x: -x["total"]
+                [{"type": key, "total": round(value, 2)} for key, value in spend_by_type.items()],
+                key=lambda row: -row["total"],
             ),
             "unique_pos": unique_pos,
             "total_rows": len(records),
@@ -4373,21 +4668,27 @@ def build_external_po_payload() -> dict:
             "evaluated_count": len(delivered),
             "on_time_rate": on_time_rate,
             "avg_delay_days": avg_delay,
+            "average_lead_time_days": avg_lead_time,
         },
         "supplier_performance": supplier_performance,
         "category_summary": category_summary,
         "service_groups": service_groups,
         "monthly_trend": monthly_trend,
+        "monthly_received_value": monthly_received_value,
+        "monthly_open_value": monthly_open_value,
         "top_vendors": top_vendors,
+        "top_delayed_vendors": top_delayed_vendors,
         "data_quality": data_quality,
+        "source_status": spare_payload.get("data_sources") or {},
         "filters": {
             "types_of_cost": sorted({r["type_of_cost"] for r in records if r["type_of_cost"]}),
             "groups_of_cost": sorted({r["group_of_cost"] for r in records if r["group_of_cost"]}),
             "statuses": sorted({r["status"] for r in records if r["status"]}),
             "vendors": sorted({r["vendor"] for r in records if r["vendor"]}),
             "machines": sorted({r["pd_machine"] for r in records if r["pd_machine"]}),
-            "classifications": sorted({r["classification"] for r in records if r["classification"]}),
-            "delivery_flags": ["Ontime", "Delayed", "Pending"],
+            "classifications": [classification for classification in PURCHASE_CLASS_ORDER if classification in {r["classification"] for r in records}],
+            "delivery_flags": ["Ontime", "Delayed", "Delivered", "Pending"],
+            "stages": sorted({r["stage"] for r in records if r["stage"]}),
         },
     }
     _EPO_CACHE["result"] = result
@@ -5449,11 +5750,11 @@ def _inventory_validation_summary(records):
 def _external_po_validation_summary(records):
     return {
         "rows": len(records),
-        "manual_review_rows": sum(1 for row in records if row.get("classification") == "Manual Review"),
+        "manual_review_rows": sum(1 for row in records if row.get("classification") == PURCHASE_CLASS_OTHER),
         "missing_total_price_rows": sum(1 for row in records if row.get("total_cost") is None),
         "missing_item_code_rows": sum(1 for row in records if not clean_text(row.get("code"))),
         "translation_failed_rows": sum(1 for row in records if row.get("translation_status") == "Translation failed"),
-        "stocked_matches": sum(1 for row in records if row.get("classification") == "Stocked Spare Part Purchase"),
+        "stocked_matches": sum(1 for row in records if row.get("classification") == PURCHASE_CLASS_STOCK),
     }
 
 
@@ -5473,17 +5774,20 @@ def import_spare_inventory_file(file_storage):
     temp_path = None
     try:
         temp_path = _stage_uploaded_file(file_storage, "spare_parts_master")
-        records = _build_inventory_records(temp_path, {"file_name": temp_path.name})
-        if not records:
+        # Quick structural check only — full classification runs on the next GET.
+        try:
+            df = pd.read_excel(str(temp_path), sheet_name=0)
+        except Exception as exc:
+            raise ValueError(f"Could not read inventory file: {exc}") from exc
+        if df.empty:
             raise ValueError("No recognizable inventory rows were found in the uploaded template.")
-        summary = _inventory_validation_summary(records)
+        row_count = len(df)
         final_path = _promote_uploaded_file(temp_path, SPARE_IMPORT_CANONICAL_FILES["inventory"])
         _clear_spare_related_caches()
         return {
             "ok": True,
-            "message": f"Imported {summary['rows']} inventory row(s).",
+            "message": f"Imported {row_count} inventory row(s).",
             "file": final_path.name,
-            "validation_summary": summary,
         }
     except Exception as exc:
         if temp_path and temp_path.exists():
@@ -5498,22 +5802,21 @@ def import_external_po_file(file_storage):
     temp_path = None
     try:
         temp_path = _stage_uploaded_file(file_storage, "po_list")
-        data_dir_path = Path(__file__).resolve().parent.parent / "data"
-        future_paths, future_source_status = _resolve_future_sources(data_dir_path)
-        inventory_records = _build_inventory_records(future_paths.get("spare_parts_master"), future_source_status.get("spare_parts_master", {}))
-        master_codes = {row.get("code") for row in inventory_records if row.get("code")}
-        records = _build_po_records(temp_path, {"file_name": temp_path.name}, master_codes)
-        records = _refine_po_records_with_inventory(records, inventory_records)
-        if not records:
+        # Quick structural check only — skip cross-referencing other source files.
+        # Full reconciliation runs on the next GET request from the disk cache.
+        try:
+            df = pd.read_excel(str(temp_path), sheet_name=0)
+        except Exception as exc:
+            raise ValueError(f"Could not read Gen PO file: {exc}") from exc
+        if df.empty:
             raise ValueError("No recognizable Gen PO rows were found in the uploaded template.")
-        summary = _external_po_validation_summary(records)
+        row_count = len(df)
         final_path = _promote_uploaded_file(temp_path, SPARE_IMPORT_CANONICAL_FILES["external_po"])
         _clear_spare_related_caches()
         return {
             "ok": True,
-            "message": f"Imported {summary['rows']} external PO row(s).",
+            "message": f"Imported {row_count} Gen PO row(s).",
             "file": final_path.name,
-            "validation_summary": summary,
         }
     except Exception as exc:
         if temp_path and temp_path.exists():
@@ -5524,14 +5827,41 @@ def import_external_po_file(file_storage):
         return {"ok": False, "message": f"Gen PO file could not be imported: {exc}"}
 
 
+def _quick_validate_project_transactions(path: Path) -> None:
+    """Fast structural check — just verify the file is readable and contains Item rows.
+    Does NOT run asset classification so it completes in under a second."""
+    try:
+        raw = _read_project_transactions_source_frame(path)
+    except Exception as exc:
+        raise ValueError(f"Could not read file: {exc}") from exc
+    if raw is None or raw.empty:
+        raise ValueError("The file appears to be empty.")
+    item_col = _COL_TTYPE
+    if item_col < raw.shape[1]:
+        has_item = (raw.iloc[:, item_col].astype(str).str.strip().str.lower() == "item").any()
+    else:
+        has_item = False
+    if not has_item:
+        raise ValueError("No 'Item' transaction rows found. Check you uploaded the correct Project actual transactions export.")
+
+
 def import_project_transactions_file(file_storage):
     temp_path = None
     try:
         temp_path = _stage_uploaded_file(file_storage, "project_transactions_current")
-        payload = _build_project_transactions_payload_from_path(temp_path)
-        if payload.get("status") != "ok":
-            raise ValueError(payload.get("error") or "The uploaded file could not be parsed.")
-        summary = _project_transactions_validation_summary(payload)
+        # Single read: validate structure + count rows without running asset
+        # classification or translation. Full payload build happens on the next
+        # GET request and is stored in the disk cache.
+        raw = _read_project_transactions_source_frame(temp_path)
+        if raw is None or raw.empty:
+            raise ValueError("The file appears to be empty.")
+        if _COL_TTYPE < raw.shape[1]:
+            item_mask = raw.iloc[:, _COL_TTYPE].astype(str).str.strip().str.lower() == "item"
+            if not item_mask.any():
+                raise ValueError("No 'Item' transaction rows found. Check you uploaded the correct Project actual transactions export.")
+            row_count = int(item_mask.sum())
+        else:
+            row_count = len(raw)
         final_path = _promote_uploaded_file(
             temp_path,
             SPARE_IMPORT_CANONICAL_FILES["project_transactions"],
@@ -5541,9 +5871,8 @@ def import_project_transactions_file(file_storage):
         _clear_spare_related_caches()
         return {
             "ok": True,
-            "message": f"Imported {summary['rows']} spare-parts consumption row(s).",
+            "message": f"Imported {row_count} spare-parts consumption row(s).",
             "file": final_path.name,
-            "validation_summary": summary,
         }
     except Exception as exc:
         if temp_path and temp_path.exists():
@@ -5556,6 +5885,7 @@ def import_project_transactions_file(file_storage):
 
 def get_maintenance_import_status():
     _, future_source_status = _resolve_future_sources(DEFAULT_DATA_DIR)
+    stage_rows, stage_status = _load_stage_goods_received_rows()
 
     from downtime_service import get_work_order_import_status  # local import to avoid heavier module work at import time
 
@@ -5605,6 +5935,16 @@ def get_maintenance_import_status():
             "validation": {},
         },
     }
+
+    stage_files = [status.get("file_name") for status in stage_status.values() if status.get("available") and status.get("file_name")]
+    if stage_rows and stage_files:
+        sources["external_po"].update({
+            "available": True,
+            "uploaded": True,
+            "file_name": ", ".join(stage_files),
+            "message": f"Using stage-aware Gen PO sources: {', '.join(stage_files)}",
+            "validation": {"rows": len(stage_rows), "source_count": len(stage_files)},
+        })
 
     flags = []
     if not sources["inventory"].get("available"):

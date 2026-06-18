@@ -529,7 +529,7 @@
                     </section>
                     <section class="summary-grid spare-summary-grid spare-kpi-row-consumption" aria-label="Spare parts consumption">
                         <article class="summary-card summary-card-kpi summary-card-blue spare-kpi-dual">
-                            <span class="summary-label">Stocked Spare Part Purchase</span>
+                            <span class="summary-label">Stock Spare Part Purchase</span>
                             <strong id="spare-stocked-value">--</strong>
                             <span class="spare-kpi-sub"><span id="spare-stocked-count">--</span> PO rows</span>
                         </article>
@@ -700,19 +700,19 @@
                     <div class="section-head">
                         <div>
                             <h2>Gen PO Classification</h2>
-                            <p class="section-subtitle">Gen PO rows classified into stocked spare parts, non-stock direct purchases, services / labour / repair / cleaning, and manual review.</p>
+                            <p class="section-subtitle">Gen PO rows classified into stock spare parts, non-stock spare parts, services / labour / repair, CAPEX, consumables / chemicals, and other / unclassified.</p>
                         </div>
                     </div>
 
                     <section class="spare-panel-metric-grid">
                         <article class="spare-panel-metric"><span>Gen PO Spare Part Quantity</span><strong id="spare-fast-moving-parts">--</strong></article>
-                        <article class="spare-panel-metric"><span>Gen PO Services / Non-Spare Qty</span><strong id="spare-slow-moving-parts">--</strong></article>
-                        <article class="spare-panel-metric"><span>Gen PO Spare Part Line Count</span><strong id="spare-dormant-parts">--</strong></article>
+                        <article class="spare-panel-metric"><span>Service / CAPEX / Consumable Qty</span><strong id="spare-slow-moving-parts">--</strong></article>
+                        <article class="spare-panel-metric"><span>Gen PO Classified Line Count</span><strong id="spare-dormant-parts">--</strong></article>
                     </section>
 
                     <section class="spare-panel-chart-grid">
                         <article class="spare-panel-chart">
-                            <div class="spare-panel-head"><h3>Gen PO Classification Breakdown</h3><p>Stocked spare part, non-stock direct purchase, services / labour / repair / cleaning, and manual review using the selected metric.</p></div>
+                            <div class="spare-panel-head"><h3>Gen PO Classification Breakdown</h3><p>Stock, non-stock, service, CAPEX, consumable, and other / unclassified rows using the selected metric.</p></div>
                             <div class="timeline-chart-wrap spare-chart-wrap"><canvas id="spare-po-classification-chart"></canvas></div>
                         </article>
                         <article class="spare-panel-chart">
@@ -754,10 +754,10 @@
                     <article class="spare-panel-table">
                         <div class="spare-panel-head spare-panel-head-search">
                             <div>
-                                <h3>Manual Review / Unclassified Table <span class="spare-panel-count" id="spare-manual-review-count">--</span></h3>
+                                <h3>Unclassified / Review Table <span class="spare-panel-count" id="spare-manual-review-count">--</span></h3>
                                 <p>Rows flagged for missing item code, description too short to classify, translation failure, low confidence, weak match, or missing total price.</p>
                             </div>
-                            <input type="search" id="spare-manual-review-search" class="spare-panel-search" placeholder="Search PO no., description, item code, vendor…" autocomplete="off" aria-label="Search manual review table">
+                            <input type="search" id="spare-manual-review-search" class="spare-panel-search" placeholder="Search PO no., description, item code, vendor…" autocomplete="off" aria-label="Search unclassified review table">
                         </div>
                         <div class="table-wrap spare-table-wrap">
                             <table>
@@ -906,7 +906,7 @@
                     <div class="epo-kpi-card epo-kpi-indigo"><span class="epo-kpi-label">Total POs</span><strong id="epo-kpi-pos">--</strong><span class="epo-kpi-sub" id="epo-kpi-lines">--</span></div>
                     <div class="epo-kpi-card epo-kpi-green"><span class="epo-kpi-label">On-time Delivery</span><strong id="epo-kpi-ontime-rate">--</strong><span class="epo-kpi-sub" id="epo-kpi-ontime-count">--</span></div>
                     <div class="epo-kpi-card epo-kpi-red"><span class="epo-kpi-label">Average Delay</span><strong id="epo-kpi-avg-delay">--</strong><span class="epo-kpi-sub" id="epo-kpi-delayed-count">--</span></div>
-                    <div class="epo-kpi-card epo-kpi-amber"><span class="epo-kpi-label">Pending Deliveries</span><strong id="epo-kpi-awaiting">--</strong><span class="epo-kpi-sub">Awaiting Supplier</span></div>
+                    <div class="epo-kpi-card epo-kpi-amber"><span class="epo-kpi-label">Pending Deliveries</span><strong id="epo-kpi-awaiting">--</strong><span class="epo-kpi-sub" id="epo-kpi-open-value">Awaiting Supplier</span></div>
                     <div class="epo-kpi-card epo-kpi-blue"><span class="epo-kpi-label">Total Spend (THB)</span><strong id="epo-kpi-spend">--</strong><span class="epo-kpi-sub" id="epo-kpi-spend-sub">--</span></div>
                 </div>
 
@@ -955,8 +955,8 @@
                         <table>
                             <thead><tr>
                                 <th>Vendor Name</th><th>Total POs</th><th>On-time</th><th>Delayed</th>
-                                <th>Pending</th><th>Avg Delay (days)</th><th>On-time Rate</th>
-                                <th>Spend (THB)</th><th>Status</th>
+                                <th>Pending / Open PO</th><th>Avg Delay (days)</th><th>Avg Lead (days)</th>
+                                <th>Spend (THB)</th><th>On-time Performance</th>
                             </tr></thead>
                             <tbody id="epo-sup-body"><tr><td colspan="9" class="empty-row">Loading…</td></tr></tbody>
                         </table>
@@ -1002,7 +1002,7 @@
                 <!-- Panel: Category Analysis (sub-tabs) -->
                 <div class="epo-panel" id="epo-panel-category" style="display:none">
                     <div class="epo-subtabs-row">
-                        <button class="epo-subtab-btn active" type="button" data-eposubtab="parts">A. Stock vs Non-Stock (Parts)</button>
+                        <button class="epo-subtab-btn active" type="button" data-eposubtab="parts">A. Spare Parts</button>
                         <button class="epo-subtab-btn" type="button" data-eposubtab="services">B. Services</button>
                     </div>
                     <div class="epo-subpanel" id="epo-subpanel-parts">
