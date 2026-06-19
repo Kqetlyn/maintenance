@@ -7,6 +7,11 @@ from datetime import datetime
 from flask import Flask, jsonify, redirect, send_from_directory, request
 import os
 
+# ── SQLite database layer (Phase 1) ──────────────────────────────────────────
+# db.init_db() is called at startup to create data/dashboard.db and all tables
+# if they don't already exist. No existing Excel logic is removed.
+import db as _db
+
 # ── Service imports ─────────────────────────────────────────────────────────────
 # The legacy maintenance overview / utility / equipment builders are no longer
 # imported here — those endpoints were removed. PM Schedule, Spare Parts and
@@ -298,6 +303,20 @@ def api_refresh_data():
         "message": "Caches cleared. Fresh data will be loaded on the next request.",
         "clearedAt": datetime.now().isoformat(),
     })
+
+
+@app.route("/api/db/status")
+def db_status():
+    """SQLite health check — row counts and last-updated timestamps per table."""
+    return jsonify(_db.get_db_status())
+
+
+@app.route("/api/db/sync-asset-master", methods=["POST"])
+def db_sync_asset_master():
+    """Re-import the Asset Master Excel into the asset_master SQL table.
+    Useful after dropping a new Asset_Master.xlsx without restarting the server."""
+    result = _db.sync_asset_master_from_file(DATA_DIR)
+    return jsonify(result), (200 if result.get("ok") else 500)
 
 
 # ── Frontend routes ───────────────────────────────────────────────────────────
@@ -804,6 +823,26 @@ def _start_cache_warming():
     # always serves results built by the current code (the response cache survives
     # restarts on disk, which otherwise serves stale results after a code change).
     _invalidate_route_cache()
+
+    # ── SQLite: init schema then sync Asset Master in a background thread ─────
+    # init_db() is fast (no-op if tables exist). The asset sync runs in a daemon
+    # thread so it never delays server startup or the first request.
+    try:
+        db_path = _db.init_db()
+        print(f"[db] SQLite ready: {db_path}")
+    except Exception as _db_exc:
+        print(f"[db] WARNING: could not initialise SQLite — {_db_exc}")
+
+    def _sync_asset_master():
+        try:
+            result = _db.sync_asset_master_from_file(DATA_DIR)
+            print(f"[db] {result['message']}")
+        except Exception as exc:
+            print(f"[db] Asset Master sync error: {exc}")
+
+    _threading.Thread(target=_sync_asset_master, name="db-asset-sync", daemon=True).start()
+    # ── end SQLite init ───────────────────────────────────────────────────────
+
     _register_refresh(("downtime", None, None, None, None, False, None), build_downtime_payload)
     _register_refresh(("pm-schedule", "all", None, None), lambda: build_pm_schedule_payload(stage="all", year=None, month=None))
     # Spare parts is the slowest cold build (the all-years project-transactions
