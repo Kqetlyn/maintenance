@@ -339,6 +339,235 @@ _PM_QUERY_EXECUTOR = ThreadPoolExecutor(max_workers=2)
 _PM_QUERY_TIMEOUT_SECONDS = 8
 _PM_LOAD_WARNING = "PM verified detail is still loading from the source schedule files. Try the PM question again in a moment."
 
+# ── Intent Router: 5-intent schema ──────────────────────────────────────────
+# Maps new broad intents → legacy build_context intents + allowed metric names.
+# qwen2.5:7b routes to these; keyword fallback also maps here.
+METRIC_REGISTRY: dict[str, dict] = {
+    "recurring_issue_analysis": {
+        "description": "Recurring faults, common issues, fault patterns, what keeps breaking",
+        "allowed_metrics": ["top_fault_category", "top_asset", "occurrence_count", "latest_date", "mtbf"],
+        "legacy_intents": ["fault_theme_query", "recurring_issue_query", "risk_insight_query"],
+        "default_legacy": "fault_theme_query",
+    },
+    "downtime_mr_wo_analysis": {
+        "description": "Maintenance requests, work orders, MTTR, closure rate, open/closed counts, backlog, top asset, downtime",
+        "allowed_metrics": ["mr_count", "wo_count", "mttr", "mtbf", "closure_rate", "open_count", "top_asset", "carry_over"],
+        "legacy_intents": ["downtime_summary", "maintenance_summary", "backlog_query", "top_asset_query",
+                           "open_mr_query", "top_functional_location_query", "daily_follow_up_query"],
+        "default_legacy": "maintenance_summary",
+    },
+    "pm_schedule": {
+        "description": "PM schedule, preventive maintenance, compliance %, overdue tasks, completion rate",
+        "allowed_metrics": ["pm_compliance", "pm_overdue_count", "pm_completed", "pm_scheduled", "backlog"],
+        "legacy_intents": ["pm_summary", "pm_overdue_query"],
+        "default_legacy": "pm_summary",
+    },
+    "spare_parts": {
+        "description": "Spare parts, inventory, stock, consumption, usage, parts drawn",
+        "allowed_metrics": ["parts_in_stock", "consumption_value", "top_consumed_part"],
+        "legacy_intents": ["spare_parts_summary", "spare_parts_consumption_query"],
+        "default_legacy": "spare_parts_summary",
+    },
+    "predictive_risk": {
+        "description": "Risk, attention assets, predictive maintenance, high-risk equipment, what to watch",
+        "allowed_metrics": ["risk_score", "top_risk_assets", "recurrence_prediction"],
+        "legacy_intents": ["risk_insight_query", "daily_follow_up_query"],
+        "default_legacy": "risk_insight_query",
+    },
+}
+
+_INTENT_ROUTER_PROMPT = (
+    "You are an intent router for a maintenance dashboard assistant.\n"
+    "Classify the question into EXACTLY ONE intent from this closed set:\n"
+    "- recurring_issue_analysis: faults, recurring issues, common problems, fault patterns, "
+    "what keeps breaking, most common issue, theme\n"
+    "- downtime_mr_wo_analysis: maintenance requests, work orders, MTTR, closure rate, open tickets, "
+    "downtime statistics, backlog, MR counts, top asset by failures, location analysis\n"
+    "- pm_schedule: PM schedule, preventive maintenance, compliance %, overdue tasks, completion rate\n"
+    "- spare_parts: spare parts, inventory, stock, consumption, usage, parts drawn, materials\n"
+    "- predictive_risk: risk, attention assets, prediction, high-risk equipment, what to watch, alert\n\n"
+    "Also extract explicit filters if mentioned (stage, year, month, machine_group, asset, fault_category).\n"
+    "Map relative dates: 'this year'→current YTD, 'last month'→previous month, 'FY YYYY'→financial_year.\n"
+    "Set interpretation_confidence 0.0-1.0; use <0.5 for ambiguous questions.\n\n"
+    "Respond ONLY with valid JSON — no other text:\n"
+    "{\n"
+    '  "intent": "<one of the 5 above>",\n'
+    '  "filters": {},\n'
+    '  "metrics": ["<metric1>", ...],\n'
+    '  "interpretation_confidence": 0.0,\n'
+    '  "interpretation_text": "<one short sentence: what you understood>"\n'
+    "}"
+)
+
+_ROUTER_CONFIDENCE_THRESHOLD = 0.4
+
+
+def _route_intent_llm(question: str, filters: dict) -> dict | None:
+    """Try qwen2.5:7b for structured routing JSON. Returns None if unavailable/failed."""
+    try:
+        from ...providers import generate_with_ollama, OllamaMiraProvider
+        provider = OllamaMiraProvider()
+        if not (config.LOCAL_LLM_ENABLED and provider.resolve_model()):
+            return None
+        year = filters.get("year", datetime.now().year)
+        period = filters.get("period_mode", "ytd")
+        user_prompt = (
+            f'Question: "{question}"\n'
+            f"Current dashboard period: {period} {year}\n"
+            f"Stage filter: {filters.get('stage', 'all')}"
+        )
+        raw = generate_with_ollama(
+            _INTENT_ROUTER_PROMPT, user_prompt,
+            model=provider.resolve_model(), timeout=8,
+        ).strip()
+        # Extract JSON from response (LLM may wrap in markdown)
+        json_match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not json_match:
+            return None
+        out = json.loads(json_match.group())
+        if out.get("intent") not in METRIC_REGISTRY:
+            return None
+        return out
+    except Exception:
+        return None
+
+
+def _route_intent_keyword(question: str) -> dict:
+    """Keyword-based intent router that maps to the 5-intent schema."""
+    q = (question or "").lower()
+    # PM
+    if re.search(r"\bpm\b|preventive|scheduled\s+maint|compliance\s*%|pm\s+overdue|pm\s+complet", q):
+        return {"intent": "pm_schedule", "metrics": ["pm_compliance", "pm_overdue_count"],
+                "interpretation_confidence": 0.75, "interpretation_text": "PM schedule analysis"}
+    # Spare parts
+    if re.search(r"\bspare\b|\bpart\b|inventory|stock|consumption|material|drawn\s+from", q):
+        return {"intent": "spare_parts", "metrics": ["parts_in_stock", "top_consumed_part"],
+                "interpretation_confidence": 0.75, "interpretation_text": "Spare parts analysis"}
+    # Risk / predictive
+    if re.search(r"\brisk\b|attention|predict|high.risk|what\s+to\s+watch|alert|escalat", q):
+        return {"intent": "predictive_risk", "metrics": ["top_risk_assets"],
+                "interpretation_confidence": 0.7, "interpretation_text": "Risk and predictive analysis"}
+    # Recurring fault / theme
+    if re.search(r"recurring|fault|common\s+issue|pattern|keeps?\s+break|most\s+common|theme|what\s+breaks", q):
+        return {"intent": "recurring_issue_analysis", "metrics": ["top_fault_category", "occurrence_count"],
+                "interpretation_confidence": 0.7, "interpretation_text": "Recurring fault analysis"}
+    # Default: downtime / MR / WO
+    return {"intent": "downtime_mr_wo_analysis", "metrics": ["mr_count", "mttr", "closure_rate"],
+            "interpretation_confidence": 0.6, "interpretation_text": "Downtime and maintenance request analysis"}
+
+
+def _validate_router_output(router_out: dict) -> tuple[bool, str]:
+    """Whitelist-validate the router's intent and confidence. Returns (ok, reason)."""
+    intent = router_out.get("intent", "")
+    if intent not in METRIC_REGISTRY:
+        return False, f"Intent '{intent}' not in the allowed set."
+    conf = float(router_out.get("interpretation_confidence") or 0.5)
+    if conf < _ROUTER_CONFIDENCE_THRESHOLD:
+        return False, (
+            f"I'm not confident I understood your question correctly "
+            f"(confidence {conf:.0%}). Could you rephrase? "
+            f"Try specifying: what data you want, for which period, and for which stage/asset."
+        )
+    # Prune unknown metrics (non-blocking)
+    allowed = set(METRIC_REGISTRY[intent]["allowed_metrics"])
+    router_out["metrics"] = [m for m in (router_out.get("metrics") or []) if m in allowed]
+    return True, ""
+
+
+def _new_to_legacy_intent(router_out: dict, question: str) -> str:
+    """Map new 5-intent router output to a legacy build_context intent."""
+    new_intent = router_out.get("intent", "")
+    reg = METRIC_REGISTRY.get(new_intent)
+    if not reg:
+        return classify_intent(question)  # full fallback to regex
+    q = (question or "").lower()
+    # Within each new intent, use keywords to pick the most specific legacy intent
+    if new_intent == "downtime_mr_wo_analysis":
+        if re.search(r"backlog|carry.over|open\s+mr|open\s+work", q):
+            return "backlog_query"
+        if re.search(r"top\s+asset|which\s+asset|most\s+mr|most\s+fail", q):
+            return "top_asset_query"
+        if re.search(r"location|building|store|office|area|functional", q):
+            return "top_functional_location_query"
+        if re.search(r"open|unresolved|not\s+closed|pending", q):
+            return "open_mr_query"
+        if re.search(r"today|follow.?up|action|priorities", q):
+            return "daily_follow_up_query"
+        if re.search(r"mtbf|mean.*between", q):
+            return "downtime_summary"
+        return "maintenance_summary"
+    if new_intent == "pm_schedule":
+        if re.search(r"overdue|behind|late|missed", q):
+            return "pm_overdue_query"
+        return "pm_summary"
+    if new_intent == "recurring_issue_analysis":
+        if re.search(r"risk|attention|score", q):
+            return "risk_insight_query"
+        if re.search(r"theme|descri|pattern|what.+common", q):
+            return "fault_theme_query"
+        return "recurring_issue_query"
+    if new_intent == "spare_parts":
+        if re.search(r"consum|usage|draw|used", q):
+            return "spare_parts_consumption_query"
+        return "spare_parts_summary"
+    if new_intent == "predictive_risk":
+        return "risk_insight_query"
+    return reg["default_legacy"]
+
+
+def _compute_answer_confidence(view_data: dict, router_out: dict) -> dict:
+    """Compute answer confidence from data quality signals."""
+    rows_str = view_data.get("rows_after_filter") or view_data.get("rows_loaded") or []
+    # Extract first numeric value from rows list (may be "1086 rows" or just 1086)
+    record_count = 0
+    if isinstance(rows_str, list) and rows_str:
+        try:
+            record_count = int(re.search(r"\d+", str(rows_str[0])).group())
+        except Exception:
+            pass
+    elif isinstance(rows_str, (int, float)):
+        record_count = int(rows_str)
+
+    router_conf = float(router_out.get("interpretation_confidence") or 0.5)
+    score = 0.0
+    parts: list[str] = []
+
+    # Record count contribution
+    if record_count >= 50:
+        score += 0.35
+    elif record_count >= 10:
+        score += 0.2
+    elif record_count >= 3:
+        score += 0.1
+    if record_count:
+        parts.append(f"{record_count} MRs")
+
+    # Router confidence contribution
+    if router_conf >= 0.8:
+        score += 0.35
+    elif router_conf >= 0.6:
+        score += 0.25
+    elif router_conf >= 0.4:
+        score += 0.15
+
+    # Data warnings reduce confidence
+    warnings = view_data.get("data_warnings") or []
+    if warnings:
+        score -= 0.1 * min(len(warnings), 2)
+
+    score = max(0.0, min(1.0, score))
+
+    if score >= 0.65:
+        band = "High"
+    elif score >= 0.35:
+        band = "Med"
+    else:
+        band = "Low"
+
+    denom = " · ".join(parts) if parts else "limited data"
+    label = f"{band} — {denom}"
+    return {"band": band, "score": round(score, 2), "label": label}
+
 
 def classify_intent(question: str | None) -> str:
     text = (question or "").strip().lower()
@@ -2137,8 +2366,49 @@ def answer(
         result = _read_only_response(question or "", base_filters)
         return _apply_kpi_analysis_context(result, selected_kpis, selected_kpi_labels)
 
-    intent = classify_intent(question)
+    # ── Stage 1: Intent routing ──────────────────────────────────────────────
+    # Try qwen2.5:7b first; fall back to keyword classifier.
+    base_f = ctx.normalize_filters(base_filters)
+    router_out = _route_intent_llm(question or "", base_f) or _route_intent_keyword(question or "")
+
+    # ── Stage 2: Validation + confidence gate ────────────────────────────────
+    is_valid, clarify_msg = _validate_router_output(router_out)
+    if not is_valid:
+        status = get_provider_status()
+        return {
+            "ok": True,
+            "intent": "clarification_needed",
+            "period": ctx.month_label(base_f),
+            "period_used": f"Period used: {ctx.month_label(base_f)}",
+            "filters": base_f,
+            "answer": clarify_msg,
+            "key_numbers_used": [],
+            "insight": [],
+            "recommended_follow_up": [],
+            "view_data_used": None,
+            "provider": "validation_gate",
+            "provider_status": status["status"],
+            "provider_mode_label": "Validation gate",
+            "llm_active": False,
+            "read_only": True,
+            "confidence": {"band": "Low", "score": 0.0, "label": "Low — clarification needed"},
+            "interpretation": {
+                "text": router_out.get("interpretation_text", "Question not clearly understood."),
+                "intent_label": router_out.get("intent", "unknown"),
+                "confidence": float(router_out.get("interpretation_confidence") or 0.0),
+            },
+            "mode": "chat",
+        }
+
+    # ── Stage 3: Map to legacy intent + resolve filters ──────────────────────
+    intent = _new_to_legacy_intent(router_out, question or "")
+    # Merge any filter overrides the router extracted
+    extracted_filters = router_out.get("filters") or {}
+    if extracted_filters.get("stage"):
+        base_filters = {**(base_filters or {}), "stage": extracted_filters["stage"]}
     filters = resolve_filters(question or "", base_filters)
+
+    # ── Stage 4: Compute verified data ──────────────────────────────────────
     built = build_context(intent, filters, question or "")
     period = built["period"]
 
@@ -2150,6 +2420,7 @@ def answer(
         built["theme"],
     )
 
+    # ── Stage 5: Rephrase with qwen2.5:7b (numbers locked in template) ──────
     provider = OllamaMiraProvider()
     used_llm = False
     answer_text = rule_text
@@ -2180,7 +2451,7 @@ def answer(
             style_instruction = (
                 "Return one management-ready sentence only."
                 if built["intent"] == "report_wording_query"
-                else "Return only the short direct Answer text in 2-4 concise sentences. Do not add headings or bullets."
+                else "Return only the short direct Answer in ≤2 sentences with ≤3 key numbers. No headings or bullets."
             )
             user_prompt = (
                 f'Answer this question: "{question}"\n\n'
@@ -2202,6 +2473,30 @@ def answer(
         except Exception:
             answer_text = rule_text
 
+    # ── Stage 6: Compute answer confidence ──────────────────────────────────
+    confidence = _compute_answer_confidence(built.get("view_data_used") or {}, router_out)
+
+    # ── Stage 7: Build interpretation echo ──────────────────────────────────
+    intent_label_map = {
+        "recurring_issue_analysis": "Recurring issue analysis",
+        "downtime_mr_wo_analysis": "Downtime / MR analysis",
+        "pm_schedule": "PM schedule analysis",
+        "spare_parts": "Spare parts analysis",
+        "predictive_risk": "Risk / predictive analysis",
+    }
+    new_intent = router_out.get("intent", "downtime_mr_wo_analysis")
+    interpretation = {
+        "text": router_out.get("interpretation_text") or intent_label_map.get(new_intent, "Maintenance analysis"),
+        "intent_label": intent_label_map.get(new_intent, new_intent),
+        "resolved_as": (
+            f"{intent_label_map.get(new_intent, new_intent)} · "
+            f"Stage {filters.get('stage', 'all').replace('stage', '').strip().upper() if filters.get('stage') != 'all' else 'All'} · "
+            f"{period}"
+        ),
+        "confidence": float(router_out.get("interpretation_confidence") or 0.5),
+        "router_source": "ollama" if used_llm else "keyword",
+    }
+
     status = get_provider_status()
     result = {
         "ok": True,
@@ -2219,6 +2514,8 @@ def answer(
         "provider_mode_label": "Ollama connected" if used_llm else "Rule-based fallback",
         "llm_active": used_llm,
         "read_only": True,
+        "confidence": confidence,
+        "interpretation": interpretation,
     }
     if built["theme"]:
         result["theme_analysis"] = built["theme"]

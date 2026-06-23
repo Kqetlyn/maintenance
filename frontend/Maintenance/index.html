@@ -16,9 +16,9 @@
     <noscript><link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet"></noscript>
 
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
-    <link rel="stylesheet" href="/Maintenance/style.css?v=20260616-pm-fy-1">
-    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260616-scroll-fit-1">
-    <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
+    <link rel="stylesheet" href="/Maintenance/style.css?v=20260623-grgi-layout-1">
+    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260623-genpo-ev-1">
+    <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260620-chat-router-1">
 
 </head>
 <body data-sync-page="maintenance">
@@ -494,59 +494,6 @@
                 </div>
             </section>
 
-            <section class="card-shell spare-overview-shell">
-                <div class="section-head spare-overview-head">
-                    <div>
-                        <h2>Spare Parts Overview</h2>
-                        <p id="spare-overview-context" class="section-subtitle spare-overview-context">Showing all imported purchase data.</p>
-                    </div>
-                    <div class="filter-grid spare-overview-filter-grid">
-                        <label class="control-field">
-                            <span>Range</span>
-                            <select id="spare-period-filter">
-                                <option value="all">All Data</option>
-                                <option value="ytd">YTD</option>
-                            </select>
-                        </label>
-                        <label class="control-field">
-                            <span>Year</span>
-                            <select id="spare-year-filter">
-                                <option value="all">All Years</option>
-                            </select>
-                        </label>
-                        <label class="control-field">
-                            <span>Month</span>
-                            <select id="spare-month-filter">
-                                <option value="all">All Months</option>
-                            </select>
-                        </label>
-                    </div>
-                </div>
-                <div class="spare-kpi-rows">
-                    <section class="summary-grid spare-summary-grid spare-kpi-row-primary" aria-label="Current inventory spare parts">
-                        <article class="summary-card summary-card-kpi summary-card-blue"><span class="summary-label">Current In-Stock Items</span><strong id="spare-in-stock-items">--</strong></article>
-                        <article class="summary-card summary-card-kpi summary-card-green"><span class="summary-label">Current Inventory Value</span><strong id="spare-in-stock-value">--</strong></article>
-                    </section>
-                    <section class="summary-grid spare-summary-grid spare-kpi-row-consumption" aria-label="Spare parts consumption">
-                        <article class="summary-card summary-card-kpi summary-card-blue spare-kpi-dual">
-                            <span class="summary-label">Stock Spare Part Purchase</span>
-                            <strong id="spare-stocked-value">--</strong>
-                            <span class="spare-kpi-sub"><span id="spare-stocked-count">--</span> PO rows</span>
-                        </article>
-                        <article class="summary-card summary-card-kpi summary-card-amber spare-kpi-dual">
-                            <span class="summary-label">Non-Stock Direct Purchase</span>
-                            <strong id="spare-non-stock-spare-po-value">--</strong>
-                            <span class="spare-kpi-sub"><span id="spare-non-stock-count">--</span> PO rows</span>
-                        </article>
-                        <article class="summary-card summary-card-kpi summary-card-red spare-kpi-dual">
-                            <span class="summary-label">Services / Labour / Repair</span>
-                            <strong id="spare-non-spare-service-po-value">--</strong>
-                            <span class="spare-kpi-sub"><span id="spare-services-count">--</span> PO rows</span>
-                            <span class="spare-kpi-note">Includes cleaning and contractor work.</span>
-                        </article>
-                    </section>
-                </div>
-            </section>
 
             <section class="card-shell asset-intel-card" id="asset-parts-intelligence-card">
                 <div class="section-head asset-intel-head">
@@ -1701,11 +1648,11 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/shared/mira/mira-overview.js?v=20260616-scroll-fit-1" defer></script>
-    <script src="/Maintenance/script.js?v=20260612-overview-title-1" defer></script>
-    <script src="/Maintenance/spare-parts-mgmt.js?v=20260615-spare-mgmt-4" defer></script>
-    <script src="/Maintenance/pm-schedule.js?v=20260616-pm-fy-1" defer></script>
-    <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
+    <script src="/shared/mira/mira-overview.js?v=20260623-genpo-ev-1" defer></script>
+    <script src="/Maintenance/script.js?v=20260622-inv-value-1" defer></script>
+    <script src="/Maintenance/spare-parts-mgmt.js?v=20260623-grgi-layout-1" defer></script>
+    <script src="/Maintenance/pm-schedule.js?v=20260622-alert-banner-1" defer></script>
+    <script src="/shared/mira/mira-chat.js?v=20260620-chat-router-1" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->

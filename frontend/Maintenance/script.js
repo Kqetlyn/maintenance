@@ -3771,6 +3771,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
         setSpareKpiValue("spare-in-stock-items", formatInteger(inStockItems));
         setSpareKpiValue("spare-in-stock-value", formatSpareCurrency(inStockValue));
+
+        // Inventory value coverage note
+        const invNoteEl = document.getElementById("spare-inv-value-note");
+        if (invNoteEl) {
+            const covPct = useSummary ? toFiniteNumber(summary?.inventory_valuation_coverage_pct) : null;
+            const isEst = useSummary ? summary?.inventory_value_is_estimated : false;
+            const unvalued = useSummary ? toFiniteNumber(summary?.unvalued_in_stock_items) : null;
+            if (inStockValue !== null && covPct !== null && covPct < 100) {
+                invNoteEl.textContent = isEst
+                    ? `Estimated — ${unvalued} item${unvalued === 1 ? "" : "s"} used PO fallback price`
+                    : `${unvalued} item${unvalued === 1 ? "" : "s"} without cost data`;
+                invNoteEl.style.display = "";
+            } else if (inStockValue !== null && isEst) {
+                invNoteEl.textContent = "Estimated — PO fallback prices used";
+                invNoteEl.style.display = "";
+            } else {
+                invNoteEl.style.display = "none";
+            }
+        }
+
         setSpareKpiValue("spare-stocked-value", formatSpareCurrency(stockedPoValue));
         setSpareKpiValue("spare-stocked-count", formatInteger(stockedCount));
         setSpareKpiValue("spare-non-stock-spare-po-value", formatSpareCurrency(nonStockPoValue));

@@ -129,8 +129,11 @@ def _kpi_card(label: str, raw, helper: str, status: str = "neutral", *, display:
         "label": label,
         "raw": raw,
         "value": display if display is not None else _display_value(raw),
+        "display": display if display is not None else _display_value(raw),
         "helper": helper,
+        "note": helper,
         "status": status,
+        "tone": status,
     }
 
 
@@ -239,6 +242,7 @@ def _compose_response(
     sections: dict,
     priority_follow_up: list[str],
     view_data_used: dict,
+    action_items: list[dict] | None = None,
     question: str | None = None,
     data_notes: list[str] | None = None,
 ) -> dict:
@@ -252,6 +256,7 @@ def _compose_response(
         "status_badges": _status_badges(provider_name),
         "question": question or "",
         "kpi_cards": kpi_cards,
+        "action_items": action_items or [],
         "sections": sections,
         "priority_follow_up": priority_follow_up[:5],
         "ai_explanation_placeholder": _AI_PLACEHOLDER,
@@ -285,6 +290,7 @@ def _build_management_presentation(data: dict, filters: dict, provider_name: str
         provider_name=provider_name,
         source_note=_source_note("kpi_summary"),
         kpi_cards=_build_management_kpi_cards(data),
+        action_items=_build_action_items(data),
         sections=sections,
         priority_follow_up=_build_priority_follow_up(data),
         view_data_used=_management_view_data_used(data, filters, data_notes),
@@ -294,128 +300,106 @@ def _build_management_presentation(data: dict, filters: dict, provider_name: str
 
 
 def _build_downtime_section(data: dict, period: str) -> dict:
+    """Overview-card version: 6 key metrics only.
+
+    Detailed rows (Top Asset, Severity, WO Created %, Preventive/Corrective)
+    belong on the Downtime and Machine Explorer pages, not the management overview.
+    """
     work_orders = data.get("work_orders") or {}
     summary = data.get("downtime_summary") or {}
     open_count = work_orders.get("open")
     closed_count = work_orders.get("closed")
-    rejected_count = work_orders.get("rejected") or summary.get("rejected_work_orders")
     closure_rate = work_orders.get("closure_rate_pct") or summary.get("closure_rate_pct")
     opening_backlog = summary.get("carry_over_open_mr", summary.get("opening_backlog_count"))
-    total_with_backlog = summary.get("total_active_workload", summary.get("total_with_backlog_count"))
-    preventive = summary.get("preventive_count")
-    corrective = summary.get("corrective_count")
-    focus_asset = summary.get("top_recorded_asset_name") or summary.get("top_asset_by_mr_count_name") or summary.get("focus_asset_name")
-    top_recorded_is_placeholder = summary.get("top_recorded_asset_is_placeholder")
-    top_recorded_count = summary.get("top_recorded_asset_count") or summary.get("top_asset_by_mr_count")
-    top_actual_asset = summary.get("top_actual_machine_asset_name")
-    top_actual_count = summary.get("top_actual_machine_asset_count")
-    top_functional_location = summary.get("top_functional_location_name") or summary.get("top_work_order_machine_group")
-    severity_breakdown = _severity_breakdown_display(summary.get("severity_mix"))
-    data_quality_issue_count = summary.get("data_quality_issue_count")
     missing_asset = summary.get("missing_asset_count") or 0
     general_area = summary.get("general_area_asset_count") or 0
     dq_display = (
-        f"{_display_value(missing_asset)} missing asset IDs + {_display_value(general_area)} general asset/area entries"
-        if (missing_asset or general_area) else _display_value(data_quality_issue_count)
+        f"{_display_value(missing_asset)} missing asset IDs"
+        + (f" + {_display_value(general_area)} general area entries" if general_area else "")
+        if (missing_asset or general_area) else "None"
     )
     in_progress = summary.get("in_progress_count")
     new_count = summary.get("new_count")
     finished = summary.get("finished_count")
     confirm = summary.get("confirm_count")
-    open_note = f"In Progress {_display_value(in_progress)} + New {_display_value(new_count)}" if in_progress is not None else "Outstanding in selected period"
-    closed_note = f"Finished {_display_value(finished)} + Confirm {_display_value(confirm)}" if finished is not None else "Raised in selected period and now closed / confirmed"
-    backlog_note = (
-        "Includes selected month MR raised plus carry-over open MR from before the selected period."
-        if opening_backlog is not None
-        else "Carry-over open MR was not available in the current response."
+    open_note = (
+        f"In Progress {_display_value(in_progress)} + New {_display_value(new_count)}"
+        if in_progress is not None else "Outstanding in selected period"
+    )
+    closed_note = (
+        f"Finished {_display_value(finished)} + Confirm {_display_value(confirm)}"
+        if finished is not None else "Raised in selected period and now closed / confirmed"
     )
     return {
         "title": "Downtime / Work Order Summary",
         "subtitle": "MR activity and closure status for selected period.",
-        "layout": "wide",
         "metrics": [
             _metric("MR Raised", work_orders.get("total"), note=f"Raised in {period}"),
-            _metric("Open / In Progress", open_count, tone=_reverse_ratio_tone(open_count, good=0, watch=10), note=open_note),
+            _metric("Open / In Progress", open_count,
+                    tone=_reverse_ratio_tone(open_count, good=0, watch=10), note=open_note),
             _metric("Closed / Confirmed", closed_count, tone="good", note=closed_note),
-            _metric("Closure Rate", closure_rate, display=_percent(closure_rate), tone=_ratio_tone(closure_rate, good=85, watch=70), note="Closed / Confirmed divided by MR Raised"),
-            _metric("Carry-over Open MR", opening_backlog, tone=_reverse_ratio_tone(opening_backlog, good=0, watch=25), note=f"Raised before {period} and still open"),
-            _metric("Total Active Workload", total_with_backlog, tone=_reverse_ratio_tone(total_with_backlog, good=0, watch=250), note=backlog_note),
-            _metric("Preventive / Corrective", None, display=_ratio_display(preventive, corrective), tone="neutral", note="MR raised in selected period"),
-            _metric("WO Created %", summary.get("wo_created_pct"), display=_percent(summary.get("wo_created_pct")), tone=_ratio_tone(summary.get("wo_created_pct"), good=95, watch=85), note="MR with linked work order number"),
-            _metric(
-                "Top Recorded Asset / Area", focus_asset, tone="watch" if focus_asset else "neutral",
-                note=("General area / placeholder, not a true machine asset" if top_recorded_is_placeholder
-                      else (summary.get("top_recorded_asset_reason") or "Based on selected-period MR count"))
-                     + (f" ({_display_value(top_recorded_count)} MR)" if top_recorded_count else ""),
-            ),
-            _metric(
-                "Top Actual Machine Asset", top_actual_asset, tone="watch" if top_actual_asset else "neutral",
-                note=(f"Excludes general/placeholder areas ({_display_value(top_actual_count)} MR)" if top_actual_asset
-                      else "No specific machine asset recorded in selected period"),
-            ),
-            _metric("Top Functional Location", top_functional_location, tone="neutral", note=summary.get("top_functional_location_reason") or "Based on selected-period MR count"),
-            _metric("Severity Breakdown", None, display=severity_breakdown, tone="neutral", note="Service level mix in selected period"),
-            _metric("Data Quality Issues", None, display=dq_display, tone=_reverse_ratio_tone((missing_asset or 0) + (general_area or 0), good=0, watch=5), note="Missing asset IDs and general area / placeholder asset entries"),
+            _metric("Closure Rate", closure_rate, display=_percent(closure_rate),
+                    tone=_ratio_tone(closure_rate, good=85, watch=70),
+                    note="Closed / Confirmed ÷ MR Raised"),
+            _metric("Carry-over Open MR", opening_backlog,
+                    tone=_reverse_ratio_tone(opening_backlog, good=0, watch=25),
+                    note=f"Raised before {period} and still open"),
+            _metric("Data Quality Issues", None, display=dq_display,
+                    tone=_reverse_ratio_tone(
+                        (missing_asset or 0) + (general_area or 0), good=0, watch=5),
+                    note="Missing asset IDs and general area / placeholder entries — correct for asset-level analysis"),
         ],
         "summary": (
-            f"{_display_value(work_orders.get('total'))} MR were raised in {period}. Of these, "
-            f"{_display_value(closed_count)} were closed / confirmed and {_display_value(open_count)} remain open or in progress, "
-            f"giving a closure rate of {_percent(closure_rate)}. There were also {_display_value(opening_backlog)} carry-over open MR "
-            f"from before {period}, bringing the total active workload to {_display_value(total_with_backlog)}. "
-            f"Corrective MR made up most of the period workload, with {_display_value(corrective)} corrective MR and {_display_value(preventive)} preventive MR."
+            f"{_display_value(work_orders.get('total'))} MR raised in {period}. "
+            f"{_display_value(closed_count)} closed / confirmed, {_display_value(open_count)} open or in progress "
+            f"(closure rate {_percent(closure_rate)}). "
+            f"Carry-over open MR: {_display_value(opening_backlog)}."
         ),
-        "footnote": "Focus asset is based on selected-period MR count. MTTR / MTBF are kept out of this card so the summary stays on one raised-date reporting basis.",
-        "visuals": [
-            {
-                "type": "split_bar",
-                "label": "Open vs Closed MR",
-                "items": [
-                    {"label": "Closed / Confirmed", "value": closed_count or 0, "tone": "good"},
-                    {"label": "Open / In Progress", "value": open_count or 0, "tone": "critical"},
-                    {"label": "Rejected", "value": rejected_count or 0, "tone": "neutral"},
-                ],
-            },
-            {
-                "type": "split_bar",
-                "label": "Preventive vs Corrective MR Raised",
-                "items": [
-                    {"label": "Preventive", "value": summary.get("preventive_count") or 0, "tone": "good"},
-                    {"label": "Corrective", "value": summary.get("corrective_count") or 0, "tone": "watch"},
-                ],
-            },
-        ],
+        "footnote": (
+            "Detailed asset, severity, WO-created %, and functional-location breakdowns "
+            "are available on the Downtime and Machine Explorer pages."
+        ),
     }
 
 
 def _build_pm_section(data: dict, period: str) -> dict:
     pm = data.get("pm_schedule") or {}
     compliance = pm.get("compliance_pct")
+    completed = pm.get("completed") or 0
+    scheduled = pm.get("total_scheduled") or 0
+    zero_completion = completed == 0 and scheduled > 0
+    completion_tone = "watch" if zero_completion else ("good" if completed > 0 else "neutral")
+    completion_note = (
+        "Shows 0 — verify completion records before assuming non-compliance"
+        if zero_completion else "Manual Done only"
+    )
     return {
         "title": "PM Schedule Summary",
+        "completion_warning": (
+            "PM completion shows 0. This may indicate missing manual completion records, "
+            "not confirmed non-compliance. Verify with the PM team before action."
+            if zero_completion else None
+        ),
         "metrics": [
-            _metric("PM Scheduled", pm.get("total_scheduled")),
-            _metric("PM Completed", pm.get("completed"), tone="good", note="Manual Done only"),
             _metric("PM Due This Month", pm.get("due_this_month")),
-            _metric("PM Overdue", pm.get("overdue"), tone=_reverse_ratio_tone(pm.get("overdue"), good=0, watch=20)),
-            _metric("PM Backlog", pm.get("backlog"), tone=_reverse_ratio_tone(pm.get("backlog"), good=0, watch=20)),
-            _metric("PM Compliance", compliance, display=_percent(compliance), tone=_ratio_tone(compliance, good=90, watch=75)),
+            _metric("PM Completed", pm.get("completed"),
+                    tone=completion_tone, note=completion_note),
+            _metric("PM Overdue", pm.get("overdue"),
+                    tone=_reverse_ratio_tone(pm.get("overdue"), good=0, watch=20)),
+            _metric("PM Backlog", pm.get("backlog"),
+                    tone=_reverse_ratio_tone(pm.get("backlog"), good=0, watch=20)),
+            _metric("PM Compliance", compliance, display=_percent(compliance),
+                    tone=_ratio_tone(compliance, good=90, watch=75)),
         ],
         "summary": (
-            f"{_display_value(pm.get('total_scheduled'))} PM tasks are scheduled for {period}, with "
-            f"{_display_value(pm.get('completed'))} manually completed, {_display_value(pm.get('due_this_month'))} due this month, "
-            f"and {_display_value(pm.get('overdue'))} overdue. Compliance is {_percent(compliance)}."
+            f"{_display_value(scheduled)} PM tasks scheduled. "
+            f"{_display_value(pm.get('due_this_month'))} due this month, "
+            f"{_display_value(pm.get('completed'))} completed, "
+            f"{_display_value(pm.get('overdue'))} overdue. "
+            f"Compliance is {_percent(compliance)}."
+            + (" PM completion shows 0 — verify records." if zero_completion else "")
         ),
-        "footnote": "PM is counted as completed only when manually marked Done.",
-        "visuals": [
-            {
-                "type": "progress",
-                "label": "PM Compliance",
-                "value": compliance or 0,
-                "max": 100,
-                "tone": _ratio_tone(compliance, good=90, watch=75),
-                "display": _percent(compliance),
-            }
-        ],
+        "footnote": "PM is counted as completed only when manually marked Done in the PM schedule.",
     }
 
 
@@ -423,82 +407,131 @@ def _build_spare_section(data: dict, period: str) -> dict:
     spare = data.get("spare_parts") or {}
     yoy = spare.get("yoy_consumption_pct")
     top_part = spare.get("top_consumed_part")
+
+    # In-stock value: show "Missing cost data" when items exist but value is 0.
+    # On-hand quantities may exist without unit costs in the inventory table.
+    in_stock_items = spare.get("current_in_stock_items") or 0
+    raw_value = spare.get("current_in_stock_value")
+    value_is_zero_with_stock = (raw_value is not None and raw_value == 0 and in_stock_items > 0)
+    if value_is_zero_with_stock:
+        in_stock_value_display = "Missing cost data"
+        in_stock_value_note = (
+            "On-hand items recorded but unit costs unavailable in inventory table. "
+            "Estimated value from PO price history not yet implemented."
+        )
+        in_stock_value_tone = "watch"
+    else:
+        in_stock_value_display = _currency(raw_value)
+        in_stock_value_note = None
+        in_stock_value_tone = "neutral"
+
     return {
         "title": "Spare Parts Summary",
         "metrics": [
             _metric("In-Stock Spare Parts", spare.get("current_in_stock_items")),
-            _metric("In-Stock Value", spare.get("current_in_stock_value"), display=_currency(spare.get("current_in_stock_value"))),
-            _metric("Drawn from Store", spare.get("drawn_from_store_value"), display=_currency(spare.get("drawn_from_store_value"))),
-            _metric("Non-Stock Value", spare.get("non_stock_value"), display=_currency(spare.get("non_stock_value"))),
-            _metric("Services Value", spare.get("services_value"), display=_currency(spare.get("services_value"))),
-            _metric("Top Consumed Part", top_part, note=_currency(spare.get("top_consumed_part_value")) if top_part else None),
-            _metric("YoY Consumption", yoy, display=_percent(yoy), tone=_consumption_change_tone(yoy)),
+            _metric("In-Stock Value", raw_value,
+                    display=in_stock_value_display,
+                    tone=in_stock_value_tone,
+                    note=in_stock_value_note),
+            _metric("Drawn from Store", spare.get("drawn_from_store_value"),
+                    display=_currency(spare.get("drawn_from_store_value"))),
+            _metric("Non-Stock Purchase", spare.get("non_stock_value"),
+                    display=_currency(spare.get("non_stock_value"))),
+            _metric("Services / Repair", spare.get("services_value"),
+                    display=_currency(spare.get("services_value"))),
+            _metric("Top Consumed Part", top_part,
+                    note=_currency(spare.get("top_consumed_part_value")) if top_part else None),
+            _metric("YoY Consumption", yoy, display=_percent(yoy),
+                    tone=_consumption_change_tone(yoy)),
         ],
         "summary": (
-            f"{period} spare-parts activity shows {_display_value(spare.get('current_in_stock_items'))} current in-stock items valued at "
-            f"{_currency(spare.get('current_in_stock_value'))}. Drawn-from-store value was {_currency(spare.get('drawn_from_store_value'))}, "
-            f"with non-stock at {_currency(spare.get('non_stock_value'))} and services at {_currency(spare.get('services_value'))}."
+            f"{_display_value(in_stock_items)} in-stock items. "
+            f"Drawn-from-store: {_currency(spare.get('drawn_from_store_value'))}. "
+            f"Non-stock: {_currency(spare.get('non_stock_value'))}. "
+            f"Services: {_currency(spare.get('services_value'))}."
         ),
-        "footnote": spare.get("services_note") or "Services include repair and cleaning.",
-        "visuals": [
-            {
-                "type": "value_segments",
-                "label": "Spare Parts Value Mix",
-                "items": [
-                    {"label": "Drawn from Store", "value": spare.get("drawn_from_store_value") or 0, "tone": "good", "display": _currency(spare.get("drawn_from_store_value"))},
-                    {"label": "Non-Stock", "value": spare.get("non_stock_value") or 0, "tone": "watch", "display": _currency(spare.get("non_stock_value"))},
-                    {"label": "Services", "value": spare.get("services_value") or 0, "tone": "neutral", "display": _currency(spare.get("services_value"))},
-                ],
-            }
-        ],
+        "footnote": spare.get("services_note") or "Services include repair and cleaning. Non-Stock = direct purchases not held in store.",
     }
 
 
 def _build_management_kpi_cards(data: dict) -> list[dict]:
+    """Four headline KPI cards shown at the top of the executive summary."""
     work_orders = data.get("work_orders") or {}
     downtime = data.get("downtime_summary") or {}
-    opening_backlog = downtime.get("opening_backlog_count")
-    total_with_backlog = downtime.get("total_active_workload", downtime.get("total_with_backlog_count"))
-    cards = [
-        _kpi_card(
-            "MR Raised",
-            work_orders.get("total"),
-            "Raised in the selected period",
-            "neutral",
-        ),
-        _kpi_card(
-            "Open / In Progress",
-            work_orders.get("open"),
-            "Outstanding in selected period",
-            _reverse_ratio_tone(work_orders.get("open"), good=0, watch=10),
-        ),
-        _kpi_card(
-            "Closed / Confirmed",
-            work_orders.get("closed"),
-            "Closed in selected period",
-            "good",
-        ),
-        _kpi_card(
-            "Closure Rate",
-            downtime.get("closure_rate_pct"),
-            "Closed / Confirmed divided by MR Raised",
-            _ratio_tone(downtime.get("closure_rate_pct"), good=85, watch=70),
-            display=_percent(downtime.get("closure_rate_pct")),
-        ),
-        _kpi_card(
-            "Carry-over Open MR",
-            opening_backlog,
-            "Raised before the selected period and still open",
-            _reverse_ratio_tone(opening_backlog, good=0, watch=25),
-        ),
-        _kpi_card(
-            "Total Active Workload",
-            total_with_backlog,
-            "Selected MR plus carry-over open MR",
-            _reverse_ratio_tone(total_with_backlog, good=0, watch=250),
-        ),
+    opening_backlog = downtime.get("carry_over_open_mr", downtime.get("opening_backlog_count"))
+    return [
+        _kpi_card("MR Raised", work_orders.get("total"),
+                  "Raised in the selected period", "neutral"),
+        _kpi_card("Open / In Progress", work_orders.get("open"),
+                  "Outstanding maintenance",
+                  _reverse_ratio_tone(work_orders.get("open"), good=0, watch=10)),
+        _kpi_card("Carry-over Open MR", opening_backlog,
+                  "From before the period — still unresolved",
+                  _reverse_ratio_tone(opening_backlog, good=0, watch=25)),
+        _kpi_card("Closure Rate", downtime.get("closure_rate_pct"),
+                  "Closed / Confirmed ÷ MR Raised",
+                  _ratio_tone(downtime.get("closure_rate_pct"), good=85, watch=70),
+                  display=_percent(downtime.get("closure_rate_pct"))),
     ]
-    return cards
+
+
+def _build_action_items(data: dict) -> list[dict]:
+    """Structured action items for the management overview action table."""
+    work_orders = data.get("work_orders") or {}
+    pm = data.get("pm_schedule") or {}
+    downtime = data.get("downtime_summary") or {}
+    items = []
+
+    open_count = work_orders.get("open") or 0
+    if open_count > 0:
+        items.append({
+            "priority": "High",
+            "action": f"Review {_display_value(open_count)} open / in-progress MR",
+            "reason": "Outstanding maintenance not yet closed",
+        })
+
+    overdue_pm = pm.get("overdue") or 0
+    if overdue_pm > 0:
+        items.append({
+            "priority": "High",
+            "action": f"Action {_display_value(overdue_pm)} overdue PM tasks",
+            "reason": f"PM compliance at {_percent(pm.get('compliance_pct'))}",
+        })
+
+    missing_asset = downtime.get("missing_asset_count") or 0
+    if missing_asset > 0:
+        items.append({
+            "priority": "Medium",
+            "action": f"Correct {_display_value(missing_asset)} MR records missing Asset ID",
+            "reason": "Required for reliable asset-level reporting",
+        })
+
+    completed = pm.get("completed") or 0
+    scheduled = pm.get("total_scheduled") or 0
+    if completed == 0 and scheduled > 0:
+        items.append({
+            "priority": "Medium",
+            "action": "Validate PM completion records",
+            "reason": "0 completed may indicate missing records, not confirmed non-compliance",
+        })
+
+    carry_over = downtime.get("carry_over_open_mr", downtime.get("opening_backlog_count")) or 0
+    if carry_over > 0:
+        items.append({
+            "priority": "Medium",
+            "action": f"Review {_display_value(carry_over)} carry-over open MR",
+            "reason": "Raised before selected period and still unresolved",
+        })
+
+    general_area = downtime.get("general_area_asset_count") or 0
+    if general_area > 0:
+        items.append({
+            "priority": "Low",
+            "action": f"Update {_display_value(general_area)} MR with general-area asset tags",
+            "reason": "General area entries reduce asset-level traceability",
+        })
+
+    return items[:6]
 
 
 def _build_priority_follow_up(data: dict) -> list[str]:

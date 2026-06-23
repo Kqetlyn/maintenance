@@ -1728,30 +1728,14 @@ def overview():
     """
     raw = _read_filters()
     filters = ctx.normalize_filters(raw)
-    # On the first load(s) after a restart the source workbooks are still being
-    # parsed by the background warm-up. Blocking on that cold build would blow past
-    # the frontend fetch timeout and surface as "backend unreachable". When the
-    # payloads are not warm yet, return a fast placeholder and kick the warm-up so
-    # the next (auto-retried) request gets the real verified KPIs.
-    # Gate the page only on PM + downtime (the fast payloads). Spare parts builds
-    # separately (slow all-years parse) and is included only once IT is warm, so a
-    # cold spare build never holds back the rest of the page.
-    payloads_warm = _core_payloads_warm()
-    spare_warm = _spare_warm()
-    include_spare = payloads_warm and spare_warm
     data, load_warnings, cache_hit = _get_dashboard_summary(
         filters,
-        include_spare_parts=include_spare,
-        allow_blocking_build=payloads_warm,
-        start_warmup=True,
+        include_spare_parts=True,
+        allow_blocking_build=True,
+        start_warmup=False,
     )
-    warming = (not cache_hit) and (not payloads_warm)
-    # Spare is still building — tell the frontend to show the spare card as "still
-    # loading". We do NOT eagerly kick the spare warm-up here: its CPU-bound build
-    # holds the GIL and would re-starve the web server right after PM + downtime
-    # became responsive. Spare warms lazily on the first Spare-Parts request (or
-    # when MIRA_WARM_SPARE=1 enables the startup warmer).
-    spare_warming = payloads_warm and not spare_warm
+    warming = False
+    spare_warming = False
     status = _fast_provider_status("Verified KPI cards loaded. AI wording loads separately.")
     pres = presentation.build_presentation(
         "monthly_summary", data, filters, provider_name="mira",
@@ -1767,19 +1751,14 @@ def overview():
         "rolling7DayMrCount": None,
         "descriptionsIncluded": None,
     }
-    # The debug snapshot reads/filters the full WO dataset (a cold parse on first
-    # load). Skip it while warming so the placeholder returns fast and never trips
-    # the frontend fetch timeout; it is logging-only and the real load runs the
-    # snapshot on the next (warm) request.
-    if not warming:
-        try:
-            _filtered_rows, _selected_rows, _recent_context, debug = _collect_mira_debug_snapshot(filters)
-        except Exception as exc:
-            snapshot_warning = f"MIRA overview debug snapshot failed: {exc}"
-            load_warnings = _unique_strings(load_warnings + [snapshot_warning])
-            pres.setdefault("data_notes", []).extend([snapshot_warning])
-            pres.setdefault("view_data_used", {}).setdefault("data_warnings", []).extend([snapshot_warning])
-            debug["debugError"] = str(exc)
+    try:
+        _filtered_rows, _selected_rows, _recent_context, debug = _collect_mira_debug_snapshot(filters)
+    except Exception as exc:
+        snapshot_warning = f"MIRA overview debug snapshot failed: {exc}"
+        load_warnings = _unique_strings(load_warnings + [snapshot_warning])
+        pres.setdefault("data_notes", []).extend([snapshot_warning])
+        pres.setdefault("view_data_used", {}).setdefault("data_warnings", []).extend([snapshot_warning])
+        debug["debugError"] = str(exc)
     _log_mira_event(
         "overview",
         **debug,
@@ -1793,6 +1772,7 @@ def overview():
     availability = data.get("data_availability") or {"complete": not warming, "warnings": load_warnings}
     if warming:
         availability = {**availability, "complete": False, "warming": True}
+    freshness = data.get("data_freshness") or {}
     return jsonify({
         "ok": True,
         "filters": filters,
@@ -1804,6 +1784,10 @@ def overview():
         "warming": warming,
         "spare_warming": spare_warming,
         "data_availability": availability,
+        "last_updated": freshness.get("last_updated") or data.get("last_updated"),
+        "latest_import_time": freshness.get("latest_import_time") or data.get("latest_import_time"),
+        "source_files_used": freshness.get("source_files_used") or data.get("source_files_used") or [],
+        "data_freshness": freshness,
         "draft_label": config.DRAFT_LABEL,
     })
 
@@ -1888,6 +1872,7 @@ def ai_summary():
         fallbackReason=fallback_reason,
     )
     guarded = guard.guard_summary(data, mode="kpi_summary")
+    freshness = data.get("data_freshness") or {}
     return jsonify({
         "ok": True,
         "filters": filters,
@@ -1898,6 +1883,10 @@ def ai_summary():
         "provider_status": status["status"],
         "llm_active": structured.get("provider") == "ollama",
         "llm_model": structured.get("model"),
+        "last_updated": freshness.get("last_updated") or data.get("last_updated"),
+        "latest_import_time": freshness.get("latest_import_time") or data.get("latest_import_time"),
+        "source_files_used": freshness.get("source_files_used") or data.get("source_files_used") or [],
+        "data_freshness": freshness,
         "backend_version": MIRA_BACKEND_VERSION,
         "cache_hit": cache_hit,
         "fallback_active": structured.get("provider") != "ollama",
@@ -2222,6 +2211,24 @@ def mr_triage_verdict():
     resp = jsonify(verdict)
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+@mira_bp.route("/predictive", methods=["GET", "POST"])
+def predictive_insights():
+    """Predictive Maintenance Insights — Cards 1–4 + escalation data.
+
+    Reads from already-memoised dashboard builders. Deterministic ranking;
+    Ollama is classification-only (fault family tagging) with keyword fallback.
+    """
+    from .services import predictive_service as ps
+    raw = _read_filters()
+    filters = ctx.normalize_filters(raw)
+    try:
+        data = ps.build_predictive_insights(filters)
+        return jsonify({"ok": True, "filters": filters, "data": data,
+                        "draft_label": config.DRAFT_LABEL})
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "filters": filters}), 500
 
 
 @mira_bp.route("/verdict/run", methods=["POST"])

@@ -4,6 +4,8 @@ backend/db.py — SQLite database layer for the Maintenance Dashboard.
 Phase 1: asset_master table.
 Phase 2: work_orders + import_log tables.
 Phase 3: load_work_orders_from_sql() — fast SQL-backed loader for the Downtime page.
+Phase 4: pm_schedule table + upsert/load helpers for the PM Schedule page.
+Phase 5: spare_parts table + upsert/load helpers for the Spare Parts page.
 """
 
 from __future__ import annotations
@@ -85,6 +87,10 @@ CREATE TABLE IF NOT EXISTS asset_master (
 CREATE INDEX IF NOT EXISTS idx_am_stage         ON asset_master (stage);
 CREATE INDEX IF NOT EXISTS idx_am_category      ON asset_master (category);
 CREATE INDEX IF NOT EXISTS idx_am_criticality   ON asset_master (criticality);
+CREATE INDEX IF NOT EXISTS idx_am_asset_name    ON asset_master (asset_name);
+CREATE INDEX IF NOT EXISTS idx_am_function_loc  ON asset_master (functional_location);
+CREATE INDEX IF NOT EXISTS idx_am_machine_group ON asset_master (machine_group);
+CREATE INDEX IF NOT EXISTS idx_am_source_file   ON asset_master (source_file);
 
 -- Phase 2: Work Orders (MR / WO from D365 exports)
 -- mr_number + wo_number form the natural composite key.
@@ -117,6 +123,14 @@ CREATE INDEX IF NOT EXISTS idx_wo_stage        ON work_orders (stage);
 CREATE INDEX IF NOT EXISTS idx_wo_asset_id     ON work_orders (asset_id);
 CREATE INDEX IF NOT EXISTS idx_wo_status       ON work_orders (status);
 CREATE INDEX IF NOT EXISTS idx_wo_created_date ON work_orders (created_date);
+CREATE INDEX IF NOT EXISTS idx_wo_asset_name   ON work_orders (asset_name);
+CREATE INDEX IF NOT EXISTS idx_wo_function_loc ON work_orders (functional_location);
+CREATE INDEX IF NOT EXISTS idx_wo_machine_group ON work_orders (machine_group);
+CREATE INDEX IF NOT EXISTS idx_wo_actual_start ON work_orders (actual_start);
+CREATE INDEX IF NOT EXISTS idx_wo_actual_end   ON work_orders (actual_end);
+CREATE INDEX IF NOT EXISTS idx_wo_severity     ON work_orders (severity);
+CREATE INDEX IF NOT EXISTS idx_wo_source_file  ON work_orders (source_file);
+CREATE INDEX IF NOT EXISTS idx_wo_stage_created ON work_orders (stage, created_date);
 
 -- Import audit log — one row per file import event.
 CREATE TABLE IF NOT EXISTS import_log (
@@ -129,6 +143,95 @@ CREATE TABLE IF NOT EXISTS import_log (
     invalid_count INTEGER,
     notes         TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_import_source_type ON import_log (source_type);
+CREATE INDEX IF NOT EXISTS idx_import_imported_at ON import_log (imported_at);
+CREATE INDEX IF NOT EXISTS idx_import_source_file ON import_log (source_file);
+
+-- Phase 4: PM Schedule tasks from all sources (utility_stage1, equipment_stage1,
+-- feed_production, feed_utility). Stores the stable, non-date-relative fields from
+-- _normalize_occurrence() so the PM page can reconstruct task dicts without reading
+-- Excel. Date-sensitive booleans (isDone, isOverdue, etc.) are re-derived daily.
+-- pm_task_id encodes source + asset + date so it is stable across imports.
+CREATE TABLE IF NOT EXISTS pm_schedule (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    pm_task_id        TEXT    NOT NULL,
+    asset_id          TEXT,
+    asset_name        TEXT,
+    stage             TEXT,
+    main_asset_group  TEXT,
+    sub_asset_group   TEXT,
+    system_area       TEXT,
+    location          TEXT,
+    pm_description    TEXT,
+    frequency         TEXT,
+    planned_year      INTEGER,
+    planned_month     INTEGER,
+    planned_date      TEXT,
+    planned_date_label TEXT,
+    contractor_pic    TEXT,
+    source_file       TEXT,
+    source_slot       TEXT,
+    source_label      TEXT,
+    source_sheet      TEXT,
+    mapping_status    TEXT,
+    domain            TEXT,
+    scope             TEXT,
+    updated_at        TEXT,
+    UNIQUE(pm_task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_pm_stage        ON pm_schedule (stage);
+CREATE INDEX IF NOT EXISTS idx_pm_source_slot  ON pm_schedule (source_slot);
+CREATE INDEX IF NOT EXISTS idx_pm_planned_year ON pm_schedule (planned_year);
+CREATE INDEX IF NOT EXISTS idx_pm_planned_date ON pm_schedule (planned_date);
+CREATE INDEX IF NOT EXISTS idx_pm_asset_id     ON pm_schedule (asset_id);
+CREATE INDEX IF NOT EXISTS idx_pm_asset_name   ON pm_schedule (asset_name);
+CREATE INDEX IF NOT EXISTS idx_pm_main_group   ON pm_schedule (main_asset_group);
+CREATE INDEX IF NOT EXISTS idx_pm_location     ON pm_schedule (location);
+CREATE INDEX IF NOT EXISTS idx_pm_source_file  ON pm_schedule (source_file);
+CREATE INDEX IF NOT EXISTS idx_pm_mapping_status ON pm_schedule (mapping_status);
+CREATE INDEX IF NOT EXISTS idx_pm_stage_date   ON pm_schedule (stage, planned_date);
+
+-- Phase 5: Spare Parts records (inventory, PO, movement).
+-- One row per source record; transaction_type distinguishes the source table
+-- ('inventory' | 'gen_po' | 'stage_po' | 'movement').
+-- Stores enough pre-computed fields to reconstruct the full payload without
+-- re-reading Excel.  No natural unique key — delete-then-insert per type.
+CREATE TABLE IF NOT EXISTS spare_parts (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_number      TEXT,
+    item_name        TEXT,
+    asset_id         TEXT,
+    asset_name       TEXT,
+    stage            TEXT,
+    category         TEXT,
+    transaction_type TEXT,
+    quantity         REAL,
+    unit_price       REAL,
+    total_value      REAL,
+    supplier         TEXT,
+    po_number        TEXT,
+    pr_number        TEXT,
+    transaction_date TEXT,
+    source_file      TEXT,
+    classification   TEXT,
+    min_stock        REAL,
+    max_stock        REAL,
+    unit             TEXT,
+    location         TEXT,
+    needs_review     INTEGER DEFAULT 0,
+    extra_json       TEXT,
+    updated_at       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sp_stage            ON spare_parts (stage);
+CREATE INDEX IF NOT EXISTS idx_sp_transaction_type ON spare_parts (transaction_type);
+CREATE INDEX IF NOT EXISTS idx_sp_item_number      ON spare_parts (item_number);
+CREATE INDEX IF NOT EXISTS idx_sp_transaction_date ON spare_parts (transaction_date);
+CREATE INDEX IF NOT EXISTS idx_sp_asset_id         ON spare_parts (asset_id);
+CREATE INDEX IF NOT EXISTS idx_sp_asset_name       ON spare_parts (asset_name);
+CREATE INDEX IF NOT EXISTS idx_sp_category         ON spare_parts (category);
+CREATE INDEX IF NOT EXISTS idx_sp_source_file      ON spare_parts (source_file);
+CREATE INDEX IF NOT EXISTS idx_sp_type_date        ON spare_parts (transaction_type, transaction_date);
+CREATE INDEX IF NOT EXISTS idx_sp_stage_type_date  ON spare_parts (stage, transaction_type, transaction_date);
 """
 
 
@@ -142,6 +245,11 @@ def init_db() -> str:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         with get_connection() as conn:
             conn.executescript(_SCHEMA_SQL)
+            # Phase 5b: add extra_json column to existing spare_parts tables.
+            try:
+                conn.execute("ALTER TABLE spare_parts ADD COLUMN extra_json TEXT")
+            except Exception:
+                pass  # column already exists — safe to ignore
     return str(DB_PATH)
 
 
@@ -277,6 +385,57 @@ def query_asset_master(
     return [dict(r) for r in rows]
 
 
+def get_asset_master_sync_meta() -> dict:
+    """Lightweight asset-master metadata read from SQL only."""
+    try:
+        with get_connection() as conn:
+            summary = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS asset_count,
+                    MAX(updated_at) AS last_synced,
+                    COUNT(DISTINCT machine_group) AS group_count
+                FROM asset_master
+                """
+            ).fetchone()
+            latest_source = conn.execute(
+                """
+                SELECT source_file
+                FROM asset_master
+                WHERE source_file IS NOT NULL AND TRIM(source_file) <> ''
+                ORDER BY updated_at DESC, id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        asset_count = int(summary["asset_count"] or 0)
+        source_file = latest_source["source_file"] if latest_source else None
+        return {
+            "available": asset_count > 0,
+            "path": source_file,
+            "last_synced": summary["last_synced"],
+            "asset_count": asset_count,
+            "keyword_rule_count": None,
+            "group_count": int(summary["group_count"] or 0),
+            "message": (
+                f"Loaded {asset_count} asset(s) from SQL asset_master."
+                if asset_count > 0
+                else "Asset master SQL table is empty."
+            ),
+            "data_source": "sql",
+        }
+    except Exception as exc:
+        return {
+            "available": False,
+            "path": None,
+            "last_synced": None,
+            "asset_count": 0,
+            "keyword_rule_count": None,
+            "group_count": 0,
+            "message": f"Asset master SQL metadata unavailable: {exc}",
+            "data_source": "sql",
+        }
+
+
 def get_db_status() -> dict:
     try:
         with get_connection() as conn:
@@ -284,6 +443,10 @@ def get_db_status() -> dict:
             am_updated = conn.execute("SELECT MAX(updated_at) FROM asset_master").fetchone()[0]
             wo_count   = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
             wo_updated = conn.execute("SELECT MAX(updated_at) FROM work_orders").fetchone()[0]
+            pm_count   = conn.execute("SELECT COUNT(*) FROM pm_schedule").fetchone()[0]
+            pm_updated = conn.execute("SELECT MAX(updated_at) FROM pm_schedule").fetchone()[0]
+            sp_count   = conn.execute("SELECT COUNT(*) FROM spare_parts").fetchone()[0]
+            sp_updated = conn.execute("SELECT MAX(updated_at) FROM spare_parts").fetchone()[0]
         return {
             "ok": True,
             "db_path": str(DB_PATH),
@@ -291,9 +454,106 @@ def get_db_status() -> dict:
             "asset_master_last_updated": am_updated,
             "work_orders_rows": wo_count,
             "work_orders_last_updated": wo_updated,
+            "pm_schedule_rows": pm_count,
+            "pm_schedule_last_updated": pm_updated,
+            "spare_parts_rows": sp_count,
+            "spare_parts_last_updated": sp_updated,
         }
     except Exception as exc:
         return {"ok": False, "db_path": str(DB_PATH), "error": str(exc)}
+
+
+def get_overview_freshness() -> dict:
+    """Combined SQL freshness snapshot for Overview / MIRA responses."""
+    try:
+        with get_connection() as conn:
+            counts = conn.execute(
+                """
+                SELECT
+                    (SELECT COUNT(*) FROM asset_master) AS asset_master_rows,
+                    (SELECT MAX(updated_at) FROM asset_master) AS asset_master_last_updated,
+                    (SELECT COUNT(*) FROM work_orders) AS work_orders_rows,
+                    (SELECT MAX(updated_at) FROM work_orders) AS work_orders_last_updated,
+                    (SELECT COUNT(*) FROM pm_schedule) AS pm_schedule_rows,
+                    (SELECT MAX(updated_at) FROM pm_schedule) AS pm_schedule_last_updated,
+                    (SELECT COUNT(*) FROM spare_parts) AS spare_parts_rows,
+                    (SELECT MAX(updated_at) FROM spare_parts) AS spare_parts_last_updated
+                """
+            ).fetchone()
+            latest_rows = conn.execute(
+                """
+                SELECT source_type, source_file, imported_at, row_count, valid_count, invalid_count, notes
+                FROM import_log
+                WHERE id IN (
+                    SELECT MAX(id)
+                    FROM import_log
+                    GROUP BY source_type
+                )
+                ORDER BY source_type ASC, id ASC
+                """
+            ).fetchall()
+
+        source_files_used = [
+            {
+                "source_type": row["source_type"],
+                "source_file": row["source_file"],
+                "imported_at": row["imported_at"],
+                "row_count": row["row_count"],
+                "valid_count": row["valid_count"],
+                "invalid_count": row["invalid_count"],
+                "notes": row["notes"],
+            }
+            for row in latest_rows
+        ]
+        latest_import_time = max(
+            (row["imported_at"] for row in latest_rows if row["imported_at"]),
+            default=None,
+        )
+        table_last_updated = {
+            "asset_master": counts["asset_master_last_updated"],
+            "work_orders": counts["work_orders_last_updated"],
+            "pm_schedule": counts["pm_schedule_last_updated"],
+            "spare_parts": counts["spare_parts_last_updated"],
+        }
+        last_updated = max(
+            [stamp for stamp in (*table_last_updated.values(), latest_import_time) if stamp],
+            default=None,
+        )
+        return {
+            "ok": True,
+            "db_path": str(DB_PATH),
+            "last_updated": last_updated,
+            "latest_import_time": latest_import_time,
+            "source_files_used": source_files_used,
+            "tables": {
+                "asset_master": {
+                    "rows": int(counts["asset_master_rows"] or 0),
+                    "last_updated": counts["asset_master_last_updated"],
+                },
+                "work_orders": {
+                    "rows": int(counts["work_orders_rows"] or 0),
+                    "last_updated": counts["work_orders_last_updated"],
+                },
+                "pm_schedule": {
+                    "rows": int(counts["pm_schedule_rows"] or 0),
+                    "last_updated": counts["pm_schedule_last_updated"],
+                },
+                "spare_parts": {
+                    "rows": int(counts["spare_parts_rows"] or 0),
+                    "last_updated": counts["spare_parts_last_updated"],
+                },
+            },
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "db_path": str(DB_PATH),
+            "last_updated": None,
+            "latest_import_time": None,
+            "source_files_used": [],
+            "tables": {},
+            "error": str(exc),
+        }
 
 
 # ── Work Orders sync ──────────────────────────────────────────────────────────
@@ -453,4 +713,250 @@ def load_work_orders_from_sql(stage: str | None = None) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(sql, params).fetchall()
 
+    return [dict(r) for r in rows]
+
+
+# ── Phase 4: SQL-backed loader for the PM Schedule page ──────────────────────
+
+def upsert_pm_schedule(tasks: list[dict]) -> dict:
+    """
+    Bulk-upsert PM schedule task dicts (as produced by pm_schedule_service
+    _normalize_occurrence / pm_feed_integration.build_feed_tasks_internal) into
+    the pm_schedule table.
+
+    Per-slot + per-year replace: existing rows for each (source_slot, planned_year)
+    pair present in the new tasks are deleted before inserting, so removed tasks
+    are not left as orphans.
+
+    Returns {"rows": int}.
+    """
+    if not tasks:
+        return {"rows": 0}
+
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    # Collect unique (source_slot, planned_year) pairs to delete before reinserting.
+    slot_year_pairs: set[tuple] = set()
+    for t in tasks:
+        slot = str(t.get("sourceSlot") or "").strip()
+        year = t.get("plannedYear")
+        if slot:
+            slot_year_pairs.add((slot, year))
+
+    rows_to_insert = []
+    for t in tasks:
+        pm_task_id = str(t.get("pmTaskId") or "").strip()
+        if not pm_task_id:
+            continue
+        rows_to_insert.append((
+            pm_task_id,
+            str(t.get("assetId") or "").strip() or None,
+            str(t.get("assetName") or "").strip() or None,
+            str(t.get("stage") or "").strip() or None,
+            str(t.get("mainAssetGroup") or "").strip() or None,
+            str(t.get("subAssetGroup") or "").strip() or None,
+            str(t.get("systemArea") or "").strip() or None,
+            str(t.get("location") or "").strip() or None,
+            str(t.get("pmDescription") or "").strip() or None,
+            str(t.get("frequency") or "").strip() or None,
+            t.get("plannedYear"),
+            t.get("plannedMonth"),
+            str(t.get("plannedDate") or "").strip() or None,
+            str(t.get("plannedDateLabel") or "").strip() or None,
+            str(t.get("contractorOrPIC") or "").strip() or None,
+            str(t.get("sourceFile") or "").strip() or None,
+            str(t.get("sourceSlot") or "").strip() or None,
+            str(t.get("sourceLabel") or "").strip() or None,
+            str(t.get("sourceSheet") or "").strip() or None,
+            str(t.get("mappingStatus") or "").strip() or None,
+            str(t.get("domain") or "").strip() or None,
+            str(t.get("scope") or "").strip() or None,
+            now,
+        ))
+
+    if not rows_to_insert:
+        return {"rows": 0}
+
+    upsert_sql = """
+        INSERT INTO pm_schedule
+            (pm_task_id, asset_id, asset_name, stage, main_asset_group, sub_asset_group,
+             system_area, location, pm_description, frequency,
+             planned_year, planned_month, planned_date, planned_date_label,
+             contractor_pic, source_file, source_slot, source_label, source_sheet,
+             mapping_status, domain, scope, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pm_task_id) DO UPDATE SET
+            asset_id          = excluded.asset_id,
+            asset_name        = excluded.asset_name,
+            stage             = excluded.stage,
+            main_asset_group  = excluded.main_asset_group,
+            sub_asset_group   = excluded.sub_asset_group,
+            system_area       = excluded.system_area,
+            location          = excluded.location,
+            pm_description    = excluded.pm_description,
+            frequency         = excluded.frequency,
+            planned_year      = excluded.planned_year,
+            planned_month     = excluded.planned_month,
+            planned_date      = excluded.planned_date,
+            planned_date_label = excluded.planned_date_label,
+            contractor_pic    = excluded.contractor_pic,
+            source_file       = excluded.source_file,
+            source_slot       = excluded.source_slot,
+            source_label      = excluded.source_label,
+            source_sheet      = excluded.source_sheet,
+            mapping_status    = excluded.mapping_status,
+            domain            = excluded.domain,
+            scope             = excluded.scope,
+            updated_at        = excluded.updated_at
+    """
+
+    with get_connection() as conn:
+        # Delete stale rows for each (source_slot, planned_year) pair before upserting.
+        for slot, year in slot_year_pairs:
+            if year is not None:
+                conn.execute(
+                    "DELETE FROM pm_schedule WHERE source_slot = ? AND planned_year = ?",
+                    (slot, year),
+                )
+            else:
+                conn.execute(
+                    "DELETE FROM pm_schedule WHERE source_slot = ? AND planned_year IS NULL",
+                    (slot,),
+                )
+        conn.executemany(upsert_sql, rows_to_insert)
+
+    return {"rows": len(rows_to_insert)}
+
+
+def load_pm_schedule_from_sql(stage: str | None = None, year: int | None = None) -> list[dict]:
+    """
+    Query pm_schedule with optional stage and year filters.
+    Returns a list of raw SQL dicts (not yet enriched with date-relative fields).
+
+    Caller converts rows via pm_schedule_service._sql_pm_row_to_task().
+    """
+    params: list = []
+    where_parts: list[str] = []
+
+    if stage in ("Stage 1", "Stage 2"):
+        where_parts.append("stage = ?")
+        params.append(stage)
+
+    if year is not None:
+        where_parts.append("planned_year = ?")
+        params.append(year)
+
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+
+    sql = f"""
+        SELECT pm_task_id, asset_id, asset_name, stage, main_asset_group, sub_asset_group,
+               system_area, location, pm_description, frequency,
+               planned_year, planned_month, planned_date, planned_date_label,
+               contractor_pic, source_file, source_slot, source_label, source_sheet,
+               mapping_status, domain, scope, updated_at
+        FROM pm_schedule
+        {where_sql}
+        ORDER BY planned_date ASC
+    """
+
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
+
+    return [dict(r) for r in rows]
+
+
+# ── Phase 5: SQL-backed loader for the Spare Parts page ──────────────────────
+
+def upsert_spare_parts(rows: list[dict]) -> dict:
+    """
+    Bulk-replace spare parts records.  For each unique transaction_type present
+    in rows, existing rows with that type are deleted before inserting.
+
+    Returns {"rows": int, "types": list[str]}.
+    """
+    if not rows:
+        return {"rows": 0, "types": []}
+
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    types_to_replace = {str(r.get("transaction_type") or "").strip() for r in rows if r.get("transaction_type")}
+
+    insert_rows = []
+    for r in rows:
+        insert_rows.append((
+            str(r.get("item_number") or "").strip() or None,
+            str(r.get("item_name") or "").strip() or None,
+            str(r.get("asset_id") or "").strip() or None,
+            str(r.get("asset_name") or "").strip() or None,
+            str(r.get("stage") or "").strip() or None,
+            str(r.get("category") or "").strip() or None,
+            str(r.get("transaction_type") or "").strip() or None,
+            r.get("quantity"),
+            r.get("unit_price"),
+            r.get("total_value"),
+            str(r.get("supplier") or "").strip() or None,
+            str(r.get("po_number") or "").strip() or None,
+            str(r.get("pr_number") or "").strip() or None,
+            str(r.get("transaction_date") or "").strip() or None,
+            str(r.get("source_file") or "").strip() or None,
+            str(r.get("classification") or "").strip() or None,
+            r.get("min_stock"),
+            r.get("max_stock"),
+            str(r.get("unit") or "").strip() or None,
+            str(r.get("location") or "").strip() or None,
+            1 if r.get("needs_review") else 0,
+            r.get("extra_json") or None,
+            now,
+        ))
+
+    insert_sql = """
+        INSERT INTO spare_parts
+            (item_number, item_name, asset_id, asset_name, stage, category,
+             transaction_type, quantity, unit_price, total_value,
+             supplier, po_number, pr_number, transaction_date, source_file,
+             classification, min_stock, max_stock, unit, location,
+             needs_review, extra_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    with get_connection() as conn:
+        for ttype in types_to_replace:
+            conn.execute("DELETE FROM spare_parts WHERE transaction_type = ?", (ttype,))
+        conn.executemany(insert_sql, insert_rows)
+
+    return {"rows": len(insert_rows), "types": sorted(types_to_replace)}
+
+
+def load_spare_parts_from_sql(
+    stage: str | None = None,
+    transaction_type: str | None = None,
+) -> list[dict]:
+    """
+    Query spare_parts with optional stage and transaction_type filters.
+    Returns a list of raw SQL dicts.
+
+    Caller converts rows via spare_parts_service._sql_to_inventory_record() etc.
+    """
+    params: list = []
+    where_parts: list[str] = []
+
+    if stage in ("Stage 1", "Stage 2"):
+        where_parts.append("stage = ?")
+        params.append(stage)
+    if transaction_type:
+        where_parts.append("transaction_type = ?")
+        params.append(transaction_type)
+
+    where_sql = ("WHERE " + " AND ".join(where_parts)) if where_parts else ""
+    sql = f"""
+        SELECT id, item_number, item_name, asset_id, asset_name, stage, category,
+               transaction_type, quantity, unit_price, total_value,
+               supplier, po_number, pr_number, transaction_date, source_file,
+               classification, min_stock, max_stock, unit, location,
+               needs_review, extra_json, updated_at
+        FROM spare_parts
+        {where_sql}
+        ORDER BY transaction_type, item_number
+    """
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]

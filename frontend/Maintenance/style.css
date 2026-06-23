@@ -4967,6 +4967,7 @@ th {
 .spm-muted { color: var(--text-muted, #94a3b8); font-size: 0.84rem; }
 .spm-note { color: var(--text-muted, #94a3b8); font-size: 0.78rem; margin-top: 12px; line-height: 1.45; }
 .spm-data-note { margin: 12px 0 0; padding: 11px 12px; border-left: 3px solid #f59e0b; border-radius: 8px; background: #fff7ed; color: #9a3412; font-size: 0.77rem; line-height: 1.5; }
+.spm-kpi-source { display: block; margin-top: 6px; color: #94a3b8; font-size: 0.68rem; line-height: 1.35; font-weight: 500; }
 .spm-skeleton { height: 120px; border-radius: 8px; background: linear-gradient(90deg,#f1f5f9 25%,#e2e8f0 50%,#f1f5f9 75%); background-size: 200% 100%; animation: spm-sh 1.4s ease infinite; }
 @keyframes spm-sh { to { background-position: -200% 0; } }
 
@@ -4978,10 +4979,25 @@ th {
 .spm-kpi-green { border-left: 3px solid #10b981; }
 .spm-kpi-amber { border-left: 3px solid #f59e0b; }
 
-.spm-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; margin-top: 16px; }
+.spm-chart-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; margin-top: 16px; }
+/* 3-column bar row sits flush below the trend chart */
+.spm-bars-row { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0; margin-top: 0; }
+.spm-bars-row .spm-chart-card { border-radius: 0; border-top: none; }
+.spm-bars-row .spm-chart-card:first-child { border-radius: 0 0 0 8px; }
+.spm-bars-row .spm-chart-card:last-child  { border-radius: 0 0 8px 0; }
+.spm-bars-row .spm-chart-card:not(:last-child) { border-right: none; }
 .spm-chart-card { border: 1px solid var(--border, #e2e8f0); border-radius: 8px; padding: 14px; background: var(--card, #fff); }
+/* Full-width trend card connects visually into the bar row below */
+.spm-grgi-full { margin-top: 16px; border-radius: 8px 8px 0 0; }
+.spm-chart-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.spm-chart-head .spm-chart-title { margin-bottom: 0; }
 .spm-chart-title { font-size: 0.78rem; font-weight: 700; color: #1e293b; margin-bottom: 10px; }
+.spm-view-btns { display: inline-flex; gap: 2px; background: #f1f5f9; border-radius: 6px; padding: 2px; }
+.spm-view-btn { background: none; border: none; border-radius: 4px; padding: 3px 10px; font-size: 0.72rem; font-weight: 600; color: #64748b; cursor: pointer; transition: background 0.15s, color 0.15s; }
+.spm-view-btn.active { background: #fff; color: #0f172a; box-shadow: 0 1px 3px rgba(15,23,42,0.10); }
+.spm-view-btn:hover:not(.active) { color: #334155; }
 .spm-chart-canvas-wrap { height: 220px; position: relative; }
+.spm-grgi-canvas-wrap { height: 300px; }
 
 .spm-barlist { display: flex; flex-direction: column; gap: 7px; }
 .spm-bar-row { display: grid; grid-template-columns: minmax(90px, 38%) 1fr auto; align-items: center; gap: 8px; font-size: 0.76rem; }
@@ -5012,6 +5028,122 @@ th {
 /* Procurement reconciliation colour tones */
 .spm-kpi-red { border-left: 3px solid #ef4444; }
 
+/* ── Spare Parts Overview redesign ──────────────────────────────────────────── */
+.spm-ov-panel { gap: 0; }
+
+/* Row 1: 5 KPI cards — slightly taller to allow inventory sub-values */
+.spm-ov-row-main {
+    grid-template-columns: repeat(5, minmax(148px, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+@media (max-width: 960px) { .spm-ov-row-main { grid-template-columns: repeat(3, minmax(140px, 1fr)); } }
+@media (max-width: 580px) { .spm-ov-row-main { grid-template-columns: 1fr 1fr; } }
+
+/* Row 2: 3 category KPI cards */
+.spm-ov-row-secondary {
+    grid-template-columns: repeat(3, minmax(160px, 1fr));
+    gap: 10px;
+    margin-bottom: 14px;
+}
+@media (max-width: 640px) { .spm-ov-row-secondary { grid-template-columns: 1fr; } }
+
+/* Inventory card sub-values */
+.spm-kpi-inventory { min-height: 0; }
+.spm-ov-inv-value {
+    font-size: 0.82rem;
+    font-weight: 700;
+    color: #0f766e;
+    margin-top: 3px;
+    line-height: 1.2;
+}
+.spm-ov-inv-breakdown {
+    font-size: 0.67rem;
+    color: #64748b;
+    margin-top: 3px;
+    line-height: 1.3;
+}
+
+/* Compact procurement reference strip */
+.spm-recon-strip {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 10px;
+    padding: 10px 14px;
+    margin-bottom: 10px;
+}
+.spm-recon-strip-head {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+.spm-recon-strip-title {
+    font-size: 0.72rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #0f766e;
+}
+.spm-recon-strip-note {
+    font-size: 0.67rem;
+    color: #94a3b8;
+}
+.spm-recon-strip-cells {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 16px;
+}
+.spm-recon-cell {
+    display: flex;
+    flex-direction: column;
+    min-width: 130px;
+}
+.spm-recon-cell-label {
+    font-size: 0.64rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: #64748b;
+    line-height: 1.2;
+}
+.spm-recon-cell-value {
+    font-size: 0.88rem;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.3;
+}
+.spm-recon-cell-ref .spm-recon-cell-value { color: #475569; font-size: 0.82rem; }
+.spm-recon-cell-good .spm-recon-cell-value { color: #059669; }
+.spm-recon-cell-warn .spm-recon-cell-value { color: #d97706; }
+.spm-recon-cell-bad  .spm-recon-cell-value { color: #dc2626; }
+
+/* Overview footer + data quality note */
+.spm-ov-footnote { margin: 6px 0 0; }
+.spm-ov-dq-note {
+    margin-top: 8px;
+    padding: 7px 12px;
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    border-left: 3px solid #f59e0b;
+    border-radius: 6px;
+    font-size: 0.73rem;
+    color: #78350f;
+    line-height: 1.5;
+}
+.spm-ov-dq-note strong { font-weight: 700; margin-right: 4px; }
+
+/* Spare Parts Mgmt KPI sub-text (reused in row 2) */
+.spm-kpi .spm-kpi-sub {
+    display: block;
+    margin-top: 4px;
+    font-size: 0.67rem;
+    color: #64748b;
+    font-weight: 500;
+    line-height: 1.3;
+}
+
 /* Procurement flow visual */
 .spm-flow-wrap { margin: 16px 0 4px; }
 .spm-flow-label { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em; color: #64748b; margin: 0 0 10px; }
@@ -5041,3 +5173,35 @@ th {
     .spm-table-head { align-items: stretch; flex-direction: column; }
     .spm-export-btn { width: 100%; justify-content: center; }
 }
+
+/* ── MIRA Alert Context Banner ───────────────────────────────────────────────── */
+.mira-alert-ctx-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.6rem 1rem;
+    margin: 0 0 1rem 0;
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    border-left: 4px solid #3b82f6;
+    border-radius: 6px;
+    font-size: 0.83rem;
+    color: #1e3a5f;
+    flex-wrap: wrap;
+}
+.mira-alert-ctx-banner.hidden { display: none; }
+.mira-alert-ctx-icon { font-size: 1rem; color: #3b82f6; flex-shrink: 0; }
+.mira-alert-ctx-text { flex: 1; min-width: 0; }
+.mira-alert-ctx-clear {
+    flex-shrink: 0;
+    padding: 0.25rem 0.7rem;
+    border: 1px solid #93c5fd;
+    border-radius: 4px;
+    background: #fff;
+    color: #1d4ed8;
+    font-size: 0.78rem;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.15s;
+}
+.mira-alert-ctx-clear:hover { background: #dbeafe; }

@@ -100,6 +100,28 @@ def _sql_has_work_orders() -> bool:
         return False
 
 
+def _sql_asset_mapping_meta() -> dict:
+    """Asset-mapping metadata from SQL so the SQL path never has to reopen Excel."""
+    fallback = {
+        "available": False,
+        "path": None,
+        "last_synced": None,
+        "asset_count": 0,
+        "keyword_rule_count": None,
+        "group_count": 0,
+        "message": "Asset master SQL metadata unavailable.",
+        "data_source": "sql",
+    }
+    try:
+        import db as _db
+        meta = _db.get_asset_master_sync_meta()
+        if isinstance(meta, dict):
+            return meta
+    except Exception as exc:
+        fallback["message"] = f"Asset master SQL metadata unavailable: {exc}"
+    return fallback
+
+
 def _parse_iso_simple(s) -> datetime | None:
     """Parse an ISO-8601 string from SQL to a naive datetime, or return None."""
     if not s:
@@ -697,6 +719,22 @@ def get_sla_header_key(raw_header):
 
 def copy_default_sla_targets():
     return [dict(target) for target in DEFAULT_SLA_TARGETS]
+
+
+def _default_sla_target_config():
+    return {
+        "available": False,
+        "source": f"{ASSET_MASTER_RELATIVE_PATH}:{SLA_TARGETS_SHEET}",
+        "message": (
+            f"Using built-in default SLA targets without reopening {ASSET_MASTER_FILENAME} "
+            "during SQL-backed overview loading."
+        ),
+        "targets": copy_default_sla_targets(),
+        "instructions": (
+            "Edit Response Target Hours and Completion Target Hours in the "
+            f"'{SLA_TARGETS_SHEET}' sheet to change these defaults."
+        ),
+    }
 
 
 def load_sla_target_config(data_dir=DATA_DIR):
@@ -1892,15 +1930,23 @@ def build_trend_series(events, start_dt, end_dt):
     return {"labels": labels, "downtime_hours": hours, "event_counts": counts}
 
 
-def build_cache_signature(period, month_filter=None, start_filter=None, end_filter=None, work_orders_only=False, stage_filter=None):
-    signatures = [DOWNTIME_CACHE_VERSION, period, month_filter, start_filter, end_filter, normalize_stage_filter(stage_filter)]
+def build_cache_signature(period, month_filter=None, start_filter=None, end_filter=None, work_orders_only=False, stage_filter=None, allow_excel_fallback=True):
+    signatures = [
+        DOWNTIME_CACHE_VERSION,
+        period,
+        month_filter,
+        start_filter,
+        end_filter,
+        normalize_stage_filter(stage_filter),
+        bool(allow_excel_fallback),
+    ]
     signatures.append(get_path_signature(get_asset_master_path(DATA_DIR)))
     for source_path in get_work_order_source_paths():
         signatures.append((source_path, get_path_signature(source_path)))
     return tuple(signatures)
 
 
-def build_downtime_payload(period=None, month=None, start=None, end=None, work_orders_only=False, stage=None):
+def build_downtime_payload(period=None, month=None, start=None, end=None, work_orders_only=False, stage=None, allow_excel_fallback=True):
     normalized_period = normalize_period(period)
     normalized_month = normalize_month_filter(month)
     normalized_stage = normalize_stage_filter(stage)
@@ -1908,21 +1954,39 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
     custom_end = normalize_date_filter(end)
     custom_start_key = custom_start.strftime("%Y-%m-%d") if custom_start else None
     custom_end_key = custom_end.strftime("%Y-%m-%d") if custom_end else None
-    cache_signature = build_cache_signature(normalized_period, normalized_month, custom_start_key, custom_end_key, work_orders_only, normalized_stage)
+    cache_signature = build_cache_signature(
+        normalized_period,
+        normalized_month,
+        custom_start_key,
+        custom_end_key,
+        work_orders_only,
+        normalized_stage,
+        allow_excel_fallback,
+    )
     cached = _DOWNTIME_CACHE.get(cache_signature)
     if cached is not None:
         return cached
 
-    # Phase 3: prefer SQL over re-reading Excel. Fall back to Excel if SQL is empty.
+    sql_mapping_meta = _sql_asset_mapping_meta()
+
+    # Phase 3: prefer SQL over re-reading Excel. Fall back to Excel only when allowed.
     if _sql_has_work_orders():
         work_order_payload = load_work_order_downtime_sql(normalized_stage)
         work_order_events = list(work_order_payload.get("records") or [])
-    else:
+    elif allow_excel_fallback:
         work_order_payload = load_work_order_downtime()
         work_order_events = filter_work_orders_by_stage(
             work_order_payload.get("records") or [], normalized_stage
         )
-    sla_target_config = load_sla_target_config(DATA_DIR)
+    else:
+        work_order_payload = {
+            "available": False,
+            "records": [],
+            "message": "No work order SQL data found for SQL-only overview loading.",
+            "last_synced": None,
+        }
+        work_order_events = []
+    sla_target_config = load_sla_target_config(DATA_DIR) if allow_excel_fallback else _default_sla_target_config()
     latest_timestamps = []
     if work_order_payload.get("last_synced"):
         latest_timestamps.append(pd.Timestamp(work_order_payload["last_synced"]))
@@ -1992,7 +2056,7 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
                 "work_orders": [],
                 "filters": {"criticalities": [], "machine_groups": [], "locations": [], "asset_ids": [], "statuses": []},
                 "alerts": [],
-                "mapping_meta": get_grouped_machine_mapping_meta(DATA_DIR),
+                "mapping_meta": sql_mapping_meta if not allow_excel_fallback else get_grouped_machine_mapping_meta(DATA_DIR),
             },
         }
         _DOWNTIME_CACHE[cache_signature] = payload
@@ -2075,6 +2139,7 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
         DATA_DIR,
         mtbf_records=selected_work_orders,
         historical_records=work_order_events,
+        mapping_meta=sql_mapping_meta if not allow_excel_fallback else None,
     )
 
     total_hours = round(sum(float(event.get("duration_hours") or 0) for event in selected_events), 3) if selected_events else 0.0

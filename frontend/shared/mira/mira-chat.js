@@ -423,15 +423,17 @@
 
         const header = el("div", "mira-msg-head");
         const headBadges = el("div", "mira-msg-meta");
+        // Period chip — always show
         if (payload.period_used || payload.period) {
             headBadges.append(badge(payload.period_used || ("Period used: " + payload.period), "soft"));
         }
-        if (payload.provider_mode_label) {
-            headBadges.append(badge(payload.provider_mode_label, "neutral"));
+        // Confidence chip — present only when backend supplies it
+        if (payload.confidence) {
+            const c = payload.confidence;
+            const tone = c.band === "High" ? "good" : c.band === "Med" ? "soft" : "neutral";
+            headBadges.append(badge(c.label || c.band, tone, "mira-confidence-chip"));
         }
-        if (payload.read_only) {
-            headBadges.append(badge("Read-only", "neutral"));
-        }
+        // provider_mode_label and read_only moved to "View details" expander below
         header.append(headBadges);
         bubble.append(header);
 
@@ -464,12 +466,55 @@
             bubble.append(listSection("Recommended Follow-Up", payload.recommended_follow_up));
         }
 
+        // "View details" expander: interpretation echo + provider/read-only tags
+        if (payload.interpretation || payload.provider_mode_label || payload.read_only) {
+            bubble.append(buildAnswerDetails(payload));
+        }
+
         if (payload.view_data_used) {
             bubble.append(buildDataUsed(payload.view_data_used));
         }
 
         row.append(avatar, bubble);
         return row;
+    }
+
+    function buildAnswerDetails(payload) {
+        const details = el("details", "mira-answer-details");
+        const summary = el("summary", null, "View details");
+        const body = el("div", "mira-answer-details-body");
+
+        const interp = payload.interpretation || {};
+        // Interpretation echo
+        if (interp.resolved_as) {
+            const r = el("div", "mira-detail-row");
+            r.append(el("span", "mira-detail-label", "Read as:"));
+            r.append(el("span", "mira-detail-value", interp.resolved_as));
+            body.append(r);
+        } else if (interp.text) {
+            const r = el("div", "mira-detail-row");
+            r.append(el("span", "mira-detail-label", "Interpreted as:"));
+            r.append(el("span", "mira-detail-value", interp.text));
+            body.append(r);
+        }
+
+        // Provider mode label
+        if (payload.provider_mode_label) {
+            const r = el("div", "mira-detail-row");
+            r.append(el("span", "mira-detail-label", "Source:"));
+            r.append(badge(payload.provider_mode_label, "neutral"));
+            body.append(r);
+        }
+
+        // Read-only tag
+        if (payload.read_only) {
+            const r = el("div", "mira-detail-row");
+            r.append(badge("Read-only", "neutral"));
+            body.append(r);
+        }
+
+        details.append(summary, body);
+        return details;
     }
 
     function buildThinkingMessage() {

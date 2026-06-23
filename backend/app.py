@@ -462,46 +462,47 @@ def _spare_filters():
         request.args.get("equipmentCategory") or request.args.get("category"),
         request.args.get("year"),
         request.args.get("month"),
+        request.args.get("financialView") or request.args.get("financial_view") or request.args.get("financial"),
     )
 
 
 @app.route("/api/spare-parts/overview")
 def spare_parts_overview():
-    stage, category, year, month = _spare_filters()
+    stage, category, year, month, financial_view = _spare_filters()
     import spare_parts_views as spv
     return _cached_json(
-        ("spare-overview", stage, category, year, month),
-        lambda: spv.build_overview(stage, category, year, month),
+        ("spare-overview", stage, category, year, month, financial_view),
+        lambda: spv.build_overview(stage, category, year, month, financial_view),
     )
 
 
 @app.route("/api/spare-parts/goods-received")
 def spare_parts_goods_received():
-    stage, category, year, month = _spare_filters()
+    stage, category, year, month, financial_view = _spare_filters()
     import spare_parts_views as spv
     return _cached_json(
-        ("spare-goods-received", stage, category, year, month),
-        lambda: spv.build_goods_received(stage, category, year, month),
+        ("spare-goods-received", stage, category, year, month, financial_view),
+        lambda: spv.build_goods_received(stage, category, year, month, financial_view),
     )
 
 
 @app.route("/api/spare-parts/goods-issued")
 def spare_parts_goods_issued():
-    stage, category, year, month = _spare_filters()
+    stage, category, year, month, financial_view = _spare_filters()
     import spare_parts_views as spv
     return _cached_json(
-        ("spare-goods-issued", stage, category, year, month),
+        ("spare-goods-issued", stage, category, year, month, financial_view),
         lambda: spv.build_goods_issued(stage, category, year, month),
     )
 
 
 @app.route("/api/spare-parts/item-vendor-analysis")
 def spare_parts_item_vendor_analysis():
-    stage, category, year, month = _spare_filters()
+    stage, category, year, month, financial_view = _spare_filters()
     import spare_parts_views as spv
     return _cached_json(
-        ("spare-item-vendor", stage, category, year, month),
-        lambda: spv.build_item_vendor_analysis(stage, category, year, month),
+        ("spare-item-vendor", stage, category, year, month, financial_view),
+        lambda: spv.build_item_vendor_analysis(stage, category, year, month, financial_view),
     )
 
 
@@ -579,11 +580,11 @@ def spare_parts_import_gen_po():
 
 @app.route("/api/spare-parts/procurement-reconciliation")
 def spare_parts_procurement_reconciliation():
-    stage, category, year, month = _spare_filters()
+    stage, category, year, month, financial_view = _spare_filters()
     import indirect_po_service as ipo
     return _cached_json(
-        ("spare-procurement-recon", stage, category, year, month),
-        lambda: ipo.build_procurement_reconciliation(stage, category, year, month),
+        ("spare-procurement-recon", stage, category, year, month, financial_view),
+        lambda: ipo.build_procurement_reconciliation(stage, category, year, month, financial_view),
     )
 
 
@@ -841,6 +842,27 @@ def _start_cache_warming():
             print(f"[db] Asset Master sync error: {exc}")
 
     _threading.Thread(target=_sync_asset_master, name="db-asset-sync", daemon=True).start()
+
+    # Phase 4: sync current-year PM tasks to SQL in background so the first page
+    # load of the day reads from SQL instead of re-parsing the heavy Excel files.
+    def _startup_pm_sync():
+        try:
+            from pm_schedule_service import _sync_pm_to_db_background
+            _sync_pm_to_db_background()
+        except Exception as exc:
+            print(f"[db] PM startup sync error: {exc}")
+
+    _threading.Thread(target=_startup_pm_sync, name="db-pm-sync", daemon=True).start()
+
+    # Phase 5: sync spare parts records to SQL in background.
+    def _startup_spare_sync():
+        try:
+            from spare_parts_service import request_spare_db_sync
+            request_spare_db_sync()
+        except Exception as exc:
+            print(f"[db] Spare parts startup sync error: {exc}")
+
+    _threading.Thread(target=_startup_spare_sync, name="db-spare-sync", daemon=True).start()
     # ── end SQLite init ───────────────────────────────────────────────────────
 
     _register_refresh(("downtime", None, None, None, None, False, None), build_downtime_payload)

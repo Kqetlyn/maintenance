@@ -673,6 +673,47 @@
     color: #94a3b8;
 }
 
+/* ── Answer details expander ─────────────────────────────────────────────── */
+.mira-answer-details {
+    margin-top: 10px;
+    border-top: 1px solid #eef3f8;
+    padding-top: 8px;
+}
+
+.mira-answer-details summary {
+    cursor: pointer;
+    color: #55667a;
+    font-size: 0.78rem;
+    font-weight: 800;
+    user-select: none;
+}
+
+.mira-answer-details-body {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 8px;
+}
+
+.mira-detail-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.mira-detail-label {
+    font-size: 0.74rem;
+    font-weight: 700;
+    color: #6c7b90;
+    flex-shrink: 0;
+}
+
+.mira-detail-value {
+    font-size: 0.75rem;
+    color: #334558;
+}
+
 .mira-chat-form {
     display: grid;
     grid-template-columns: 1fr auto;

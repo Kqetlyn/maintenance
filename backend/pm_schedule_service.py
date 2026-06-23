@@ -19,6 +19,7 @@ real planning-based number rather than "N/A".
 from __future__ import annotations
 
 import calendar
+import threading
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -77,6 +78,201 @@ _PM_METRICS_PAYLOAD_CACHE = {}
 # actually changes (source workbooks, the D365 feed, the master, or the
 # override/planner JSON stores) — not on every request.
 _PM_PAGE_PAYLOAD_CACHE = {}
+
+
+# ── Phase 4: SQL-backed PM data ───────────────────────────────────────────────
+
+def _sql_has_pm_schedule_for_year(year: int) -> bool:
+    """Return True if pm_schedule SQL table has at least one row for this year."""
+    try:
+        import db as _db
+        with _db.get_connection() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM pm_schedule WHERE planned_year = ?", (year,)
+            ).fetchone()[0]
+        return count > 0
+    except Exception:
+        return False
+
+
+def _sql_pm_row_to_task(row: dict, today: date) -> dict:
+    """Reconstruct a full pre-override task dict from a SQL pm_schedule row.
+
+    Date-sensitive booleans (isDone, isOverdue, etc.) are re-derived from
+    planned_date so they stay correct regardless of when the row was synced.
+    apply_overrides_and_autodone() will further update them from the JSON store.
+    """
+    planned_date_str = row.get("planned_date")
+    mapping_status = row.get("mapping_status") or "Unmapped"
+    main_group = row.get("main_asset_group") or "Unmapped"
+    frequency = row.get("frequency") or ""
+    stage = row.get("stage") or ""
+    planned_month = row.get("planned_month")
+
+    schedule_state = _derive_inferred_schedule_state({"scheduled_date": planned_date_str}, today)
+    is_done = schedule_state["is_done"]
+    is_due_this_month = schedule_state["is_due_this_month"]
+    is_due_soon = schedule_state["is_due_soon"]
+    is_overdue = schedule_state["is_overdue"]
+
+    if mapping_status in {"Missing Asset ID", "Unmapped"}:
+        schedule_status = STATUS_MISSING_MAPPING
+    elif not planned_date_str:
+        schedule_status = STATUS_MISSING_DATE
+    elif stage not in STAGE_VALUES:
+        schedule_status = STATUS_NEEDS_REVIEW
+    elif is_done:
+        schedule_status = STATUS_COMPLETED
+    elif is_due_this_month:
+        schedule_status = STATUS_DUE_THIS_MONTH
+    elif is_due_soon:
+        schedule_status = STATUS_DUE_SOON
+    elif is_overdue:
+        schedule_status = STATUS_OVERDUE
+    else:
+        schedule_status = STATUS_NOT_DUE
+
+    needs_review = (
+        schedule_status in {STATUS_NEEDS_REVIEW, STATUS_MISSING_DATE}
+        or stage not in STAGE_VALUES
+        or not main_group
+        or not frequency
+    )
+
+    return {
+        "pmTaskId": row.get("pm_task_id") or "",
+        "stage": stage,
+        "assetId": row.get("asset_id") or "",
+        "assetName": row.get("asset_name") or "",
+        "mainAssetGroup": main_group,
+        "subAssetGroup": row.get("sub_asset_group") or "",
+        "systemArea": row.get("system_area") or "Unassigned",
+        "location": row.get("location") or "Unassigned",
+        "pmDescription": row.get("pm_description") or "",
+        "frequency": frequency,
+        "plannedYear": row.get("planned_year"),
+        "plannedMonth": planned_month,
+        "plannedMonthLabel": (MONTH_LABELS[planned_month - 1] if planned_month else ""),
+        "plannedQuarter": _quarter_label(planned_month),
+        "plannedDate": planned_date_str,
+        "plannedDateLabel": row.get("planned_date_label"),
+        "contractorOrPIC": row.get("contractor_pic") or "",
+        "provider": "",
+        "scheduleStatus": schedule_status,
+        "completionStatus": "Completed (inferred)" if is_done else "Open",
+        "actualCompletionDate": None,
+        "daysOverdue": schedule_state["days_overdue"],
+        "sourceFile": row.get("source_file") or "",
+        "sourceSlot": row.get("source_slot") or "",
+        "sourceLabel": row.get("source_label") or row.get("source_slot") or "",
+        "sourceSheet": row.get("source_sheet") or "",
+        "mappingStatus": mapping_status,
+        "domain": row.get("domain") or "",
+        "scope": row.get("scope") or "",
+        "isDone": is_done,
+        "isDueThisMonth": is_due_this_month,
+        "isDueSoon": is_due_soon,
+        "isOverdue": is_overdue,
+        "needsReview": needs_review,
+    }
+
+
+def _load_pm_tasks_from_sql(sel_year: int, today: date) -> tuple:
+    """Load PM tasks for sel_year from SQL. Returns (all_tasks, asset_map, source_meta).
+
+    asset_map is built from SQL asset_master so _count_mapped_assets() works
+    without reading Excel.  source_meta mirrors the shape returned by _build_tasks().
+    """
+    import db as _db
+
+    sql_rows = _db.load_pm_schedule_from_sql(year=sel_year)
+    all_tasks = [_sql_pm_row_to_task(r, today) for r in sql_rows]
+
+    # Build asset_map from SQL for _count_mapped_assets()
+    asset_map: dict = {}
+    try:
+        for row in _db.query_asset_master():
+            aid = (row.get("asset_id") or "").strip().upper()
+            if aid:
+                asset_map[aid] = {
+                    "mappedStage": row.get("stage") or "",
+                    "mappedMainAssetGroup": row.get("category") or "",
+                }
+    except Exception:
+        pass
+
+    source_status = get_pm_schedule_source_status()
+    tracked_counts = Counter(t["sourceSlot"] for t in all_tasks if t["sourceSlot"])
+    source_summary = summarize_pm_schedule_sources(source_status, tracked_counts)
+    mapping_meta = _db.get_asset_master_sync_meta()
+
+    feed_files: list[str] = []
+    try:
+        feed_files = [
+            Path(f["path"]).name
+            for f in pm_feed.default_feeds(DATA_DIR)
+            if Path(f["path"]).exists()
+        ]
+    except Exception:
+        pass
+
+    source_meta = {
+        "utilityLastSynced": source_status.get("utility_stage1", {}).get("last_modified"),
+        "utilityStage1LastSynced": source_status.get("utility_stage1", {}).get("last_modified"),
+        "equipmentStage1LastSynced": source_status.get("equipment_stage1", {}).get("last_modified"),
+        "utilitySource": source_status.get("utility_stage1", {}).get("file_name"),
+        "utilityStage1Source": source_status.get("utility_stage1", {}).get("file_name"),
+        "equipmentStage1Source": source_status.get("equipment_stage1", {}).get("file_name"),
+        "stage2Source": "D365 PM feed (SQL)",
+        "feedFiles": feed_files,
+        "feedTaskCount": (
+            tracked_counts.get("feed_production", 0)
+            + tracked_counts.get("feed_utility", 0)
+        ),
+        "feedMasterErrors": [],
+        "scheduleSources": list(source_status.values()),
+        "sourceSummary": source_summary,
+        "assetMasterAvailable": mapping_meta.get("available", False),
+        "assetMasterSynced": mapping_meta.get("last_synced"),
+        "errors": [],
+        "dataSource": "sql",
+    }
+
+    return all_tasks, asset_map, source_meta
+
+
+def sync_pm_schedule_to_sql(year: int | None = None) -> dict:
+    """Build PM tasks from Excel for the given year and upsert into pm_schedule SQL table."""
+    import db as _db
+    today = datetime.now().date()
+    sync_year = year if year is not None else today.year
+    try:
+        all_tasks, _, _ = _build_tasks(sync_year, today)
+        result = _db.upsert_pm_schedule(all_tasks)
+        _db.log_import(
+            source_type="pm_schedule",
+            source_file="all_sources",
+            row_count=len(all_tasks),
+            valid_count=len(all_tasks),
+            invalid_count=0,
+            notes=f"Auto-sync year={sync_year}",
+        )
+        return {
+            "ok": True,
+            "rows": result["rows"],
+            "year": sync_year,
+            "message": f"Synced {result['rows']} PM task(s) for {sync_year} into SQL.",
+        }
+    except Exception as exc:
+        return {"ok": False, "message": f"PM schedule SQL sync failed: {exc}"}
+
+
+def _sync_pm_to_db_background(year: int | None = None) -> None:
+    try:
+        result = sync_pm_schedule_to_sql(year)
+        print(f"[db] {result['message']}")
+    except Exception as exc:
+        print(f"[db] pm_schedule sync error: {exc}")
 
 
 def _pm_page_source_signature():
@@ -862,7 +1058,18 @@ def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=No
     # For the legacy single-month _kpis/charts and the meta label, keep a month value.
     label_month = sel_month or today.month
 
-    all_tasks, asset_map, source_meta = _build_tasks(sel_year, today)
+    # Phase 4: SQL-first — prefer SQL over reading Excel. Fall back to Excel if SQL
+    # has no tasks for the requested year (e.g. first startup or a different year),
+    # then kick off a background sync so subsequent loads are fast.
+    if _sql_has_pm_schedule_for_year(sel_year):
+        all_tasks, asset_map, source_meta = _load_pm_tasks_from_sql(sel_year, today)
+    else:
+        all_tasks, asset_map, source_meta = _build_tasks(sel_year, today)
+        if sel_year == today.year:
+            threading.Thread(
+                target=_sync_pm_to_db_background, args=(sel_year,),
+                name="db-pm-sync", daemon=True,
+            ).start()
 
     # Merge local PM status overrides and apply the auto-assumed-done rule so the
     # operational `status` (Done / Auto Done / Backlog / Deferred / …) is available
@@ -939,7 +1146,7 @@ def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=No
     return payload
 
 
-def build_pm_schedule_metrics_payload(stage="all", year=None, month=None, period_mode=None, start=None, end=None):
+def build_pm_schedule_metrics_payload(stage="all", year=None, month=None, period_mode=None, start=None, end=None, allow_excel_fallback=True):
     """Lightweight PM payload for assistant / KPI consumers.
 
     This avoids building the full page tables and charts when a caller only needs
@@ -976,13 +1183,51 @@ def build_pm_schedule_metrics_payload(stage="all", year=None, month=None, period
         str(period_mode or ("monthly" if sel_month else "ytd")),
         str(start),
         str(end),
+        bool(allow_excel_fallback),
         source_signature,
     )
     cached_payload = _PM_METRICS_PAYLOAD_CACHE.get(cache_key)
     if cached_payload is not None:
         return cached_payload
 
-    all_tasks, asset_map, source_meta = _build_tasks(sel_year, today)
+    # Phase 4: SQL-first path (same logic as build_pm_schedule_payload).
+    if _sql_has_pm_schedule_for_year(sel_year):
+        all_tasks, asset_map, source_meta = _load_pm_tasks_from_sql(sel_year, today)
+    elif allow_excel_fallback:
+        all_tasks, asset_map, source_meta = _build_tasks(sel_year, today)
+        if sel_year == today.year:
+            threading.Thread(
+                target=_sync_pm_to_db_background, args=(sel_year,),
+                name="db-pm-sync", daemon=True,
+            ).start()
+    else:
+        try:
+            import db as _db
+            mapping_meta = _db.get_asset_master_sync_meta()
+        except Exception:
+            mapping_meta = {"available": False, "last_synced": None}
+        source_status = get_pm_schedule_source_status()
+        source_meta = {
+            "utilityLastSynced": source_status.get("utility_stage1", {}).get("last_modified"),
+            "utilityStage1LastSynced": source_status.get("utility_stage1", {}).get("last_modified"),
+            "equipmentStage1LastSynced": source_status.get("equipment_stage1", {}).get("last_modified"),
+            "utilitySource": source_status.get("utility_stage1", {}).get("file_name"),
+            "utilityStage1Source": source_status.get("utility_stage1", {}).get("file_name"),
+            "equipmentStage1Source": source_status.get("equipment_stage1", {}).get("file_name"),
+            "stage2Source": "D365 PM feed (SQL)",
+            "feedFiles": [],
+            "feedTaskCount": 0,
+            "feedMasterErrors": [],
+            "scheduleSources": list(source_status.values()),
+            "sourceSummary": summarize_pm_schedule_sources(source_status, Counter()),
+            "assetMasterAvailable": mapping_meta.get("available", False),
+            "assetMasterSynced": mapping_meta.get("last_synced"),
+            "errors": [f"PM schedule SQL data is not available for {sel_year}."],
+            "dataSource": "sql_unavailable",
+        }
+        all_tasks = []
+        asset_map = {}
+
     override_stats = apply_overrides_and_autodone(all_tasks, today)
     source_meta["overrideStats"] = override_stats
 

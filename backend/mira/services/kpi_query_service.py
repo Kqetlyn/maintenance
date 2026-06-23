@@ -18,6 +18,7 @@ builder ALREADY computed — they never trigger a different calculation.
 from __future__ import annotations
 
 import calendar
+import json
 import os
 import re
 import time
@@ -27,11 +28,6 @@ from datetime import date, datetime
 # Existing dashboard builders (top-level modules on the backend path).
 from downtime_service import build_downtime_payload
 from pm_schedule_service import build_pm_schedule_metrics_payload
-from spare_parts_service import (
-    build_all_years_transactions_payload,
-    build_project_transactions_payload,
-    build_spare_parts_payload,
-)
 
 from ..core import context as ctx
 
@@ -64,6 +60,7 @@ def _downtime_management(filters: dict) -> dict:
             end=period["end"],
             work_orders_only=True,
             stage=filters["stage"],
+            allow_excel_fallback=False,
         )
         return payload.get("management", {}) or {}
 
@@ -77,20 +74,46 @@ def _pm_payload(filters: dict) -> dict:
     key = ("pm", filters["stage"], filters["year"], filters["month"], mode, str(start), str(end))
     return _memoized(key, lambda: build_pm_schedule_metrics_payload(
         stage=filters["stage"], year=filters["year"], month=filters["month"],
-        period_mode=mode, start=start, end=end,
+        period_mode=mode, start=start, end=end, allow_excel_fallback=False,
     ))
 
 
-def _spare_parts_payload() -> dict:
-    return _memoized(("spare-parts",), build_spare_parts_payload)
+def _sql_stage_label(stage: str | None) -> str | None:
+    text = str(stage or "").strip().lower()
+    if text == "stage1":
+        return "Stage 1"
+    if text == "stage2":
+        return "Stage 2"
+    return None
 
 
-def _project_transactions_payload() -> dict:
-    return _memoized(("project-transactions",), build_project_transactions_payload)
+def _sql_spare_rows(filters: dict | None = None, *transaction_types: str) -> list[dict]:
+    sql_stage = _sql_stage_label((filters or {}).get("stage"))
+    key = ("sql-spare-rows", sql_stage, tuple(transaction_types))
+
+    def produce():
+        import db as _db
+
+        if not transaction_types:
+            return _db.load_spare_parts_from_sql(stage=sql_stage)
+        rows: list[dict] = []
+        for transaction_type in transaction_types:
+            rows.extend(
+                _db.load_spare_parts_from_sql(
+                    stage=sql_stage,
+                    transaction_type=transaction_type,
+                )
+            )
+        return rows
+
+    return _memoized(key, produce)
 
 
-def _all_years_transactions_payload() -> dict:
-    return _memoized(("all-years-project-transactions",), build_all_years_transactions_payload)
+def _overview_freshness() -> dict:
+    return _memoized(
+        ("overview-freshness",),
+        lambda: __import__("db").get_overview_freshness(),
+    )
 
 
 def _downtime_all_year_work_orders(filters: dict) -> list[dict]:
@@ -104,6 +127,7 @@ def _downtime_all_year_work_orders(filters: dict) -> list[dict]:
             end=None,
             work_orders_only=True,
             stage=filters["stage"],
+            allow_excel_fallback=False,
         )
         management = payload.get("management", {}) or {}
         return management.get("work_orders", []) or []
@@ -335,6 +359,74 @@ def _window_value_for_yoy(rows: list[dict], window: dict) -> float:
             continue
         total += float(row.get("total_consumption") or 0)
     return round(total, 2)
+
+
+_SPARE_NON_STOCK_CLASSES = {
+    "nonstocksparepart",
+    "nonstocksparepartdirectpurchase",
+}
+_SPARE_SERVICE_CLASSES = {
+    "servicelabourrepair",
+    "nonsparepartservice",
+}
+
+
+def _spare_row_extra(row: dict) -> dict:
+    try:
+        data = json.loads(row.get("extra_json") or "{}") or {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _normalize_spare_classification(value) -> str:
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").strip().lower())
+
+
+def _sql_project_transaction_rows(filters: dict) -> list[dict]:
+    rows = _sql_spare_rows(filters, "project_txn")
+    parsed = []
+    for row in rows:
+        extra = _spare_row_extra(row)
+        parsed.append({
+            "project_date": row.get("transaction_date"),
+            "transaction_id": extra.get("transaction_id") or row.get("item_number"),
+            "work_order_id": row.get("pr_number"),
+            "asset_id": row.get("asset_id"),
+            "original_description": extra.get("original_description") or row.get("item_name"),
+            "translated_description": extra.get("translated_description") or row.get("item_name"),
+            "clean_description": extra.get("clean_description"),
+            "item_category": extra.get("item_category") or row.get("category"),
+            "quantity_used": extra.get("quantity_used") if extra.get("quantity_used") is not None else row.get("quantity"),
+            "total_consumption": extra.get("total_consumption") if extra.get("total_consumption") is not None else row.get("total_value"),
+            "unit_cost_estimate": extra.get("unit_cost_estimate") if extra.get("unit_cost_estimate") is not None else row.get("unit_price"),
+            "link_status": extra.get("link_status") or row.get("classification"),
+            "equipment_name": extra.get("equipment_name") or row.get("asset_name"),
+        })
+    return parsed
+
+
+def _sql_movement_consumption_rows(filters: dict) -> list[dict]:
+    rows = _sql_spare_rows(filters, "movement")
+    parsed = []
+    for row in rows:
+        extra = _spare_row_extra(row)
+        parsed.append({
+            "project_date": row.get("transaction_date"),
+            "transaction_id": extra.get("document_number") or row.get("item_number"),
+            "work_order_id": extra.get("work_order_id"),
+            "asset_id": row.get("asset_id"),
+            "original_description": row.get("item_name"),
+            "translated_description": row.get("item_name"),
+            "clean_description": row.get("item_name"),
+            "item_category": row.get("category"),
+            "quantity_used": row.get("quantity"),
+            "total_consumption": row.get("total_value"),
+            "unit_cost_estimate": row.get("unit_price"),
+            "link_status": "Linked" if row.get("asset_id") else "Unlinked",
+            "equipment_name": row.get("asset_name"),
+        })
+    return parsed
 
 
 def _previous_window(filters: dict) -> dict:
@@ -686,7 +778,11 @@ def get_mr_activity_summary(filters: dict) -> dict:
     selected_split = _request_state_counts(selected_rows)
     carry_split = _request_state_counts(carry_over_rows)
     total_active_workload = mr_raised + carry_over_open_mr
-    closure_rate_pct = round((closed_count / mr_raised) * 100.0, 1) if mr_raised else None
+    # Rejected/cancelled MR are excluded from the closure rate denominator — they
+    # were never actioned so including them would understate actual completion.
+    valid_denominator = mr_raised - rejected_count
+    closure_rate_pct = round((closed_count / valid_denominator) * 100.0, 1) if valid_denominator > 0 else None
+    resolution_rate_pct = round(((closed_count + rejected_count) / mr_raised) * 100.0, 1) if mr_raised else None
     open_rate_pct = round((open_count / mr_raised) * 100.0, 1) if mr_raised else None
     wo_created_pct = round((work_orders_linked / mr_raised) * 100.0, 1) if mr_raised else None
     top_asset = _top_asset_summary(selected_rows, window["label"])
@@ -710,6 +806,7 @@ def get_mr_activity_summary(filters: dict) -> dict:
         "finished_count": selected_split["finished"],
         "confirm_count": selected_split["confirm"],
         "closure_rate_pct": closure_rate_pct,
+        "resolution_rate_pct": resolution_rate_pct,
         "open_rate_pct": open_rate_pct,
         "carry_over_open_mr": carry_over_open_mr,
         "carry_over_in_progress": carry_split["in_progress"],
@@ -1001,21 +1098,52 @@ def get_verified_pm_metrics(filters: dict) -> dict:
 
 
 def get_spare_parts_summary(filters: dict) -> dict:
-    """Spare-parts snapshot and consumption summary from existing spare-parts builders."""
+    """SQL-backed spare-parts snapshot and consumption summary."""
     f = ctx.normalize_filters(filters)
-    comparison_payload = _spare_parts_payload()
-    project_payload = _project_transactions_payload()
-    annual_payload = _all_years_transactions_payload()
     window = ctx.resolved_window(f)
+    all_stage_filters = dict(f)
+    all_stage_filters["stage"] = "all"
+    inventory_rows = _sql_spare_rows(f, "inventory")
+    po_rows = _sql_spare_rows(f, "gen_po", "stage_po")
+    project_transactions = _sql_project_transaction_rows(f)
+    annual_transactions = list(project_transactions)
+    data_notes = []
 
-    comparison = ((comparison_payload.get("comparison") or {}).get("summary") or {})
-    inventory_records = ((comparison_payload.get("inventory") or {}).get("records") or [])
-    po_records = ((comparison_payload.get("po_classification") or {}).get("records") or [])
-    project_transactions = (project_payload.get("transactions") or []) if project_payload.get("status") == "ok" else []
-    annual_transactions = (annual_payload.get("transactions") or []) if annual_payload.get("status") == "ok" else []
+    if f.get("stage") != "all" and not inventory_rows:
+        sitewide_inventory_rows = _sql_spare_rows(all_stage_filters, "inventory")
+        if sitewide_inventory_rows:
+            inventory_rows = sitewide_inventory_rows
+            data_notes.append(
+                "Stage-resolved spare-parts inventory rows are not yet available in SQL, so inventory metrics are temporarily using site-wide SQL data."
+            )
 
-    filtered_po_records = [row for row in po_records if _window_contains(row.get("po_date"), f)]
+    if f.get("stage") != "all" and not po_rows:
+        sitewide_po_rows = _sql_spare_rows(all_stage_filters, "gen_po", "stage_po")
+        if sitewide_po_rows:
+            po_rows = sitewide_po_rows
+            data_notes.append(
+                "Stage-resolved spare-parts PO rows are not yet available in SQL, so PO metrics are temporarily using site-wide SQL data."
+            )
+
+    if f.get("stage") != "all" and not project_transactions:
+        sitewide_project_transactions = _sql_project_transaction_rows(all_stage_filters)
+        if sitewide_project_transactions:
+            project_transactions = sitewide_project_transactions
+            annual_transactions = list(sitewide_project_transactions)
+            data_notes.append(
+                "Stage-resolved spare-parts consumption rows are not yet available in SQL, so consumption metrics are temporarily using site-wide SQL data."
+            )
+
+    filtered_po_records = [row for row in po_rows if _window_contains(row.get("transaction_date"), f)]
     filtered_project_transactions = [row for row in project_transactions if _window_contains(row.get("project_date"), f)]
+
+    consumption_source = "project transactions"
+    if not filtered_project_transactions:
+        fallback_rows = [row for row in _sql_movement_consumption_rows(f) if _window_contains(row.get("project_date"), f)]
+        if fallback_rows:
+            filtered_project_transactions = fallback_rows
+            annual_transactions = _sql_movement_consumption_rows(f)
+            consumption_source = "inventory movement fallback"
 
     top_part_map: dict[str, dict] = {}
     for row in filtered_project_transactions:
@@ -1036,48 +1164,64 @@ def get_spare_parts_summary(filters: dict) -> dict:
     if previous_window_value:
         yoy_pct = round(((current_window_value - previous_window_value) / previous_window_value) * 100.0, 1)
 
-    data_notes = []
-    if f.get("stage") and f["stage"] != "all":
-        data_notes.append("Spare-parts inventory and PO metrics remain site-wide because the current spare-parts sources are not stage-split.")
-    if project_payload.get("status") != "ok":
-        data_notes.append(project_payload.get("error") or "Project transactions data is unavailable for spare-parts consumption.")
-    if annual_payload.get("status") != "ok":
-        data_notes.append(annual_payload.get("error") or "Historical spare-parts transactions are unavailable for YoY comparison.")
-    if comparison_payload.get("structured_errors"):
-        data_notes.extend(str(note) for note in comparison_payload.get("structured_errors") if note)
+    non_stock_value = 0.0
+    services_value = 0.0
+    manual_review_po_items = 0
+    for row in filtered_po_records:
+        classification = _normalize_spare_classification(row.get("classification"))
+        value = float(row.get("total_value") or 0)
+        if classification in _SPARE_NON_STOCK_CLASSES:
+            non_stock_value += value
+        elif classification in _SPARE_SERVICE_CLASSES:
+            services_value += value
+        if row.get("needs_review"):
+            manual_review_po_items += 1
+
+    if consumption_source != "project transactions":
+        data_notes.append(
+            "Project transactions were not available in SQL for the selected window, so spare-parts consumption is using inventory movement as a fallback."
+        )
+    if not inventory_rows:
+        data_notes.append("Inventory spare-parts SQL rows are unavailable.")
+    if not po_rows:
+        data_notes.append("Spare-parts purchase-order SQL rows are unavailable.")
+    if not annual_transactions:
+        data_notes.append("Historical spare-parts SQL transactions are unavailable for YoY comparison.")
 
     return {
         "window": ctx.month_label(f),
         "stage": f["stage"],
         "window_mode": window["mode"],
-        "current_in_stock_items": comparison.get("in_stock_items"),
-        "current_in_stock_value": comparison.get("in_stock_value"),
+        "current_in_stock_items": (
+            sum(1 for row in inventory_rows if float(row.get("quantity") or 0) > 0)
+            if inventory_rows else None
+        ),
+        "current_in_stock_value": round(
+            sum(
+                float(row.get("total_value") or 0)
+                for row in inventory_rows
+                if float(row.get("quantity") or 0) > 0 and row.get("total_value") is not None
+            ),
+            2,
+        ) if inventory_rows else None,
         "drawn_from_store_value": round(
             sum(float(row.get("total_consumption") or 0) for row in filtered_project_transactions), 2
         ) if filtered_project_transactions else None,
-        "non_stock_value": round(
-            sum(float(row.get("total_cost") or 0) for row in filtered_po_records
-                if row.get("classification") == "Non-Stock Spare Part / Direct Purchase"),
-            2,
-        ) if filtered_po_records else None,
-        "services_value": round(
-            sum(float(row.get("total_cost") or 0) for row in filtered_po_records
-                if row.get("classification") == "Non-Spare Part / Service"),
-            2,
-        ) if filtered_po_records else None,
+        "non_stock_value": round(non_stock_value, 2) if filtered_po_records else None,
+        "services_value": round(services_value, 2) if filtered_po_records else None,
         "top_consumed_part": top_consumed_part["part_name"] if top_consumed_part else None,
         "top_consumed_part_value": round(float(top_consumed_part["value"]), 2) if top_consumed_part else None,
         "yoy_consumption_pct": yoy_pct,
         "yoy_label": f"{previous_window['label']} to {window['label']}",
         "services_note": "Services include repair and cleaning.",
-        "inventory_rows_loaded": len(inventory_records),
-        "po_rows_loaded": len(po_records),
+        "inventory_rows_loaded": len(inventory_rows),
+        "po_rows_loaded": len(po_rows),
         "project_transaction_rows_loaded": len(project_transactions),
         "annual_transaction_rows_loaded": len(annual_transactions),
         "po_rows_after_filter": len(filtered_po_records),
         "project_transaction_rows_after_filter": len(filtered_project_transactions),
-        "manual_review_po_items": comparison.get("manual_review_po_items"),
-        "source": "spare_parts_service.build_spare_parts_payload + project transaction summaries",
+        "manual_review_po_items": manual_review_po_items,
+        "source": "SQL spare_parts summary",
         "data_notes": data_notes,
     }
 
@@ -1108,6 +1252,7 @@ def get_dashboard_kpi_summary(filters: dict, *, include_spare_parts: bool = True
     dq = get_data_reliability_issues(f)
     pm = get_pm_schedule_status(f)
     spare = get_spare_parts_summary(f) if include_spare_parts else {}
+    freshness = _overview_freshness()
     opening_backlog_count = mr_activity["carry_over_open_mr"]
     total_with_backlog_count = mr_activity["total_active_workload"]
     return {
@@ -1115,6 +1260,10 @@ def get_dashboard_kpi_summary(filters: dict, *, include_spare_parts: bool = True
         "stage": f["stage"],
         "filters": f,
         "period_mode": ctx.resolved_window(f)["mode"],
+        "last_updated": freshness.get("last_updated"),
+        "latest_import_time": freshness.get("latest_import_time"),
+        "source_files_used": freshness.get("source_files_used") or [],
+        "data_freshness": freshness,
         "work_orders": {
             "total": mr_activity["mr_raised"],
             "open": mr_activity["open_count"],
@@ -1404,8 +1553,9 @@ def get_overdue_pm_records(filters: dict, *, limit: int = 10) -> dict:
 def get_top_spare_parts_consumption(filters: dict, *, limit: int = 5) -> dict:
     """Top consumed spare parts for the selected window."""
     f = ctx.normalize_filters(filters)
-    project_payload = _project_transactions_payload()
-    rows = (project_payload.get("transactions") or []) if project_payload.get("status") == "ok" else []
+    rows = _sql_project_transaction_rows(f)
+    if not rows:
+        rows = _sql_movement_consumption_rows(f)
     filtered_rows = [row for row in rows if _window_contains(row.get("project_date"), f)]
     part_map: dict[str, dict] = {}
     for row in filtered_rows:
@@ -1437,7 +1587,7 @@ def get_top_spare_parts_consumption(filters: dict, *, limit: int = 5) -> dict:
             }
             for item in ranked
         ],
-        "source": "project transactions spare-parts consumption summary",
+        "source": "SQL spare-parts consumption summary",
     }
 
 

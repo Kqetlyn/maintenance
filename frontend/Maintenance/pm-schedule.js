@@ -262,6 +262,87 @@
         }
     }
 
+    // ── MIRA Alert Context ────────────────────────────────────────────────────
+    // Reads alert context from sessionStorage (set by MIRA Overview action buttons)
+    // and from mira:alert:navigate events dispatched in the same page.
+
+    const ALERT_CTX_KEY = "mira_alert_ctx";
+
+    function applyPmAlertContext(ctx) {
+        if (!ctx || ctx.page !== "pm_schedule") return;
+        showPmAlertBanner(ctx.alertDescription || "Showing records related to a Daily Action Alert.");
+        const focus = ctx.focus || ctx.navFocus;
+        if (focus === "task_list") {
+            const taskSection = document.getElementById("pm-task-list-section");
+            if (taskSection) {
+                window.setTimeout(() => taskSection.scrollIntoView({ behavior: "smooth", block: "start" }), 200);
+            }
+            if (ctx.statusFilter === "Overdue") {
+                // Filter the task list to show only overdue items by applying a search term
+                // that the task list filters on opStatus (displayStatus).
+                state.taskSearch = "Overdue";
+                const searchEl = el("pm-task-search");
+                if (searchEl) searchEl.value = "Overdue";
+                if (ctx.sortKey === "plannedDate") {
+                    state.sortKey = "plannedDate";
+                    state.sortDir = ctx.sortDir || 1;
+                }
+                renderTaskList();
+            }
+        } else if (focus === "pm_calendar") {
+            const calSection = document.getElementById("pm-calendar-section");
+            if (calSection) {
+                window.setTimeout(() => calSection.scrollIntoView({ behavior: "smooth", block: "start" }), 200);
+            }
+        }
+    }
+
+    function showPmAlertBanner(message) {
+        let banner = document.getElementById("mira-alert-pm-banner");
+        if (!banner) {
+            banner = document.createElement("div");
+            banner.id = "mira-alert-pm-banner";
+            banner.className = "mira-alert-ctx-banner";
+            banner.setAttribute("role", "status");
+            const taskSection = document.getElementById("pm-task-list-section");
+            const parent = taskSection ? taskSection.parentNode : document.getElementById("pm-overview");
+            if (parent && taskSection) parent.insertBefore(banner, taskSection);
+            else if (parent) parent.prepend(banner);
+        }
+        banner.innerHTML =
+            `<span class="mira-alert-ctx-icon">&#9432;</span>` +
+            `<span class="mira-alert-ctx-text">Showing records related to Daily Action Alert: ${message.replace(/</g,"&lt;")}</span>` +
+            `<button type="button" class="mira-alert-ctx-clear">Clear alert filter</button>`;
+        banner.classList.remove("hidden");
+        banner.querySelector(".mira-alert-ctx-clear").addEventListener("click", () => {
+            banner.classList.add("hidden");
+            try { sessionStorage.removeItem(ALERT_CTX_KEY); } catch (_) {}
+            state.taskSearch = "";
+            const searchEl = el("pm-task-search");
+            if (searchEl) searchEl.value = "";
+            renderTaskList();
+        });
+    }
+
+    // Apply on initial load if context was set before the page loaded.
+    document.addEventListener("DOMContentLoaded", () => {
+        window.setTimeout(() => {
+            try {
+                const ctx = JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
+                applyPmAlertContext(ctx);
+            } catch (_) {}
+        }, 600);
+    });
+
+    // Apply when the MIRA Overview dispatches a same-page navigation event.
+    document.addEventListener("mira:alert:navigate", (event) => {
+        if (!event.detail || event.detail.target !== "pm") return;
+        try {
+            const ctx = JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
+            applyPmAlertContext(ctx);
+        } catch (_) {}
+    });
+
     function syncYearSelect(meta) {
         if (!meta) return;
         state.queryYear = String(meta.year || state.queryYear || new Date().getFullYear());
@@ -838,7 +919,7 @@
         if (state.taskDateTo) rows = rows.filter((t) => (t.plannedDate || "") <= state.taskDateTo);
         if (state.taskSearch) {
             const needle = state.taskSearch.toLowerCase();
-            rows = rows.filter((t) => [taskCategory(t), t.assetId, t.assetName, t.systemArea, t.mainAssetGroup, t.stage, opStatus(t)]
+            rows = rows.filter((t) => [taskCategory(t), t.assetId, t.assetName, t.systemArea, t.mainAssetGroup, t.stage, opStatus(t), statusBucket(t)]
                 .join(" ").toLowerCase().includes(needle));
         }
         rows = sortRows(rows);

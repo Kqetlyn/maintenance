@@ -10,7 +10,7 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260615-kdi-management-1">
+    <link rel="stylesheet" href="style.css?v=20260623-crit-collapse-1">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -85,6 +85,11 @@
                 <div class="alert-item warning" id="period-helper-text"></div>
             </div>
         </div>
+        <div class="mira-alert-ctx-banner hidden" id="mira-alert-ctx-banner" role="status">
+            <span class="mira-alert-ctx-icon">&#9432;</span>
+            <span class="mira-alert-ctx-text" id="mira-alert-ctx-text"></span>
+            <button type="button" class="mira-alert-ctx-clear" id="mira-alert-ctx-clear">Clear alert filter</button>
+        </div>
 
         <section class="card-shell view-toggle maintenance-tab-toggle">
             <button type="button" class="toggle-btn" onclick="window.location.href='/'">Overview</button>
@@ -121,20 +126,30 @@
                         </div>
                     </div>
                 </div>
-                <div class="kpi-card highlight-red compact-summary-card">
-                    <div class="kpi-label">Outstanding MR to Acknowledge</div>
-                    <div class="kpi-value mini" id="kpi-outstanding-ack">--</div>
-                    <div class="summary-stat-row stacked">
-                        <div class="summary-stat">
-                            <span class="summary-stat-label">Critical New MR</span>
-                            <span class="summary-stat-value strong" id="kpi-outstanding-critical">--</span>
+                <div class="kpi-card highlight-red compact-summary-card critical-status-card">
+                    <div class="kpi-label">Critical Machine Status</div>
+                    <div class="cma-table">
+                        <div class="cma-row">
+                            <span class="cma-dot" style="background:#16a34a;"></span>
+                            <span class="cma-row-label">Active</span>
+                            <span class="cma-row-count" id="act-count-active">--</span>
+                            <span class="cma-row-detail" id="cma-active-detail"></span>
                         </div>
-                        <div class="summary-stat">
-                            <span class="summary-stat-label">Non-Critical New MR</span>
-                            <span class="summary-stat-value strong" id="kpi-outstanding-noncritical">--</span>
+                        <div class="cma-row">
+                            <span class="cma-dot" style="background:#d97706;"></span>
+                            <span class="cma-row-label">Inactive</span>
+                            <span class="cma-row-count" id="act-count-maintenance">--</span>
+                            <span class="cma-row-detail" id="cma-inactive-detail"></span>
+                        </div>
+                        <div class="cma-divider"></div>
+                        <div class="cma-row cma-row-total">
+                            <span></span>
+                            <span class="cma-row-label">Total</span>
+                            <span class="cma-row-count" id="act-count-total">--</span>
+                            <span class="cma-row-detail" id="cma-total-detail"></span>
                         </div>
                     </div>
-                    <div class="kpi-trend" id="kpi-oldest-unack-age">Oldest unacknowledged age unavailable.</div>
+                    <div class="kpi-trend critical-status-card-note" id="critical-status-card-note">All critical machines counted; no-WO machines are Active.</div>
                 </div>
                 <div class="kpi-card highlight-blue compact-summary-card">
                     <div class="kpi-label">Open MR by Severity</div>
@@ -330,6 +345,77 @@
                                     </table>
                                 </div>
                             </details>
+                            <!-- ── Section B: Critical S1 vs S2 MTTR comparison ─────── -->
+                            <div class="kdi-analysis-card-head kdi-crit-cmp-head">
+                                <div>
+                                    <div class="kdi-section-kicker">Section B</div>
+                                    <div class="kdi-analysis-card-title">Critical S1 vs S2 — MTTR Comparison</div>
+                                    <p class="kdi-analysis-card-subtitle"><strong>S1</strong> = single-machine critical group (one machine). <strong>S2</strong> = multi-machine critical group (several machines). Follows the page-level <strong>Stage</strong> and <strong>Category</strong> filters; the financial year below drives this chart's time axis.</p>
+                                </div>
+                                <span class="kpi-direction-pill kpi-direction-pill-warn">Lower is better</span>
+                            </div>
+                            <div class="kdi-analysis-filter-bar kdi-crit-cmp-filter-bar">
+                                <div class="kdi-analysis-filter-control">
+                                    <label class="kdi-filter-label" for="kdi-crit-cmp-fy">Financial Year</label>
+                                    <select id="kdi-crit-cmp-fy" class="inline-select kdi-analysis-filter-select"></select>
+                                </div>
+                                <div class="kdi-analysis-filter-control">
+                                    <label class="kdi-filter-label" for="kdi-crit-cmp-fy2">Compare with</label>
+                                    <select id="kdi-crit-cmp-fy2" class="inline-select kdi-analysis-filter-select"><option value="">None</option></select>
+                                </div>
+                                <div class="kdi-analysis-filter-control">
+                                    <label class="kdi-filter-label" for="kdi-crit-cmp-type">Critical Type</label>
+                                    <select id="kdi-crit-cmp-type" class="inline-select kdi-analysis-filter-select">
+                                        <option value="both">Both</option>
+                                        <option value="s1">S1 — Single-machine critical</option>
+                                        <option value="s2">S2 — Multi-machine critical</option>
+                                    </select>
+                                </div>
+                                <div class="kdi-analysis-filter-control">
+                                    <label class="kdi-filter-label" for="kdi-crit-cmp-metric">Metric</label>
+                                    <select id="kdi-crit-cmp-metric" class="inline-select kdi-analysis-filter-select">
+                                        <option value="average">Average MTTR</option>
+                                        <option value="median">Median MTTR</option>
+                                        <option value="p75">P75 MTTR</option>
+                                        <option value="p90">P90 MTTR</option>
+                                    </select>
+                                </div>
+                                <div class="kdi-analysis-filter-control">
+                                    <label class="kdi-filter-label" for="kdi-crit-cmp-category">Category</label>
+                                    <select id="kdi-crit-cmp-category" class="inline-select kdi-analysis-filter-select">
+                                        <option value="all">All Critical Categories</option>
+                                        <option value="Production Equipment">Production Equipment</option>
+                                        <option value="Utilities">Utilities</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="kdi-analysis-chart-wrap">
+                                <div class="kdi-crit-cmp-chart-header">
+                                    <div>
+                                        <div class="kdi-chart-title" id="kdi-crit-cmp-chart-title">Critical Machine MTTR Monthly Trend</div>
+                                        <p class="kdi-crit-cmp-chart-subtitle" id="kdi-crit-cmp-chart-subtitle">Monthly MTTR trend for S1/S2 critical machine groups. Lower is better.</p>
+                                    </div>
+                                    <button class="kdi-crit-cmp-toggle-btn" id="kdi-crit-cmp-toggle-btn" onclick="kdiToggleCritCmpChart()">Hide chart</button>
+                                </div>
+                                <div id="kdi-crit-cmp-chart-body">
+                                    <!-- Single-type view (S1 only or S2 only) -->
+                                    <div id="kdi-crit-cmp-single" class="kdi-crit-cmp-single">
+                                        <div class="chart-container kdi-chart-container kdi-crit-trend-chart" data-chart-id="kdiCritCmpChart"><canvas id="kdiCritCmpChart"></canvas></div>
+                                    </div>
+                                    <!-- Both-type view: two mini charts stacked -->
+                                    <div id="kdi-crit-cmp-dual" class="kdi-crit-cmp-dual hidden">
+                                        <div class="kdi-crit-mini-wrap">
+                                            <div class="kdi-crit-mini-label" id="kdi-crit-mini-label-s1">S1 — Single-machine critical · MTTR Monthly Trend</div>
+                                            <div class="chart-container kdi-chart-container kdi-crit-trend-chart kdi-crit-mini-chart" data-chart-id="kdiCritCmpChartS1"><canvas id="kdiCritCmpChartS1"></canvas></div>
+                                        </div>
+                                        <div class="kdi-crit-mini-wrap">
+                                            <div class="kdi-crit-mini-label" id="kdi-crit-mini-label-s2">S2 — Multi-machine critical · MTTR Monthly Trend</div>
+                                            <div class="chart-container kdi-chart-container kdi-crit-trend-chart kdi-crit-mini-chart" data-chart-id="kdiCritCmpChart2"><canvas id="kdiCritCmpChart2"></canvas></div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="kdi-crit-cmp-summary" id="kdi-crit-cmp-summary"></div>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -490,11 +576,6 @@
                     <span class="topic-card-kicker">Backlog</span>
                     <span class="topic-card-title">Yearly MR Movement</span>
                     <span class="topic-card-sub">Raised, finished, carry-over, closure.</span>
-                </button>
-                <button type="button" class="topic-card" data-topic-target="critical-activity" role="tab" aria-selected="false">
-                    <span class="topic-card-kicker">Critical Assets</span>
-                    <span class="topic-card-title">Critical Machine Activity</span>
-                    <span class="topic-card-sub">Active vs under maintenance status.</span>
                 </button>
             </div>
         </section>
@@ -709,10 +790,20 @@
                     <div class="kpi-value mini" id="mr-previous-open">--</div>
                     <div class="kpi-trend">Raised before selected financial year and still open</div>
                 </div>
-                <div class="kpi-card highlight-blue mr-movement-kpi">
-                    <div class="kpi-label">Closure Rate of Selected-Year MR</div>
+                <div class="kpi-card highlight-red mr-movement-kpi" title="MR raised in the selected year that were rejected or cancelled. These are excluded from the closure rate denominator — they were never actioned and should not reduce the closure score.">
+                    <div class="kpi-label">Rejected / Cancelled</div>
+                    <div class="kpi-value mini" id="mr-rejected-count">--</div>
+                    <div class="kpi-trend">Raised in selected year — excluded from closure rate</div>
+                </div>
+                <div class="kpi-card highlight-blue mr-movement-kpi" title="Rejected/Cancelled MR are excluded from closure rate and shown separately. Closure rate measures completion of valid non-rejected MR.">
+                    <div class="kpi-label">Closure Rate</div>
                     <div class="kpi-value mini" id="mr-closure-rate">--</div>
-                    <div class="kpi-trend">Closed MR raised in selected financial year / MR raised in selected financial year</div>
+                    <div class="kpi-trend">Finished ÷ (Raised − Rejected / Cancelled)</div>
+                </div>
+                <div class="kpi-card highlight-green mr-movement-kpi" title="Resolution rate includes both finished and rejected/cancelled MR as resolved outcomes. Formula: (Finished + Rejected) ÷ Raised.">
+                    <div class="kpi-label">Resolution Rate</div>
+                    <div class="kpi-value mini" id="mr-resolution-rate">--</div>
+                    <div class="kpi-trend">(Finished + Rejected / Cancelled) ÷ Raised</div>
                 </div>
             </div>
             <p class="mr-movement-helper">Raised and finished counts are based on different date perspectives. A request raised in a previous year but finished this year is classified as carry-over closed.</p>
@@ -1611,86 +1702,6 @@
             </div>
         </section>
 
-        <section class="card activity-status-section dashboard-topic-panel hidden" id="topic-critical-activity" data-topic-panel="critical-activity" style="margin-top: 24px;">
-            <div class="activity-status-header">
-                <div class="card-title">Critical Machine Activity Status</div>
-                <p class="card-subtitle">Critical machines only, classified by the most recent work order status in the selected period.</p>
-            </div>
-            <div class="kpi-grid compact-kpi-grid topic-mini-kpi-grid">
-                <div class="kpi-card compact-summary-card highlight-green">
-                    <div class="kpi-label">Active Critical Machines</div>
-                    <div class="kpi-value mini" data-topic-mirror="act-count-active">--</div>
-                    <div class="kpi-trend">Latest WO is Finished or Rejected</div>
-                </div>
-                <div class="kpi-card compact-summary-card highlight-amber">
-                    <div class="kpi-label">Critical Machines Under Maintenance</div>
-                    <div class="kpi-value mini" data-topic-mirror="act-count-maintenance">--</div>
-                    <div class="kpi-trend">Latest WO is In Progress / Confirm / New / ReWork</div>
-                </div>
-                <div class="kpi-card compact-summary-card highlight-blue">
-                    <div class="kpi-label">Total Critical Machines Shown</div>
-                    <div class="kpi-value mini" id="act-count-total">--</div>
-                    <div class="kpi-trend">Total represented in the donut chart</div>
-                </div>
-            </div>
-            <div class="activity-simple-body">
-                <div class="activity-donut-wrap">
-                    <div class="chart-container activity-donut-container" data-chart-id="activityDonutChart"><canvas id="activityDonutChart"></canvas></div>
-                </div>
-                <div class="activity-legend">
-                    <div class="activity-legend-item">
-                        <div class="activity-legend-dot" style="background:#16a34a;"></div>
-                        <div>
-                            <div class="activity-legend-label">Active Machines</div>
-                            <div class="activity-legend-sub">Latest WO is Finished or Rejected</div>
-                        </div>
-                        <div class="activity-legend-count" id="act-count-active">--</div>
-                    </div>
-                    <div class="activity-legend-item">
-                        <div class="activity-legend-dot" style="background:#d97706;"></div>
-                        <div>
-                            <div class="activity-legend-label">Under Maintenance</div>
-                            <div class="activity-legend-sub">Latest WO is In Progress / Confirm / New / reWork</div>
-                        </div>
-                        <div class="activity-legend-count" id="act-count-maintenance">--</div>
-                    </div>
-                </div>
-            </div>
-            <button type="button" class="topic-analysis-toggle" data-analysis-toggle aria-expanded="false">View Analysis</button>
-            <div class="topic-analysis-only">
-                <div class="activity-status-explain-grid">
-                    <div class="card nested-card">
-                        <div class="card-title">Active Status Explanation</div>
-                        <p class="card-subtitle">Finished and Rejected are treated as active because the latest work order is no longer open.</p>
-                    </div>
-                    <div class="card nested-card">
-                        <div class="card-title">Under Maintenance Status Explanation</div>
-                        <p class="card-subtitle">In Progress, Confirm, New, and ReWork are treated as under maintenance because the latest work order still needs follow-up.</p>
-                    </div>
-                </div>
-                <div class="card nested-card">
-                    <div class="card-title">Critical Machine Status List</div>
-                    <div class="table-wrapper compact-table-wrapper">
-                        <table>
-                            <thead>
-                                <tr>
-                                    <th>Asset ID</th>
-                                    <th>Machine / Asset Name</th>
-                                    <th>Latest Status</th>
-                                    <th>Activity Status</th>
-                                    <th>Work Order</th>
-                                    <th>Latest Start</th>
-                                </tr>
-                            </thead>
-                            <tbody id="critical-activity-list-body">
-                                <tr><td colspan="6" class="empty-cell">Loading critical machine status.</td></tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-        </section>
-
         <section style="margin-top: 24px;">
             <div class="card table-card machine-performance-card">
                 <div class="section-tabbar section-tabbar-inline">
@@ -1698,107 +1709,19 @@
                     <button type="button" class="section-tab" data-performance-view="machine-groups">Machine Group Performance</button>
                 </div>
                 <div class="performance-panel active" id="utilities-panel">
-                    <div class="machine-explorer-header" style="padding: 16px 0 0;">
-                        <div>
-                            <div class="card-title">Machine Explorer</div>
-                        </div>
-                    </div>
-                    <div class="filter-toolbar machine-explorer-filter-toolbar">
-                        <div class="filter-group"><label for="machine-explorer-year">Year</label><select id="machine-explorer-year"><option value="">All Years</option></select></div>
-                        <div class="filter-group"><label for="machine-explorer-month">Month</label><select id="machine-explorer-month"><option value="">All Months</option></select></div>
-                        <!-- Hidden filters retained so existing Machine Explorer logic keeps working; only Year + Month are shown per request. -->
-                        <select id="machine-explorer-group" class="hidden" hidden><option value="">All Groups</option></select>
-                        <select id="machine-explorer-criticality" class="hidden" hidden><option value="">All Criticalities</option></select>
-                        <select id="machine-explorer-status" class="hidden" hidden><option value="">All Statuses</option></select>
-                        <select id="machine-explorer-service-level" class="hidden" hidden><option value="">All Service Levels</option></select>
-                        <select id="machine-explorer-asset" class="hidden" hidden><option value="">All Assets</option></select>
-                        <select id="machine-explorer-machine" class="hidden" hidden><option value="">All Machines</option></select>
-                        <select id="machine-explorer-created-by" class="hidden" hidden><option value="">All Creators</option></select>
-                        <select id="machine-explorer-started-by" class="hidden" hidden><option value="">All Starters</option></select>
-                        <select id="machine-explorer-quality" class="hidden" hidden><option value="">All Quality Flags</option></select>
-                    </div>
-                    <div class="machine-drill-section">
-                        <div class="machine-drill-heading">
-                            <div class="card-title">1. Select Group</div>
-                        </div>
-                        <div class="machine-group-card-grid" id="machine-group-cards"></div>
-                    </div>
-                    <!-- Refrigeration System step 2: sub machine group selector -->
-                    <div class="machine-drill-section" id="refrig-subgroup-section" style="display:none">
-                        <div class="machine-drill-heading">
-                            <div class="card-title">2. Select Refrigeration Subgroup</div>
-                        </div>
-                        <div class="refrig-subgroup-buttons" id="refrig-subgroup-buttons"></div>
-                    </div>
-                    <!-- Refrigeration System step 3: Condenser/Evaporator compact tree + detail panel -->
-                    <div class="machine-drill-section" id="refrig-cde-section" style="display:none">
-                        <div class="machine-drill-heading">
-                            <div class="card-title">3. Select Condenser Group or Asset</div>
-                        </div>
-                        <div class="refrig-cde-layout">
-                            <div class="refrig-tree-panel">
-                                <div class="refrig-tree-search-row">
-                                    <input type="text" id="refrig-tree-search" class="refrig-tree-search" placeholder="Search condensers or evaporators...">
-                                </div>
-                                <div class="refrig-tree-list" id="refrig-tree-list"></div>
-                            </div>
-                            <div class="refrig-detail-panel" id="refrig-detail-panel">
-                                <div id="refrig-detail-placeholder" class="refrig-detail-placeholder">Select a condenser group or asset from the tree to view its KPI summary and WO/MR history.</div>
-                                <div id="refrig-kpi-area" style="display:none">
-                                    <div class="refrig-detail-title" id="refrig-detail-title"></div>
-                                    <div class="refrig-detail-meta" id="refrig-detail-meta"></div>
-                                    <div class="kpi-grid machine-explorer-kpi-grid">
-                                        <div class="kpi-card highlight-blue"><div class="kpi-label">Total WO/MR</div><div class="kpi-value mini" id="refrig-kpi-total">--</div></div>
-                                        <div class="kpi-card highlight-amber"><div class="kpi-label">Open WO/MR</div><div class="kpi-value mini" id="refrig-kpi-open">--</div></div>
-                                        <div class="kpi-card highlight-red"><div class="kpi-label">New / Not Acknowledged</div><div class="kpi-value mini" id="refrig-kpi-not-ack">--</div></div>
-                                        <div class="kpi-card highlight-amber"><div class="kpi-label">In Progress MR</div><div class="kpi-value mini" id="refrig-kpi-progress">--</div></div>
-                                        <div class="kpi-card highlight-green"><div class="kpi-label">Finished MR</div><div class="kpi-value mini" id="refrig-kpi-finished">--</div></div>
-                                        <div class="kpi-card highlight-blue"><div class="kpi-label">Closure Rate</div><div class="kpi-value mini" id="refrig-kpi-closure">--</div></div>
-                                        <div class="kpi-card highlight-purple"><div class="kpi-label">Average TTR / MTTR</div><div class="kpi-value mini" id="refrig-kpi-mttr">--</div></div>
-                                        <div class="kpi-card highlight-amber"><div class="kpi-label">Oldest Open MR Age</div><div class="kpi-value mini" id="refrig-kpi-oldest">--</div></div>
-                                        <div class="kpi-card highlight-red"><div class="kpi-label">Invalid / Missing Date Records</div><div class="kpi-value mini" id="refrig-kpi-invalid">--</div></div>
-                                    </div>
-                                </div>
-                                <div class="table-wrapper machine-history-wrapper" id="refrig-history-wrapper" style="display:none">
-                                    <table>
-                                        <thead>
-                                            <tr>
-                                                <th>Maintenance Request</th>
-                                                <th>Work Order</th>
-                                                <th>Asset ID</th>
-                                                <th>Asset Name</th>
-                                                <th>Asset Type</th>
-                                                <th>Parent Condenser</th>
-                                                <th>Status</th>
-                                                <th>Service Level</th>
-                                                <th>Description</th>
-                                                <th>Translated Description</th>
-                                                <th>Created By</th>
-                                                <th>Started By</th>
-                                                <th>Created Date</th>
-                                                <th>Actual Start</th>
-                                                <th>Actual End</th>
-                                                <th>Age / Duration</th>
-                                                <th>Acknowledgement Status</th>
-                                                <th>Data Quality Flag</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="refrig-history-body">
-                                            <tr><td colspan="18" class="empty-cell">Select a condenser group or asset to view WO/MR history.</td></tr>
-                                        </tbody>
-                                    </table>
-                                </div>
+                    <div class="machine-explorer-module">
+                        <div class="machine-explorer-header">
+                            <div class="machine-explorer-heading">
+                                <div class="card-title">Machine Explorer</div>
+                                <p class="machine-explorer-subtitle">Select a group, choose an asset, then review work order and maintenance request history.</p>
                             </div>
                         </div>
-                    </div>
-                    <div class="machine-drill-section" id="machine-asset-drill-section">
-                        <div class="machine-drill-heading machine-drill-heading-row">
-                            <div>
-                                <div class="card-title">2. Select Machine / Asset</div>
-                            </div>
-                            <div class="filter-inline">
-                                <label class="inline-label" for="machine-explorer-sort">Sort</label>
-                                <select id="machine-explorer-sort" class="inline-select">
+                        <div class="filter-toolbar machine-explorer-filter-toolbar machine-explorer-top-toolbar">
+                            <div class="filter-group"><label for="machine-explorer-year">Year</label><select id="machine-explorer-year"><option value="">All Years</option></select></div>
+                            <div class="filter-group"><label for="machine-explorer-month">Month</label><select id="machine-explorer-month"><option value="">All Months</option></select></div>
+                            <div class="filter-group">
+                                <label for="machine-explorer-sort">Sort</label>
+                                <select id="machine-explorer-sort">
                                     <option value="most_wo_mr">Most WO/MR (Default)</option>
                                     <option value="latest_wo_mr">Latest WO/MR</option>
                                     <option value="least_closure_rate">Least Closure Rate</option>
@@ -1807,139 +1730,241 @@
                                     <option value="most_invalid">Most Invalid/Missing Records</option>
                                 </select>
                             </div>
-                            <!-- Criticality filter hidden per request; select retained (hidden) so existing logic keeps working. -->
-                            <div class="filter-inline" hidden style="display:none">
-                                <label class="inline-label" for="machine-explorer-asset-criticality">Criticality</label>
-                                <select id="machine-explorer-asset-criticality" class="inline-select">
-                                    <option value="">All</option>
-                                    <option value="Critical">Critical</option>
-                                    <option value="Non-Critical">Non-Critical</option>
-                                </select>
-                            </div>
-                            <div class="filter-inline">
-                                <label class="inline-label" for="machine-explorer-ack-filter">Acknowledgement</label>
-                                <select id="machine-explorer-ack-filter" class="inline-select">
+                            <div class="filter-group">
+                                <label for="machine-explorer-ack-filter">Acknowledgement Status</label>
+                                <select id="machine-explorer-ack-filter">
                                     <option value="">All</option>
                                     <option value="Acknowledged">Acknowledged</option>
                                     <option value="Not Acknowledged">Not Acknowledged</option>
                                 </select>
                             </div>
+                            <!-- Hidden filters retained so existing Machine Explorer logic keeps working. -->
+                            <select id="machine-explorer-group" class="hidden" hidden><option value="">All Groups</option></select>
+                            <select id="machine-explorer-criticality" class="hidden" hidden><option value="">All Criticalities</option></select>
+                            <select id="machine-explorer-status" class="hidden" hidden><option value="">All Statuses</option></select>
+                            <select id="machine-explorer-service-level" class="hidden" hidden><option value="">All Service Levels</option></select>
+                            <select id="machine-explorer-asset" class="hidden" hidden><option value="">All Assets</option></select>
+                            <select id="machine-explorer-machine" class="hidden" hidden><option value="">All Machines</option></select>
+                            <select id="machine-explorer-created-by" class="hidden" hidden><option value="">All Creators</option></select>
+                            <select id="machine-explorer-started-by" class="hidden" hidden><option value="">All Starters</option></select>
+                            <select id="machine-explorer-quality" class="hidden" hidden><option value="">All Quality Flags</option></select>
+                            <select id="machine-explorer-asset-criticality" class="hidden" hidden>
+                                <option value="">All</option>
+                                <option value="Critical">Critical</option>
+                                <option value="Non-Critical">Non-Critical</option>
+                            </select>
                         </div>
-                        <div class="table-wrapper machine-asset-summary-wrapper">
-                            <table>
-                                <thead>
-                                    <tr>
-                                        <th>Asset ID</th>
-                                        <th>Machine / Asset Name</th>
-                                        <th>Criticality</th>
-                                        <th>Machine Group</th>
-                                        <th>Total WO/MR</th>
-                                        <th>Open WO/MR</th>
-                                        <th>New / Not Acknowledged MR</th>
-                                        <th>In Progress MR</th>
-                                        <th>Finished MR</th>
-                                        <th>Closure Rate</th>
-                                        <th>Average MTTR/TTR</th>
-                                        <th>Latest WO/MR Date</th>
-                                        <th>Oldest Open MR Age</th>
-                                        <th>Invalid / Missing Date Records</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="machine-asset-summary-body">
-                                    <tr><td colspan="14" class="empty-cell">Select a group to view machines.</td></tr>
-                                </tbody>
-                            </table>
+                        <div class="machine-drill-section machine-explorer-stage">
+                            <div class="machine-drill-heading">
+                                <div class="card-title">1. Select Machine Group</div>
+                                <p class="card-subtitle">Start with a machine group summary, then drill into the asset list below.</p>
+                            </div>
+                            <div class="machine-group-card-grid" id="machine-group-cards"></div>
                         </div>
-                    </div>
-                    <div class="machine-detail-panel machine-drill-section" id="machine-detail-panel">
-                        <div class="machine-detail-inner">
-                            <div class="machine-drill-heading machine-drill-heading-row">
-                                <div>
-                                    <div class="card-title">3. View WO/MR History</div>
-                                </div>
-                                <div class="filter-inline">
-                                    <label class="inline-label" for="machine-history-sort">History Sort</label>
-                                    <select id="machine-history-sort" class="inline-select">
-                                        <option value="latest_wo_mr">Latest WO/MR (Default)</option>
-                                        <option value="ack_not_first">Acknowledgement: Not Acknowledged First</option>
-                                        <option value="ack_yes_first">Acknowledgement: Acknowledged First</option>
-                                        <option value="service_low_first">Service Level: 1 First</option>
-                                        <option value="service_high_first">Service Level: Highest First</option>
-                                        <option value="status_forward">Status: New to Finished</option>
-                                        <option value="status_reverse">Status: Finished to New</option>
-                                    </select>
-                                </div>
-                                <div class="filter-inline">
-                                    <label class="inline-label" for="machine-history-year">Year</label>
-                                    <select id="machine-history-year" class="inline-select">
-                                        <option value="">All Years</option>
-                                    </select>
-                                </div>
-                                <div class="filter-inline">
-                                    <label class="inline-label" for="machine-history-month">Month</label>
-                                    <select id="machine-history-month" class="inline-select">
-                                        <option value="">All Months</option>
-                                    </select>
-                                </div>
-                                <div class="filter-inline custom-date-filter">
-                                    <label class="inline-label" for="machine-history-date-from">Date Range</label>
-                                    <input id="machine-history-date-from" type="date" class="inline-date" aria-label="History start date" title="History start date">
-                                    <span class="inline-range-separator">to</span>
-                                    <input id="machine-history-date-to" type="date" class="inline-date" aria-label="History end date" title="History end date">
-                                </div>
-                                <div class="filter-inline filter-grow">
-                                    <label class="inline-label" for="machine-history-search">Search</label>
-                                    <input id="machine-history-search" type="text" class="inline-input" placeholder="MR/WO ID, description…">
-                                </div>
-                                <div class="view-toggle" id="history-view-toggle">
-                                    <button type="button" class="toggle-btn active" data-history-mode="selected">Selected Asset</button>
-                                    <button type="button" class="toggle-btn" data-history-mode="all">All Assets</button>
-                                </div>
-                                <label class="inline-label smart-match-toggle" title="Also include low-confidence related matches (fuzzy / broad keyword) detected from descriptions and functional locations.">
-                                    <input type="checkbox" id="include-related-matches"> Include possible related matches
-                                </label>
-                                <button type="button" class="export-btn" id="machine-history-export-btn" title="Export WO/MR history and asset summary to Excel">Export XLSX</button>
+                    <!-- Refrigeration System step 2: sub machine group selector -->
+                        <div class="machine-drill-section machine-explorer-stage machine-explorer-stage-nested" id="refrig-subgroup-section" style="display:none">
+                            <div class="machine-drill-heading">
+                                <div class="machine-stage-kicker">Step 2 detail</div>
+                                <div class="card-title">Refine Refrigeration Selection</div>
+                                <p class="card-subtitle">Use a refrigeration subgroup before choosing a specific condenser group or asset.</p>
                             </div>
-                            <div class="machine-detail-title" id="machine-explorer-title">WO/MR History for Selected Asset</div>
-                            <div class="machine-detail-meta" id="machine-explorer-meta">Select an asset from the list above.</div>
-                            <div class="machine-detail-helper" id="machine-explorer-helper">Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location.</div>
-                            <div class="kpi-grid machine-explorer-kpi-grid">
-                                <div class="kpi-card highlight-blue"><div class="kpi-label">Total WO/MR</div><div class="kpi-value mini" id="machine-kpi-total">--</div></div>
-                                <div class="kpi-card highlight-amber"><div class="kpi-label">Open WO/MR</div><div class="kpi-value mini" id="machine-kpi-open">--</div></div>
-                                <div class="kpi-card highlight-red"><div class="kpi-label">New / Not Acknowledged MR</div><div class="kpi-value mini" id="machine-kpi-not-ack">--</div></div>
-                                <div class="kpi-card highlight-amber"><div class="kpi-label">In Progress MR</div><div class="kpi-value mini" id="machine-kpi-progress">--</div></div>
-                                <div class="kpi-card highlight-green"><div class="kpi-label">Finished MR</div><div class="kpi-value mini" id="machine-kpi-finished">--</div></div>
-                                <div class="kpi-card highlight-blue"><div class="kpi-label">Closure Rate</div><div class="kpi-value mini" id="machine-kpi-closure">--</div></div>
-                                <div class="kpi-card highlight-purple"><div class="kpi-label">Average TTR / MTTR</div><div class="kpi-value mini" id="machine-kpi-mttr">--</div></div>
-                                <div class="kpi-card highlight-amber"><div class="kpi-label">Oldest Open MR Age</div><div class="kpi-value mini" id="machine-kpi-oldest">--</div></div>
-                                <div class="kpi-card highlight-red"><div class="kpi-label">Invalid / Missing Date Records</div><div class="kpi-value mini" id="machine-kpi-invalid">--</div></div>
+                            <div class="refrig-subgroup-buttons" id="refrig-subgroup-buttons"></div>
+                        </div>
+                    <!-- Refrigeration System step 3: Condenser/Evaporator compact tree + detail panel -->
+                        <div class="machine-drill-section machine-explorer-stage machine-explorer-stage-nested" id="refrig-cde-section" style="display:none">
+                            <div class="machine-drill-heading">
+                                <div class="machine-stage-kicker">Step 2 detail</div>
+                                <div class="card-title">Select Refrigeration Asset</div>
+                                <p class="card-subtitle">Search the condenser and evaporator network, then review connected WO/MR history in the linked detail panel.</p>
                             </div>
-                            <div class="table-wrapper machine-history-wrapper">
+                            <div class="refrig-cde-layout">
+                                <div class="refrig-tree-panel">
+                                    <div class="refrig-tree-search-row">
+                                        <input type="text" id="refrig-tree-search" class="refrig-tree-search" placeholder="Search condensers or evaporators...">
+                                    </div>
+                                    <div class="refrig-tree-list" id="refrig-tree-list"></div>
+                                </div>
+                                <div class="refrig-detail-panel" id="refrig-detail-panel">
+                                    <div id="refrig-detail-placeholder" class="refrig-detail-placeholder">Select a condenser group or asset from the tree to view its KPI summary and WO/MR history.</div>
+                                    <div id="refrig-kpi-area" style="display:none">
+                                        <div class="refrig-detail-title" id="refrig-detail-title"></div>
+                                        <div class="refrig-detail-meta" id="refrig-detail-meta"></div>
+                                        <div class="kpi-grid machine-explorer-kpi-grid">
+                                            <div class="kpi-card highlight-blue"><div class="kpi-label">Total WO/MR</div><div class="kpi-value mini" id="refrig-kpi-total">--</div></div>
+                                            <div class="kpi-card highlight-amber"><div class="kpi-label">Open WO/MR</div><div class="kpi-value mini" id="refrig-kpi-open">--</div></div>
+                                            <div class="kpi-card highlight-red"><div class="kpi-label">New / Not Acknowledged</div><div class="kpi-value mini" id="refrig-kpi-not-ack">--</div></div>
+                                            <div class="kpi-card highlight-amber"><div class="kpi-label">In Progress MR</div><div class="kpi-value mini" id="refrig-kpi-progress">--</div></div>
+                                            <div class="kpi-card highlight-green"><div class="kpi-label">Finished MR</div><div class="kpi-value mini" id="refrig-kpi-finished">--</div></div>
+                                            <div class="kpi-card highlight-blue"><div class="kpi-label">Closure Rate</div><div class="kpi-value mini" id="refrig-kpi-closure">--</div></div>
+                                            <div class="kpi-card highlight-purple"><div class="kpi-label">Average TTR / MTTR</div><div class="kpi-value mini" id="refrig-kpi-mttr">--</div></div>
+                                            <div class="kpi-card highlight-amber"><div class="kpi-label">Oldest Open MR Age</div><div class="kpi-value mini" id="refrig-kpi-oldest">--</div></div>
+                                            <div class="kpi-card highlight-red"><div class="kpi-label">Invalid / Missing Date Records</div><div class="kpi-value mini" id="refrig-kpi-invalid">--</div></div>
+                                        </div>
+                                    </div>
+                                    <div class="table-wrapper machine-history-wrapper" id="refrig-history-wrapper" style="display:none">
+                                        <table>
+                                            <thead>
+                                                <tr>
+                                                    <th>Maintenance Request</th>
+                                                    <th>Work Order</th>
+                                                    <th>Asset ID</th>
+                                                    <th>Asset Name</th>
+                                                    <th>Asset Type</th>
+                                                    <th>Parent Condenser</th>
+                                                    <th>Status</th>
+                                                    <th>Service Level</th>
+                                                    <th>Description</th>
+                                                    <th>Translated Description</th>
+                                                    <th>Created By</th>
+                                                    <th>Started By</th>
+                                                    <th>Created Date</th>
+                                                    <th>Actual Start</th>
+                                                    <th>Actual End</th>
+                                                    <th>Age / Duration</th>
+                                                    <th>Acknowledgement Status</th>
+                                                    <th>Data Quality Flag</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody id="refrig-history-body">
+                                                <tr><td colspan="18" class="empty-cell">Select a condenser group or asset to view WO/MR history.</td></tr>
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="machine-drill-section machine-explorer-stage" id="machine-asset-drill-section">
+                            <div class="machine-drill-heading">
+                                <div class="card-title">2. Select Machine / Asset</div>
+                                <p class="card-subtitle">Review machines in the selected group, then choose one row to continue into the connected history view.</p>
+                            </div>
+                            <div class="machine-section-meta" id="machine-asset-summary-meta">Select a group to view machines.</div>
+                            <div class="table-wrapper machine-asset-summary-wrapper">
                                 <table>
                                     <thead>
                                         <tr>
-                                            <th>Maintenance Request</th>
-                                            <th>Work Order</th>
-                                            <th>Match</th>
-                                            <th>Status</th>
-                                            <th>Service Level</th>
-                                            <th>Type</th>
-                                            <th>Description</th>
-                                            <th>Translated Description</th>
-                                            <th>Started By</th>
-                                            <th>Created By</th>
-                                            <th>Created Date</th>
-                                            <th>Actual Start</th>
-                                            <th>Actual End</th>
-                                            <th>Age / Duration</th>
-                                            <th>Acknowledgement Status</th>
-                                            <th>Data Quality Flag</th>
+                                            <th>Asset ID</th>
+                                            <th>Machine / Asset Name</th>
+                                            <th>Criticality</th>
+                                            <th>Machine Group</th>
+                                            <th>Total WO/MR</th>
+                                            <th>Open WO/MR</th>
+                                            <th>New / Not Acknowledged MR</th>
+                                            <th>In Progress MR</th>
+                                            <th>Finished MR</th>
+                                            <th>Closure Rate</th>
+                                            <th>Average MTTR/TTR</th>
+                                            <th>Latest WO/MR Date</th>
+                                            <th>Oldest Open MR Age</th>
+                                            <th>Invalid / Missing Date Records</th>
                                         </tr>
                                     </thead>
-                                    <tbody id="machine-history-body">
-                                        <tr><td colspan="16" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
+                                    <tbody id="machine-asset-summary-body">
+                                        <tr><td colspan="14" class="empty-cell">Select a group to view machines.</td></tr>
                                     </tbody>
                                 </table>
+                            </div>
+                        </div>
+                        <div class="machine-detail-panel machine-drill-section machine-explorer-stage machine-explorer-history-stage" id="machine-detail-panel">
+                            <div class="machine-detail-inner">
+                                <div class="machine-drill-heading">
+                                    <div class="card-title">3. View WO/MR History</div>
+                                    <p class="card-subtitle">Filter the record set, switch between selected asset and all-assets mode, then export when needed.</p>
+                                </div>
+                                <div class="machine-history-toolbar">
+                                    <div class="filter-inline">
+                                        <label class="inline-label" for="machine-history-sort">History Sort</label>
+                                        <select id="machine-history-sort" class="inline-select">
+                                            <option value="latest_wo_mr">Latest WO/MR (Default)</option>
+                                            <option value="ack_not_first">Acknowledgement: Not Acknowledged First</option>
+                                            <option value="ack_yes_first">Acknowledgement: Acknowledged First</option>
+                                            <option value="service_low_first">Service Level: 1 First</option>
+                                            <option value="service_high_first">Service Level: Highest First</option>
+                                            <option value="status_forward">Status: New to Finished</option>
+                                            <option value="status_reverse">Status: Finished to New</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-inline">
+                                        <label class="inline-label" for="machine-history-year">Year</label>
+                                        <select id="machine-history-year" class="inline-select">
+                                            <option value="">All Years</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-inline">
+                                        <label class="inline-label" for="machine-history-month">Month</label>
+                                        <select id="machine-history-month" class="inline-select">
+                                            <option value="">All Months</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-inline mht-date-range">
+                                        <label class="inline-label">Date Range</label>
+                                        <div class="mht-date-inputs">
+                                            <span class="mht-date-sep">From</span>
+                                            <input id="machine-history-date-from" type="date" class="inline-date" aria-label="History start date" title="History start date">
+                                            <span class="mht-date-sep">To</span>
+                                            <input id="machine-history-date-to" type="date" class="inline-date" aria-label="History end date" title="History end date">
+                                        </div>
+                                    </div>
+                                    <div class="filter-inline mht-search">
+                                        <label class="inline-label" for="machine-history-search">Search</label>
+                                        <input id="machine-history-search" type="text" class="inline-input" placeholder="Search MR/WO ID or description…">
+                                    </div>
+                                    <div class="mht-toggle-cell">
+                                        <span class="inline-label">Asset Scope</span>
+                                        <div class="view-toggle" id="history-view-toggle">
+                                            <button type="button" class="toggle-btn active" data-history-mode="selected">Selected Asset</button>
+                                            <button type="button" class="toggle-btn" data-history-mode="all">All Assets</button>
+                                        </div>
+                                    </div>
+                                    <div class="mht-actions-cell">
+                                        <label class="smart-match-toggle" title="Also include low-confidence related matches (fuzzy / broad keyword) detected from descriptions and functional locations.">
+                                            <input type="checkbox" id="include-related-matches"> Include possible related matches
+                                        </label>
+                                        <button type="button" class="export-btn" id="machine-history-export-btn" title="Export WO/MR history and asset summary to Excel">Export XLSX</button>
+                                    </div>
+                                </div>
+                                <div class="machine-history-context empty" id="machine-history-context">Select an asset above to view WO/MR history.</div>
+                                <div class="machine-detail-title" id="machine-explorer-title">WO/MR History</div>
+                                <div class="machine-detail-meta" id="machine-explorer-meta">Select an asset from the list above.</div>
+                                <div class="machine-detail-helper" id="machine-explorer-helper">Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location.</div>
+                                <div class="kpi-grid machine-explorer-kpi-grid">
+                                    <div class="kpi-card highlight-blue"><div class="kpi-label">Total WO/MR</div><div class="kpi-value mini" id="machine-kpi-total">--</div></div>
+                                    <div class="kpi-card highlight-amber"><div class="kpi-label">Open WO/MR</div><div class="kpi-value mini" id="machine-kpi-open">--</div></div>
+                                    <div class="kpi-card highlight-red"><div class="kpi-label">New / Not Acknowledged MR</div><div class="kpi-value mini" id="machine-kpi-not-ack">--</div></div>
+                                    <div class="kpi-card highlight-amber"><div class="kpi-label">In Progress MR</div><div class="kpi-value mini" id="machine-kpi-progress">--</div></div>
+                                    <div class="kpi-card highlight-green"><div class="kpi-label">Finished MR</div><div class="kpi-value mini" id="machine-kpi-finished">--</div></div>
+                                    <div class="kpi-card highlight-blue"><div class="kpi-label">Closure Rate</div><div class="kpi-value mini" id="machine-kpi-closure">--</div></div>
+                                    <div class="kpi-card highlight-purple"><div class="kpi-label">Average TTR / MTTR</div><div class="kpi-value mini" id="machine-kpi-mttr">--</div></div>
+                                    <div class="kpi-card highlight-amber"><div class="kpi-label">Oldest Open MR Age</div><div class="kpi-value mini" id="machine-kpi-oldest">--</div></div>
+                                    <div class="kpi-card highlight-red"><div class="kpi-label">Invalid / Missing Date Records</div><div class="kpi-value mini" id="machine-kpi-invalid">--</div></div>
+                                </div>
+                                <div class="table-wrapper machine-history-wrapper">
+                                    <table>
+                                        <thead>
+                                            <tr>
+                                                <th>Maintenance Request</th>
+                                                <th>Work Order</th>
+                                                <th>Match</th>
+                                                <th>Status</th>
+                                                <th>Service Level</th>
+                                                <th>Type</th>
+                                                <th>Description</th>
+                                                <th>Translated Description</th>
+                                                <th>Started By</th>
+                                                <th>Created By</th>
+                                                <th>Created Date</th>
+                                                <th>Actual Start</th>
+                                                <th>Actual End</th>
+                                                <th>Age / Duration</th>
+                                                <th>Acknowledgement Status</th>
+                                                <th>Data Quality Flag</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="machine-history-body">
+                                            <tr><td colspan="16" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -2050,7 +2075,7 @@
     </main>
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
-    <script src="script.js?v=20260618-outstanding-sort-1" defer></script>
+    <script src="script.js?v=20260623-crit-collapse-1" defer></script>
     <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
 </body>
 </html>

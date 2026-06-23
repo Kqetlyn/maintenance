@@ -153,6 +153,8 @@ let assetProfiles = {};            // {assetId: slim profile} from /api/asset-li
 let includeRelatedMatches = false; // "Include possible related matches" toggle (low-confidence)
 let openWorkOrdersData = [];
 let openWorkOrdersLoaded = false;
+let assetListLoaded = false;
+let assetListLoadFailed = false;
 let selectedMachineName = null;
 let selectedAssetId = null;
 const PM_CM_REVIEW_STORAGE_KEY = "downtime.preventiveCorrectiveReviewDecisions.v1";
@@ -1185,6 +1187,10 @@ function isMrReviewStatus(status) {
     return ["confirm", "rework", "re work", "rejected", "reject"].includes(normalizeClassification(status));
 }
 
+function isMrRejectedStatus(status) {
+    return ["rejected", "reject", "cancelled", "canceled", "cancel"].includes(normalizeClassification(status));
+}
+
 function isNormalOpenMrStatus(status) {
     return isMrNewStatus(status) || isMrInProgressStatus(status);
 }
@@ -1412,6 +1418,7 @@ function buildMrMovementModel(rows = [], selectedYearValue) {
     let raisedOpen = 0;
     let previousOpen = 0;
     let selectedYearRaisedClosed = 0;
+    let raisedRejectedCount = 0;
     let openingBacklog = 0;
 
     validRows.forEach((item) => {
@@ -1419,10 +1426,12 @@ function buildMrMovementModel(rows = [], selectedYearValue) {
         const itemStatus = getMrStatus(item.row);
         const itemIsOpen = isNormalOpenMrStatus(itemStatus);
         const itemIsFinished = isMrFinishedStatus(itemStatus);
+        const itemIsRejected = isMrRejectedStatus(itemStatus);
         if (isDateInMrFinancialYear(item.raised.date, selectedYear)) {
             raisedCount += 1;
             monthlyRaised[item.raised.date.getMonth()] += 1;
             if (itemIsFinished && item.finished.date) selectedYearRaisedClosed += 1;
+            if (itemIsRejected) raisedRejectedCount += 1;
         }
         if (itemIsFinished && isDateInMrFinancialYear(item.finished.date, selectedYear)) {
             finishedCount += 1;
@@ -1438,6 +1447,9 @@ function buildMrMovementModel(rows = [], selectedYearValue) {
 
     const closingBacklog = previousOpen + raisedOpen;
     const relevantRows = classified.filter((item) => item.relevant);
+    // Closure rate excludes rejected/cancelled from denominator — they were never
+    // worked on and skew the metric down when all open MR have genuinely been resolved.
+    const validDenominator = raisedCount - raisedRejectedCount;
     return {
         selectedYear,
         financialYearLabel: getMrFinancialYearLabel(selectedYear),
@@ -1451,7 +1463,10 @@ function buildMrMovementModel(rows = [], selectedYearValue) {
         raisedOpen,
         previousOpen,
         selectedYearRaisedClosed,
-        closureRate: raisedCount ? (selectedYearRaisedClosed / raisedCount) * 100 : null,
+        raisedRejectedCount,
+        closureRate: validDenominator > 0 ? (selectedYearRaisedClosed / validDenominator) * 100 : null,
+        resolutionRate: raisedCount > 0 ? ((selectedYearRaisedClosed + raisedRejectedCount) / raisedCount) * 100 : null,
+        rejectionRate: raisedCount > 0 ? (raisedRejectedCount / raisedCount) * 100 : null,
         monthlyRaised,
         monthlyFinished,
         openingBacklog,
@@ -2288,7 +2303,7 @@ function renderMrOutstandingTable(model) {
 }
 
 function renderMrMovementLoading(message = "Loading yearly MR movement.") {
-    ["mr-raised-selected-year", "mr-finished-selected-year", "mr-carryover-closed", "mr-raised-open", "mr-previous-open", "mr-closure-rate"].forEach((id) => {
+    ["mr-raised-selected-year", "mr-finished-selected-year", "mr-carryover-closed", "mr-raised-open", "mr-previous-open", "mr-rejected-count", "mr-closure-rate", "mr-resolution-rate"].forEach((id) => {
         setText(id, "--");
     });
     setText("mr-movement-summary", message);
@@ -2328,13 +2343,18 @@ function renderMrMovementSection(rows = allWorkOrderRowsCache) {
     setText("mr-carryover-closed", fmtNumber(model.carryoverClosed));
     setText("mr-raised-open", fmtNumber(model.raisedOpen));
     setText("mr-previous-open", fmtNumber(model.previousOpen));
+    setText("mr-rejected-count", fmtNumber(model.raisedRejectedCount));
     setText("mr-closure-rate", model.closureRate === null ? "N/A" : fmtPercent(model.closureRate));
+    setText("mr-resolution-rate", model.resolutionRate === null ? "N/A" : fmtPercent(model.resolutionRate));
     const direction = model.closingBacklog > model.openingBacklog
         ? "increasing"
         : (model.closingBacklog < model.openingBacklog ? "reducing" : "stable");
+    const rejectedNote = model.raisedRejectedCount > 0
+        ? ` ${fmtNumber(model.raisedRejectedCount)} MR were rejected or cancelled and are excluded from the closure rate.`
+        : "";
     setText(
         "mr-movement-summary",
-        `In ${model.financialYearLabel}, ${fmtNumber(model.raisedCount)} MR were raised and ${fmtNumber(model.finishedCount)} MR were finished. ${fmtNumber(model.carryoverClosed)} completed MR were carry-over from previous financial years, while ${fmtNumber(model.previousOpen)} previous financial-year MR remain open. This indicates whether maintenance backlog is ${direction} during the selected financial year.`
+        `In ${model.financialYearLabel}, ${fmtNumber(model.raisedCount)} MR were raised and ${fmtNumber(model.finishedCount)} MR were finished.${rejectedNote} ${fmtNumber(model.carryoverClosed)} completed MR were carry-over from previous financial years, while ${fmtNumber(model.previousOpen)} previous financial-year MR remain open. This indicates whether maintenance backlog is ${direction} during the selected financial year.`
     );
     const warningParts = [];
     if (!rows.length) warningParts.push("No imported work orders are available for yearly MR movement.");
@@ -2640,10 +2660,6 @@ function renderDowntimeOverviewFromRows(rows = []) {
         setText("kpi-maintenance-resolution-count", "-- in-progress MR");
         setText("kpi-work-order-count", "--");
         setText("kpi-work-order-count-sub", "--");
-        setText("kpi-outstanding-ack", "--");
-        setText("kpi-outstanding-critical", "--");
-        setText("kpi-outstanding-noncritical", "--");
-        setText("kpi-oldest-unack-age", "Oldest unacknowledged age unavailable.");
         setHtml("kpi-open-severity-breakdown", `<span class="sl-empty">--</span>`);
         setHtml("kpi-open-severity-critical-breakdown", `<span class="sl-trend-label">Critical open MR by Service level.</span>`);
         setText("kpi-data-review-count", "--");
@@ -2657,12 +2673,6 @@ function renderDowntimeOverviewFromRows(rows = []) {
     const newRows = openRows.filter((row) => isMrNewStatus(getMrStatus(row)));
     const inProgressRows = openRows.filter((row) => isMrInProgressStatus(getMrStatus(row)));
     const machinesAffected = new Set(openRows.map((row) => String(row.asset_id || row.machine_code || "").trim()).filter(Boolean));
-    const outstandingRows = newRows.filter((row) => !getMrWorkOrderOnlyId(row));
-    const criticalOutstanding = outstandingRows.filter((row) => isProductionCritical(row)).length;
-    const oldestUnackDays = Math.max(
-        -1,
-        ...outstandingRows.map((row) => getAgeDaysFrom(getMrRaisedDate(row).date)).filter((days) => days !== null)
-    );
     const severityMap = new Map();
     const criticalSeverityMap = new Map();
     openRows.forEach((row) => {
@@ -2679,10 +2689,6 @@ function renderDowntimeOverviewFromRows(rows = []) {
     setText("kpi-maintenance-resolution-count", `${fmtNumber(inProgressRows.length)} in-progress MR`);
     setText("kpi-work-order-count", fmtNumber(newRows.length));
     setText("kpi-work-order-count-sub", fmtNumber(machinesAffected.size));
-    setText("kpi-outstanding-ack", fmtNumber(outstandingRows.length));
-    setText("kpi-outstanding-critical", fmtNumber(criticalOutstanding));
-    setText("kpi-outstanding-noncritical", fmtNumber(outstandingRows.length - criticalOutstanding));
-    setText("kpi-oldest-unack-age", oldestUnackDays >= 0 ? `Oldest unacknowledged MR: ${formatDays(oldestUnackDays)}` : "No unacknowledged MR with a raised date.");
     setHtml("kpi-open-severity-breakdown", buildSeverityBreakdownHtml(severityMap));
     setHtml("kpi-open-severity-critical-breakdown", buildSeverityBreakdownCriticalHtml(criticalSeverityMap));
     setText("kpi-data-reliability", fmtPercent((qualityValid / kpiRows.length) * 100));
@@ -6137,20 +6143,34 @@ function resetMachineExplorerKpis() {
         "machine-kpi-mttr",
         "machine-kpi-oldest",
         "machine-kpi-invalid",
-    ].forEach((id) => setText(id, "--"));
+    ].forEach((id) => setMachineExplorerKpiValue(id, "--"));
+}
+
+function setMachineExplorerKpiValue(id, value) {
+    const text = value == null || value === "" ? "--" : value;
+    setText(id, text);
+    const card = document.getElementById(id)?.closest(".kpi-card");
+    if (card) card.classList.toggle("is-empty", text === "--");
+}
+
+function setMachineHistoryContext(text, isEmpty = false) {
+    const node = document.getElementById("machine-history-context");
+    if (!node) return;
+    node.textContent = text || "";
+    node.classList.toggle("empty", Boolean(isEmpty));
 }
 
 function renderMachineExplorerKpis(filteredRows = []) {
     const summary = summarizeMachineExplorerRows(filteredRows);
-    setText("machine-kpi-total", fmtNumber(summary.total));
-    setText("machine-kpi-open", fmtNumber(summary.open));
-    setText("machine-kpi-not-ack", fmtNumber(summary.notAcknowledged));
-    setText("machine-kpi-progress", fmtNumber(summary.inProgress));
-    setText("machine-kpi-finished", fmtNumber(summary.finished));
-    setText("machine-kpi-closure", summary.closureRate !== null ? fmtPercent(summary.closureRate) : "--");
-    setText("machine-kpi-mttr", summary.averageTtr !== null ? fmtHours(summary.averageTtr) : "--");
-    setText("machine-kpi-oldest", summary.oldestOpenAge !== null ? formatDays(summary.oldestOpenAge) : "--");
-    setText("machine-kpi-invalid", fmtNumber(summary.invalid));
+    setMachineExplorerKpiValue("machine-kpi-total", fmtNumber(summary.total));
+    setMachineExplorerKpiValue("machine-kpi-open", fmtNumber(summary.open));
+    setMachineExplorerKpiValue("machine-kpi-not-ack", fmtNumber(summary.notAcknowledged));
+    setMachineExplorerKpiValue("machine-kpi-progress", fmtNumber(summary.inProgress));
+    setMachineExplorerKpiValue("machine-kpi-finished", fmtNumber(summary.finished));
+    setMachineExplorerKpiValue("machine-kpi-closure", summary.closureRate !== null ? fmtPercent(summary.closureRate) : "--");
+    setMachineExplorerKpiValue("machine-kpi-mttr", summary.averageTtr !== null ? fmtHours(summary.averageTtr) : "--");
+    setMachineExplorerKpiValue("machine-kpi-oldest", summary.oldestOpenAge !== null ? formatDays(summary.oldestOpenAge) : "--");
+    setMachineExplorerKpiValue("machine-kpi-invalid", fmtNumber(summary.invalid));
 }
 
 function buildMachineExplorerGroupRows(rows = []) {
@@ -6512,7 +6532,7 @@ function renderMachineExplorerAssetSummary(assetRows = []) {
     setText(
         "machine-asset-summary-meta",
         assetRows.length
-            ? `${fmtNumber(assetRows.length)} machine${assetRows.length === 1 ? "" : "s"} in ${groupLabel}. Click a row to view WO/MR history.`
+            ? `${fmtNumber(assetRows.length)} machine${assetRows.length === 1 ? "" : "s"} in ${groupLabel}. Select a row below to continue to Step 3.`
             : `No machines match the current filters in ${groupLabel}.`
     );
     if (!assetRows.length) {
@@ -6761,9 +6781,10 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         const groupLabel = machineExplorerSelectedGroup && machineExplorerSelectedGroup !== MACHINE_EXPLORER_ALL_GROUP
             ? machineExplorerSelectedGroup
             : "All Groups";
-        setText("machine-explorer-title", `WO/MR History — ${groupLabel}`);
+        setMachineHistoryContext("Viewing history for: All assets in current filters.");
+        setText("machine-explorer-title", "WO/MR History");
         setText("machine-explorer-meta", `Showing all ${fmtNumber(filtered.length)} WO/MR record${filtered.length === 1 ? "" : "s"} for current filters.`);
-        setText("history-view-subtitle", "Showing all assets matching the current filters.");
+        setText("machine-explorer-helper", `All Assets view includes every WO/MR that matches the current Machine Explorer filters in ${groupLabel}, plus any history filters applied below.`);
         if (!filtered.length) {
             setHistoryEmpty(true);
             body.innerHTML = `<tr><td colspan="16" class="empty-cell">No WO/MR records match the current filters.</td></tr>`;
@@ -6779,14 +6800,15 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
     }
 
     // Selected-asset mode
-    setText("history-view-subtitle", "WO/MR history appears only after a specific asset is selected.");
     const selectedAsset = assetRows.find((row) => row.assetId === machineExplorerSelectedAssetId);
     if (!selectedAsset) {
         resetMachineExplorerKpis();
-        setText("machine-explorer-title", "WO/MR History for Selected Asset");
-        setText("machine-explorer-meta", "Select a machine/asset from step 2. The table stays empty until an asset is selected.");
+        setMachineHistoryContext("Select an asset above to view WO/MR history.", true);
+        setText("machine-explorer-title", "WO/MR History");
+        setText("machine-explorer-meta", "Select a machine/asset from Step 2. The table stays empty until an asset is selected.");
+        setText("machine-explorer-helper", "Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location.");
         setHistoryEmpty(true);
-        body.innerHTML = `<tr><td colspan="16" class="empty-cell">Select an asset to view specific WO/MR history.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="16" class="empty-cell">Select an asset above to view WO/MR history.</td></tr>`;
         return;
     }
 
@@ -6801,7 +6823,8 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
     const refrigSubtext = refrigType
         ? ` | Asset Type: ${refrigType}${refrigEntry && refrigType === "Evaporator" ? ` | Parent: ${refrigEntry.condenserName}` : " | Subgroup: Condenser-Evaporator Network"}`
         : "";
-    setText("machine-explorer-title", `${selectedAsset.name} | ${selectedAsset.assetId}`);
+    setMachineHistoryContext(`Viewing history for: ${selectedAsset.assetId} - ${selectedAsset.name || "--"}`);
+    setText("machine-explorer-title", "WO/MR History");
     const profile = assetProfiles[selectedAsset.assetId];
     const summary = (profile && window.AssetMatcher)
         ? window.AssetMatcher.summarizeSelectedAsset(filtered, profile)
@@ -6813,7 +6836,12 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         "machine-explorer-meta",
         `Criticality: ${selectedAsset.criticality} | Machine Group: ${selectedAsset.machineGroup || "--"}${refrigSubtext} | ${fmtNumber(filtered.length)} WO/MR record${filtered.length === 1 ? "" : "s"} after filters${matchMeta}.`
     );
-    if (summary) setText("machine-explorer-helper", summary.summaryText + " Toggle “Include possible related matches” to also show low-confidence matches.");
+    setText(
+        "machine-explorer-helper",
+        summary
+            ? `${summary.summaryText} Toggle "Include possible related matches" to also show low-confidence matches.`
+            : 'Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location. Toggle "Include possible related matches" to also show low-confidence matches.'
+    );
     if (!filtered.length) {
         body.innerHTML = `<tr><td colspan="16" class="empty-cell">No WO/MR records match this asset and the current filters.</td></tr>`;
         return;
@@ -7739,9 +7767,10 @@ async function loadMtbfHistory() {
 function requestMtbfHistoryLoad() {
     if (mtbfHistoryPayload || mtbfHistoryPromise) return;
     loadMtbfHistory()
-        .then(() => {
-            populateMtbfPeriodFilters();
-            renderMtbfSection();
+        .then((payload) => {
+            if (!payload) return;
+            try { populateMtbfPeriodFilters(); } catch (e) { console.warn("[MTBF] period filters:", e); }
+            try { renderMtbfSection(); } catch (e) { console.warn("[MTBF] section render:", e); }
             updateKdiSection();
         })
         .catch((error) => {
@@ -8615,6 +8644,40 @@ function buildMachineGroupCategoryMap() {
         });
     });
     return mgToCategory;
+}
+
+// Returns {assetId, category} for each critical asset, filtered by the
+// current stage and category filters. category is "Production"|"Utilities"|"Other".
+function getFilteredCriticalAssetDetails() {
+    if (!assetListLoaded || assetListLoadFailed) return [];
+    const selectedStage = getSelectedDowntimeStage();
+    const isAllStages = !selectedStage || selectedStage === DOWNTIME_STAGE_ALL;
+    const stageFilter = isAllStages ? "" : String(selectedStage).toLowerCase().trim();
+    const result = [];
+    (assetListData || []).forEach((machine) => {
+        if (machine.criticality !== "Critical") return;
+        const groupName = String(machine.machine_name || machine.mappedMainAssetGroup || "").trim();
+        // Apply page-level category filter
+        if (selectedEquipmentCategory !== "all") {
+            const groupCat = EQUIP_GROUP_TO_CATEGORY[groupName] || "Unclassified";
+            if (groupCat !== selectedEquipmentCategory) return;
+        }
+        // Map group to display category
+        const rawCat = EQUIP_GROUP_TO_CATEGORY[groupName];
+        const category = rawCat === "Production Equipment" ? "Production"
+            : rawCat === "Utilities" ? "Utilities"
+            : "Other";
+        (machine.assets || []).forEach((asset) => {
+            const assetId = String(asset.asset_id || "").trim().toUpperCase();
+            if (!assetId) return;
+            if (!isAllStages) {
+                const assetStage = String(asset.mappedStage || "").toLowerCase().trim();
+                if (assetStage !== stageFilter) return;
+            }
+            result.push({ assetId, category });
+        });
+    });
+    return result;
 }
 
 function getCriticalAssetIdSet() {
@@ -9649,125 +9712,133 @@ function wireFilters() {
 // ─── Machine Activity Status ─────────────────────────────────────────
 
 function getLatestWoPerAsset() {
+    if (!assetListLoaded || assetListLoadFailed) return new Map();
     const rows = getWorkOrderRows(getManagement());
     const criticalAssetIds = getCriticalAssetIdSet();
-    // For each asset_id keep only the latest work order by date
+    if (!criticalAssetIds.size) return new Map();
     const latestByAsset = new Map();
     rows.forEach((row) => {
         const id = String(row.asset_id || "").trim().toUpperCase();
-        if (!id || id === "WO-ASSET") return;
-        if (criticalAssetIds.size && !criticalAssetIds.has(id)) return;
-        const dateStr = String(row.actual_start_time || row.start_time || row.maintenance_start_time || "");
+        if (!id || id === "WO-ASSET" || !criticalAssetIds.has(id)) return;
+        const rowStamp = String(row?.actual_start_time || row?.start_time || row?.maintenance_start_time || "").trim();
+        const rowDate = parseDateValue(rowStamp);
         const existing = latestByAsset.get(id);
-        if (!existing || dateStr > String(existing.actual_start_time || existing.start_time || existing.maintenance_start_time || "")) {
+        const existingStamp = String(existing?.actual_start_time || existing?.start_time || existing?.maintenance_start_time || "").trim();
+        const existingDate = parseDateValue(existingStamp);
+        if (
+            !existing
+            || (rowDate && !existingDate)
+            || (rowDate && existingDate && rowDate > existingDate)
+            || (!rowDate && !existingDate && rowStamp > existingStamp)
+        ) {
             latestByAsset.set(id, row);
         }
     });
     return latestByAsset;
 }
 
-function renderActivityStatusCharts() {
-    const latestByAsset = getLatestWoPerAsset();
-
-    let active = 0;
-    let maintenance = 0;
-    latestByAsset.forEach((row) => {
-        if (row.is_open === true) maintenance++;
-        else active++;
-    });
-    const total = active + maintenance;
-
-    setText("act-count-active", String(active));
-    setText("act-count-maintenance", String(maintenance));
-    setText("act-count-total", fmtNumber(total));
-    renderCriticalActivityStatusList(latestByAsset);
-    syncTopicMirrors();
-
-    const pct = (n) => (total ? `${((n / total) * 100).toFixed(1)}%` : "0%");
-
-    const donutCanvas = ensureCanvas("activityDonutChart");
-    destroyChart("activityDonutChart");
-    if (!donutCanvas || total === 0) return;
-
-    chartRefs.activityDonutChart = new Chart(donutCanvas.getContext("2d"), {
-        type: "doughnut",
-        data: {
-            labels: ["Active", "Under Maintenance"],
-            datasets: [{
-                data: [active, maintenance],
-                backgroundColor: ["#16a34a", "#d97706"],
-                borderWidth: 3,
-                borderColor: "#fff",
-                hoverOffset: 8,
-            }],
-        },
-        options: {
-            responsive: true,
-            maintainAspectRatio: false,
-            cutout: "68%",
-            plugins: {
-                legend: { display: false },
-                tooltip: {
-                    callbacks: {
-                        label: (ctx) => ` ${ctx.label}: ${ctx.raw} machine${ctx.raw === 1 ? "" : "s"} (${pct(ctx.raw)})`,
-                    },
-                },
-            },
-        },
-        plugins: [{
-            id: "centerText",
-            afterDraw(chart) {
-                const { ctx, chartArea: { top, bottom, left, right } } = chart;
-                const cx = (left + right) / 2;
-                const cy = (top + bottom) / 2;
-                ctx.save();
-                ctx.textAlign = "center";
-                ctx.textBaseline = "middle";
-                ctx.font = "800 1.7rem Inter, sans-serif";
-                ctx.fillStyle = "#0f172a";
-                ctx.fillText(String(total), cx, cy - 10);
-                ctx.font = "600 0.72rem Inter, sans-serif";
-                ctx.fillStyle = "#64748b";
-                ctx.fillText("WORK ORDERS", cx, cy + 14);
-                ctx.restore();
-            },
-        }],
-    });
+function getCriticalMachineActivityStatus(row) {
+    const status = getMrStatus(row);
+    const normalized = normalizeClassification(status);
+    if (["new", "confirm", "in progress", "inprogress", "rework", "re work"].includes(normalized)) return "maintenance";
+    if (["rejected", "reject"].includes(normalized) || isWorkOrderSlaFinished(status, row)) return "active";
+    if (row?.is_open === true) return "maintenance";
+    if (row?.is_open === false) return "active";
+    return "active";
 }
 
-// ─── Machine Explorer ────────────────────────────────────────────────
+function renderActivityStatusCharts() {
+    destroyChart("activityDonutChart");
+    const setCounts = (activeText, maintenanceText, totalText) => {
+        setText("act-count-active", activeText);
+        setText("act-count-maintenance", maintenanceText);
+        setText("act-count-total", totalText);
+    };
+    const setDetails = (activeDetail, inactiveDetail, totalDetail) => {
+        setText("cma-active-detail", activeDetail);
+        setText("cma-inactive-detail", inactiveDetail);
+        setText("cma-total-detail", totalDetail);
+    };
+    const setNote = (message) => setText("critical-status-card-note", message);
 
-function renderCriticalActivityStatusList(latestByAsset) {
-    const body = document.getElementById("critical-activity-list-body");
-    if (!body) return;
-    const rows = [...(latestByAsset || new Map()).entries()]
-        .map(([assetId, row], index) => {
-            const latestStart = parseDateValue(row?.actual_start_time || row?.start_time || row?.maintenance_start_time);
-            return {
-                assetId,
-                row,
-                index,
-                status: getMrStatus(row),
-                activityStatus: row?.is_open === true ? "Under Maintenance" : "Active",
-                equipmentName: getMachineEquipmentName(row),
-                latestStart,
-            };
-        })
-        .sort((a, b) => a.activityStatus.localeCompare(b.activityStatus) || (b.latestStart?.getTime() || 0) - (a.latestStart?.getTime() || 0));
-    if (!rows.length) {
-        body.innerHTML = `<tr><td colspan="6" class="empty-cell">No critical machine activity records in the current scope.</td></tr>`;
+    if (assetListLoadFailed) {
+        setCounts("--", "--", "--");
+        setDetails("", "", "");
+        setNote("Critical machine status is unavailable because Asset Master could not be loaded.");
         return;
     }
-    body.innerHTML = rows.map((entry) => `
-        <tr>
-            <td class="asset-id-cell">${escapeHtml(entry.assetId || "--")}</td>
-            <td><div class="cell-title">${escapeHtml(entry.equipmentName || "--")}</div></td>
-            <td>${renderBadgeCell("status", entry.status)}</td>
-            <td><span class="wo-response-status ${entry.activityStatus === "Active" ? "met" : "warning"}">${escapeHtml(entry.activityStatus)}</span></td>
-            <td>${escapeHtml(getWorkOrderSlaRowId(entry.row, entry.index))}</td>
-            <td>${escapeHtml(entry.latestStart ? fmtDateTime(entry.latestStart) : "--")}</td>
-        </tr>
-    `).join("");
+    if (!assetListLoaded) {
+        setCounts("--", "--", "--");
+        setDetails("", "", "");
+        setNote("Loading Asset Master to identify critical machines.");
+        return;
+    }
+
+    const criticalAssets = getFilteredCriticalAssetDetails();
+    const total = criticalAssets.length;
+    if (!total) {
+        setCounts("0", "0", "0");
+        setDetails("", "", "No critical machines in scope");
+        setNote("No critical machines found for the selected scope.");
+        return;
+    }
+
+    // Build assetId → category lookup
+    const assetCategoryMap = new Map(criticalAssets.map((a) => [a.assetId, a.category]));
+
+    // Find latest WO per critical asset within the current filtered rows
+    const rows = getWorkOrderRows(getManagement());
+    const latestByAsset = new Map();
+    rows.forEach((row) => {
+        const id = String(row.asset_id || "").trim().toUpperCase();
+        if (!id || !assetCategoryMap.has(id)) return;
+        const rowStamp = String(row?.actual_start_time || row?.start_time || row?.maintenance_start_time || "").trim();
+        const rowDate = parseDateValue(rowStamp);
+        const existing = latestByAsset.get(id);
+        const existingStamp = String(existing?.actual_start_time || existing?.start_time || existing?.maintenance_start_time || "").trim();
+        const existingDate = parseDateValue(existingStamp);
+        if (!existing || (rowDate && !existingDate) || (rowDate && existingDate && rowDate > existingDate) || (!rowDate && !existingDate && rowStamp > existingStamp)) {
+            latestByAsset.set(id, row);
+        }
+    });
+
+    // Count by status × category
+    let activeProd = 0, activeUtil = 0;
+    let inactiveProd = 0, inactiveUtil = 0;
+    criticalAssets.forEach(({ assetId, category }) => {
+        const woRow = latestByAsset.get(assetId);
+        const inactive = woRow && getCriticalMachineActivityStatus(woRow) === "maintenance";
+        if (inactive) {
+            if (category === "Production") inactiveProd++;
+            else if (category === "Utilities") inactiveUtil++;
+        } else {
+            if (category === "Production") activeProd++;
+            else if (category === "Utilities") activeUtil++;
+        }
+    });
+
+    const activeTotal = activeProd + activeUtil;
+    const inactiveTotal = inactiveProd + inactiveUtil;
+    const prodTotal = activeProd + inactiveProd;
+    const utilTotal = activeUtil + inactiveUtil;
+    const otherTotal = total - prodTotal - utilTotal;
+
+    const catStr = (p, u) => {
+        const parts = [];
+        if (p) parts.push(`Production ${fmtNumber(p)}`);
+        if (u) parts.push(`Utilities ${fmtNumber(u)}`);
+        return parts.join(" · ") || "—";
+    };
+    const totalDetail = `Production ${fmtNumber(prodTotal)} · Utilities ${fmtNumber(utilTotal)}${otherTotal ? ` · Other ${fmtNumber(otherTotal)}` : ""}`;
+
+    setCounts(String(activeTotal), String(inactiveTotal), fmtNumber(total));
+    setDetails(catStr(activeProd, activeUtil), catStr(inactiveProd, inactiveUtil), totalDetail);
+
+    if (!latestByAsset.size) {
+        setNote(`No WOs in this period — all ${fmtNumber(total)} critical machine${total === 1 ? "" : "s"} counted as Active.`);
+    } else {
+        setNote(`${fmtNumber(latestByAsset.size)} of ${fmtNumber(total)} critical machine${total === 1 ? "" : "s"} had WOs in this period.`);
+    }
 }
 
 function getWorkOrdersForAsset(assetId) {
@@ -10110,7 +10181,7 @@ async function loadOpenWorkOrders() {
         openWorkOrdersData = data.open_work_orders || [];
         openWorkOrdersLoaded = true;
         renderCurrentDowntimeKpi();
-        if (assetListData.length) renderActivityStatusCharts();
+        if (assetListLoaded || assetListLoadFailed) renderActivityStatusCharts();
     } catch (error) {
         openWorkOrdersLoaded = true;
         console.warn("Open work orders load failed:", error);
@@ -10125,6 +10196,8 @@ async function loadAssetList() {
         const data = await response.json();
         assetListData = data.machines || [];
         assetProfiles = data.asset_profiles || {};
+        assetListLoaded = true;
+        assetListLoadFailed = false;
         renderMachineNameList();
         renderActivityStatusCharts();
         if (openWorkOrdersData.length) renderCurrentDowntimeKpi();
@@ -10133,9 +10206,13 @@ async function loadAssetList() {
         renderMtbfSection();
         updateKdiSection();
     } catch (error) {
+        assetListData = [];
+        assetListLoaded = true;
+        assetListLoadFailed = true;
         const container = document.getElementById("machine-name-list");
         if (container) container.innerHTML = `<div class="empty-state" style="min-height:200px;">Could not load asset list</div>`;
         console.warn("Asset list load failed:", error);
+        renderActivityStatusCharts();
     }
 }
 
@@ -11389,7 +11466,150 @@ async function init() {
         console.error("Downtime page load error:", error);
         renderAlerts([{ level: "critical", message: "Downtime data could not be loaded from the current imported work order source." }]);
     }
+
+    // Apply alert context from MIRA Overview action button if present.
+    applyMiraAlertContextToDowntime();
 }
+
+// ── MIRA Alert Context ────────────────────────────────────────────────────────
+// Reads alert context written to sessionStorage by the MIRA Overview action
+// buttons, shows a dismissable banner, and focuses the relevant section.
+
+const ALERT_CTX_KEY = "mira_alert_ctx";
+
+function applyMiraAlertContextToDowntime(ctx) {
+    try {
+        ctx = ctx || JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
+    } catch (_) { return; }
+    if (!ctx || ctx.page !== "downtime") return;
+
+    showMiraAlertBanner(ctx.alertDescription || "Showing records related to a Daily Action Alert.");
+
+    const focus = ctx.focus || ctx.navFocus;
+    if (focus === "machine_explorer") {
+        // Scroll the Machine Explorer section into view and optionally pre-set the
+        // status filter to highlight open/in-progress MR.
+        const machineSection = document.querySelector(".machine-explorer-module, .machine-performance-card");
+        if (machineSection) {
+            window.setTimeout(() => {
+                machineSection.scrollIntoView({ behavior: "smooth", block: "start" });
+            }, 350);
+        }
+        // Pre-select "Open" or "In Progress" status if the alert is for open MR.
+        if (ctx.statusFilter === "open") {
+            const statusSel = document.getElementById("machine-explorer-status");
+            if (statusSel && statusSel.options.length > 1) {
+                // Try to find an "Open" or "In Progress" option.
+                const openOpt = Array.from(statusSel.options).find(
+                    (o) => /^(open|new|in.?progress)$/i.test(o.value.trim())
+                );
+                if (openOpt) {
+                    statusSel.value = openOpt.value;
+                    statusSel.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+            }
+        }
+        // Apply stage filter from alert context (e.g. "Stage 1" / "Stage 2" / "all").
+        if (ctx.stageFilter && ctx.stageFilter !== "all") {
+            const stageSel = document.getElementById("downtime-stage-filter");
+            if (stageSel) {
+                stageSel.value = ctx.stageFilter;
+                stageSel.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        }
+        // If we have a specific asset/area, apply it to the asset search/filter.
+        if (ctx.areaOrAsset) {
+            const assetSel = document.getElementById("machine-explorer-asset");
+            if (assetSel && assetSel.options.length > 1) {
+                const match = Array.from(assetSel.options).find(
+                    (o) => o.text.toLowerCase().includes(ctx.areaOrAsset.toLowerCase())
+                        || ctx.areaOrAsset.toLowerCase().includes(o.text.toLowerCase())
+                );
+                if (match) {
+                    assetSel.value = match.value;
+                    assetSel.dispatchEvent(new Event("change", { bubbles: true }));
+                }
+            }
+        }
+    } else if (focus === "data_reliability") {
+        // Switch to the Data Reliability topic panel in Downtime.
+        if (typeof setDashboardTopic === "function") setDashboardTopic("data-reliability");
+        if (ctx.stageFilter && ctx.stageFilter !== "all") {
+            const stageSel = document.getElementById("downtime-stage-filter");
+            if (stageSel) {
+                stageSel.value = ctx.stageFilter;
+                stageSel.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        }
+        window.setTimeout(() => {
+            const panel = document.getElementById("topic-data-reliability");
+            if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
+        }, 300);
+    } else if (focus === "yearly_movement") {
+        // Switch to the Yearly MR Movement topic panel and pre-filter the
+        // Carry-over MR Breakdown table to match the alert (previous-year open MR).
+        if (typeof setDashboardTopic === "function") setDashboardTopic("yearly-movement");
+        // Apply stage filter first so the panel data loads scoped correctly.
+        if (ctx.stageFilter && ctx.stageFilter !== "all") {
+            const stageSel = document.getElementById("downtime-stage-filter");
+            if (stageSel) {
+                stageSel.value = ctx.stageFilter;
+                stageSel.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+        }
+        const filterValue = ctx.carryoverFilter || "previous_year_open";
+        window.setTimeout(() => {
+            const filterSel = document.getElementById("mr-carryover-filter");
+            if (filterSel) {
+                filterSel.value = filterValue;
+                filterSel.dispatchEvent(new Event("change", { bubbles: true }));
+            }
+            // Scroll to the Carry-over MR Breakdown table inside the yearly-movement panel.
+            const carryoverCard = document.querySelector(
+                "#topic-yearly-movement .mr-carryover-table-card"
+            );
+            if (carryoverCard) {
+                carryoverCard.scrollIntoView({ behavior: "smooth", block: "start" });
+            }
+        }, 300);
+    }
+}
+
+function showMiraAlertBanner(message) {
+    const banner = document.getElementById("mira-alert-ctx-banner");
+    const textEl = document.getElementById("mira-alert-ctx-text");
+    const clearBtn = document.getElementById("mira-alert-ctx-clear");
+    if (!banner || !textEl) return;
+    textEl.textContent = "Showing records related to Daily Action Alert: " + message;
+    banner.classList.remove("hidden");
+    if (clearBtn && !clearBtn.dataset.bound) {
+        clearBtn.dataset.bound = "true";
+        clearBtn.addEventListener("click", () => {
+            banner.classList.add("hidden");
+            try { sessionStorage.removeItem(ALERT_CTX_KEY); } catch (_) {}
+            // Reset filters applied by the alert.
+            const statusSel = document.getElementById("machine-explorer-status");
+            if (statusSel) { statusSel.value = ""; statusSel.dispatchEvent(new Event("change", { bubbles: true })); }
+            const assetSel = document.getElementById("machine-explorer-asset");
+            if (assetSel) { assetSel.value = ""; assetSel.dispatchEvent(new Event("change", { bubbles: true })); }
+            const stageSel = document.getElementById("downtime-stage-filter");
+            if (stageSel) { stageSel.value = "all"; stageSel.dispatchEvent(new Event("change", { bubbles: true })); }
+            const carryoverSel = document.getElementById("mr-carryover-filter");
+            if (carryoverSel) { carryoverSel.value = "all"; carryoverSel.dispatchEvent(new Event("change", { bubbles: true })); }
+        });
+    }
+}
+
+// Handle postMessage from the maintenance.html parent (when Downtime runs in an iframe
+// and was already loaded before the alert button was clicked).
+window.addEventListener("message", (event) => {
+    if (event.origin !== window.location.origin) return;
+    if (event.data?.type !== "mira_alert_focus") return;
+    try {
+        const ctx = JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
+        if (ctx && ctx.page === "downtime") applyMiraAlertContextToDowntime(ctx);
+    } catch (_) {}
+});
 
 function refreshCurrentView(options = {}) {
     const minRefreshGapMs = options.force ? 0 : 60000;
@@ -12116,6 +12336,18 @@ let kdiMttrDrilldownMachineGroup = "";
 let kdiMtbfDrilldownMachineGroup = "";
 let kdiCurrentMttrData = null;
 let kdiCurrentMtbfData = null;
+
+// ── Critical S1 vs S2 MTTR comparison (Section B of the MTTR card) ───────────
+// S1 = single-machine critical group (asset_count === 1).
+// S2 = multi-machine critical group (asset_count > 1).
+// This sub-section has NO stage selector — it follows the page-level Stage filter
+// (getSelectedDowntimeStage) and the page-level Category filter, exactly like the
+// rest of the Downtime / MTTR page. Its own FY selector drives the time axis.
+let kdiCritCmpFy = "";            // selected financial-year start (string)
+let kdiCritCmpFy2 = "";           // "Compare with" FY start, "" = none
+let kdiCritCmpType = "both";      // both | s1 | s2
+let kdiCritCmpMetric = "average"; // average | median
+let kdiCritCmpCategory = "all";   // all | Production Equipment | Utilities
 
 // Auto-YTD: pick the latest year present in the loaded work orders. Falls back
 // to the current calendar year when no dated rows are available. This means the
@@ -13113,6 +13345,9 @@ function updateKdiSection() {
     // Machine-group analysis is the default management view, so keep both panels fresh.
     updateKdiMttrAnalysis();
     updateKdiMtbfAnalysis();
+    // Critical S1 vs S2 comparison uses all-year rows (its own FY selector scopes
+    // the year), so feed it the unfiltered all-year source rather than `filtered`.
+    updateKdiCritCmpSection(allWos);
 }
 
 function updateKdiMttrAnalysis() {
@@ -13131,6 +13366,514 @@ function updateKdiMttrAnalysis() {
     kdiRenderMttrSummaryTable(groups, assetRows, kdiMttrSelectedGroup, kdiMttrRankMode);
     const dd = document.getElementById("kdi-mttr-asset-drilldown");
     if (dd?.open) kdiRenderMttrAssetDrilldown(assetMap, crit, kdiMttrRankMode === "machine-group" ? kdiMttrDrilldownMachineGroup : kdiMttrSelectedGroup);
+}
+
+// ── Critical S1 vs S2 MTTR comparison (Section B of the MTTR card) ───────────
+// No stage selector here: the comparison follows the page-level Stage filter
+// (getSelectedDowntimeStage) and the page-level Category filter. Its own FY
+// selector drives the time axis (the global Year/Month filter does not further
+// constrain this chart, since comparing two financial years needs its own
+// year control).
+
+// Build the S1 / S2 critical asset-id sets from the Asset_Master mapping.
+// NOTE: the /api/asset-list "machines" are top-level Main-Asset-Group categories
+// (Production Equipment, Utilities, Refrigeration, …), each holding every asset
+// in that category — they are NOT individual machines. The single- vs
+// multi-machine unit is the per-asset `mappedMachineGroup`. So we group the
+// critical-category assets by mappedMachineGroup and count the machines in each:
+//   1 asset  => S1 (single-machine critical group)
+//   >1 asset => S2 (multi-machine critical group)
+// The single/multi label is intrinsic (counted across all stages); the page-level
+// Stage filter then scopes WHICH assets (and their WOs) are actually included.
+// Honours the page-level Stage filter, the page-level Category filter, and the
+// card's optional Category filter.
+function kdiBuildCriticalGroupAssetSets() {
+    const s1 = new Set();
+    const s2 = new Set();
+    if (!assetListLoaded || assetListLoadFailed) return { s1, s2 };
+    const selectedStage = getSelectedDowntimeStage();
+    const isAllStages = !selectedStage || selectedStage === DOWNTIME_STAGE_ALL;
+    const stageFilter = isAllStages ? "" : String(selectedStage).toLowerCase().trim();
+    const groups = new Map(); // mappedMachineGroup key -> [{ assetId, stageOk }]
+    (assetListData || []).forEach((machine) => {
+        if (machine.criticality !== "Critical") return;
+        const catName = String(machine.machine_name || machine.mappedMainAssetGroup || "").trim();
+        const groupCat = EQUIP_GROUP_TO_CATEGORY[catName] || "Unclassified";
+        // Page-level category filter, then the card's optional category filter.
+        if (selectedEquipmentCategory !== "all" && groupCat !== selectedEquipmentCategory) return;
+        if (kdiCritCmpCategory !== "all" && groupCat !== kdiCritCmpCategory) return;
+        (machine.assets || []).forEach((asset) => {
+            const assetId = String(asset.asset_id || "").trim().toUpperCase();
+            if (!assetId) return;
+            // The machine-group unit. Fall back to sub-group / asset id so an
+            // un-grouped asset counts as its own single-machine group.
+            const mg = String(asset.mappedMachineGroup || asset.mappedSubAssetGroup || asset.asset_id || "").trim().toLowerCase();
+            const key = `${groupCat}||${mg}`;
+            if (!groups.has(key)) groups.set(key, []);
+            const assetStage = String(asset.mappedStage || "").toLowerCase().trim();
+            groups.get(key).push({ assetId, stageOk: isAllStages || assetStage === stageFilter });
+        });
+    });
+    groups.forEach((assets) => {
+        const target = assets.length === 1 ? s1 : s2;
+        assets.forEach((a) => { if (a.stageOk) target.add(a.assetId); });
+    });
+    return { s1, s2 };
+}
+
+// Work-order completion date used for financial-year bucketing of MTTR.
+function kdiCritCmpWoDate(wo) {
+    return parseDateValue(wo?.actual_end_time || wo?.actual_end || wo?.maintenance_end_time || wo?.end_time);
+}
+
+// Whole-FY aggregate MTTR metrics for the summary chips.
+function kdiCritCmpMetrics(rows, assetIdSet, fyStart) {
+    const hours = [];
+    (rows || []).forEach((wo) => {
+        const id = String(wo.asset_id || "").trim().toUpperCase();
+        if (!id || !assetIdSet.has(id)) return;
+        if (!isDateInMrFinancialYear(kdiCritCmpWoDate(wo), fyStart)) return;
+        const h = getTtrHours(wo);
+        if (h === null || !Number.isFinite(h) || h < 0) return;
+        hours.push(h);
+    });
+    const sorted = [...hours].sort((a, b) => a - b);
+    const n = sorted.length;
+    const avg = n ? sorted.reduce((s, v) => s + v, 0) / n : null;
+    const med = n ? median(sorted) : null;
+    const p75 = n ? sorted[Math.min(Math.floor(n * 0.75), n - 1)] : null;
+    const p90 = n ? sorted[Math.min(Math.floor(n * 0.90), n - 1)] : null;
+    const hasOutlier = n >= 2 && sorted[n - 1] > 720; // flag records >30 days
+    return { average: avg, median: med, p75, p90, count: n, hasOutlier, maxHours: sorted[n - 1] ?? null };
+}
+
+// Monthly breakdown: one data point per FY month. Null means no valid records that month.
+function kdiCritCmpMonthlyMetrics(rows, assetIdSet, fyStart) {
+    const fyNum = Number(fyStart);
+    // Build 12 buckets aligned to the FY month order.
+    const buckets = MR_FINANCIAL_MONTH_ORDER.map((mi) => {
+        const yr = (mi + 1) >= MR_FINANCIAL_YEAR_START_MONTH ? fyNum : fyNum + 1;
+        return { mi, yr, hours: [], assets: {} };
+    });
+    (rows || []).forEach((wo) => {
+        const id = String(wo.asset_id || "").trim().toUpperCase();
+        if (!id || !assetIdSet.has(id)) return;
+        const d = kdiCritCmpWoDate(wo);
+        if (!d || !isDateInMrFinancialYear(d, fyStart)) return;
+        const h = getTtrHours(wo);
+        if (h === null || !Number.isFinite(h) || h < 0) return;
+        const woMi = d.getMonth();
+        const woYr = d.getFullYear();
+        const b = buckets.find((bk) => bk.mi === woMi && bk.yr === woYr);
+        if (!b) return;
+        b.hours.push(h);
+        b.assets[id] = (b.assets[id] || 0) + h; // track per-asset total for tooltip
+    });
+    return buckets.map((b) => {
+        if (!b.hours.length) return null;
+        const sorted = [...b.hours].sort((a, c) => a - c);
+        const n = sorted.length;
+        const avg = sorted.reduce((s, v) => s + v, 0) / n;
+        const med = median(sorted);
+        const p75 = sorted[Math.min(Math.floor(n * 0.75), n - 1)];
+        const p90 = sorted[Math.min(Math.floor(n * 0.90), n - 1)];
+        const topAsset = Object.entries(b.assets).sort((a, c) => c[1] - a[1])[0]?.[0] ?? null;
+        const hasOutlier = sorted[n - 1] > 720;
+        return { average: avg, median: med, p75, p90, count: n, topAsset, hasOutlier };
+    });
+}
+
+function kdiGetCritCmpRows() {
+    let rows = getAllWorkOrdersForMtbf();
+    if (!rows.length) rows = getWorkOrderRows(getManagement());
+    return rows;
+}
+
+// Populate both FY selectors from the financial years present in the
+// stage/category scoped work orders. Newest year is the default.
+function kdiCritCmpPopulateFyOptions(rows) {
+    const fySelect = document.getElementById("kdi-crit-cmp-fy");
+    const fy2Select = document.getElementById("kdi-crit-cmp-fy2");
+    if (!fySelect || !fy2Select) return;
+    const years = new Set();
+    (rows || []).forEach((wo) => {
+        const fy = getMrFinancialYearStart(kdiCritCmpWoDate(wo));
+        if (fy !== null) years.add(fy);
+    });
+    // When no row-derived years are found, seed from the MTBF history years list
+    // (calendar-year keys are close enough to FY starts for selector seeding).
+    if (!years.size && mtbfHistoryPayload?.years?.length) {
+        mtbfHistoryPayload.years.forEach((yr) => {
+            const n = Number(yr);
+            if (Number.isFinite(n) && n > 2000) years.add(n);
+        });
+    }
+    const sorted = [...years].sort((a, b) => b - a);
+    if (!sorted.length) {
+        fySelect.innerHTML = `<option value="">No data</option>`;
+        fy2Select.innerHTML = `<option value="">None</option>`;
+        kdiCritCmpFy = "";
+        kdiCritCmpFy2 = "";
+        return;
+    }
+    const sortedStr = sorted.map(String);
+    if (!sortedStr.includes(String(kdiCritCmpFy))) kdiCritCmpFy = sortedStr[0];
+    if (kdiCritCmpFy2 && !sortedStr.includes(String(kdiCritCmpFy2))) kdiCritCmpFy2 = "";
+    const optsFor = (includeNone) =>
+        (includeNone ? `<option value="">None</option>` : "") +
+        sorted.map((fy) => `<option value="${fy}">${escapeHtml(getMrFinancialYearLabel(fy))}</option>`).join("");
+    fySelect.innerHTML = optsFor(false);
+    fy2Select.innerHTML = optsFor(true);
+    fySelect.value = String(kdiCritCmpFy);
+    fy2Select.value = String(kdiCritCmpFy2 || "");
+}
+
+// Render one line/area trend chart.
+// fyLines: [{fyLabel, critType, monthData: [null|{average,median,p75,p90,count,topAsset}]}]
+// monthLabels: short labels ("Apr", "May", …) for X-axis ticks.
+// fullLabels: long labels ("Apr 2026", …) for tooltip.
+function kdiRenderCritCmpTrendChart(chartId, fyLines, monthLabels, fullLabels, metricKey, yTitle) {
+    const canvas = ensureCanvas(chartId);
+    if (!canvas) return;
+    destroyChart(chartId);
+
+    const palette = [
+        { border: "#7c3aed", bg: "rgba(124,58,237,0.07)", dash: [] },
+        { border: "#f59e0b", bg: "rgba(245,158,11,0.05)", dash: [5, 4] },
+    ];
+
+    const hasAnyData = fyLines.some((fl) => fl.monthData.some((d) => d !== null));
+    if (!hasAnyData) {
+        renderEmptyChart(chartId, "No critical MTTR data for the selected filters");
+        return;
+    }
+    const datasets = fyLines.map((fl, i) => {
+        const pal = palette[i % palette.length];
+        return {
+            label: fl.fyLabel + (fl.critType ? ` · ${fl.critType}` : ""),
+            data: fl.monthData.map((d) => (d ? (d[metricKey] ?? null) : null)),
+            counts: fl.monthData.map((d) => (d ? d.count : 0)),
+            topAssets: fl.monthData.map((d) => (d ? d.topAsset : null)),
+            borderColor: pal.border,
+            backgroundColor: pal.bg,
+            borderDash: pal.dash,
+            borderWidth: i === 0 ? 2.5 : 1.8,
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            fill: true,
+            tension: 0.35,
+            spanGaps: false,
+        };
+    });
+
+    chartRefs[chartId] = new Chart(canvas.getContext("2d"), {
+        type: "line",
+        data: { labels: monthLabels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: {
+                legend: {
+                    display: fyLines.length > 1,
+                    position: "top",
+                    labels: { boxWidth: 14, font: { size: 11 }, padding: 10 },
+                },
+                tooltip: {
+                    callbacks: {
+                        title: (items) => fullLabels[items[0]?.dataIndex] || items[0]?.label || "",
+                        label: (ctx) => {
+                            const v = ctx.raw;
+                            const cnt = ctx.dataset.counts?.[ctx.dataIndex] ?? 0;
+                            const top = ctx.dataset.topAssets?.[ctx.dataIndex];
+                            if (v === null || v === undefined)
+                                return `${ctx.dataset.label}: No valid MTTR records`;
+                            let line = `${ctx.dataset.label}: ${fmtHours(v)} (${cnt} record${cnt !== 1 ? "s" : ""})`;
+                            if (top) line += `  · top: ${top}`;
+                            return line;
+                        },
+                    },
+                },
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: { color: "#e8edf3" },
+                    ticks: {
+                        font: { size: 10 },
+                        callback: (v) => {
+                            if (v >= 24) return `${Math.round(v / 24)}d`;
+                            return `${v}h`;
+                        },
+                    },
+                    title: { display: true, text: yTitle, font: { size: 10 } },
+                },
+                x: {
+                    grid: { display: false },
+                    ticks: { font: { size: 10 }, maxRotation: 0 },
+                },
+            },
+        },
+    });
+}
+
+function kdiRenderCritCmpBothChart(chartId, s1Lines, s2Lines, monthLabels, fullLabels, metricKey, yTitle) {
+    const canvas = ensureCanvas(chartId);
+    if (!canvas) return;
+    destroyChart(chartId);
+
+    // S1 = indigo/blue  (solid = current FY, dashed = comparison FY)
+    // S2 = red/orange   (solid = current FY, dashed = comparison FY)
+    const s1Pal = [
+        { border: "#4f46e5", bg: "rgba(79,70,229,0.07)", dash: [],     w: 2.5 },
+        { border: "#818cf8", bg: "rgba(129,140,248,0.04)", dash: [5,4], w: 1.8 },
+    ];
+    const s2Pal = [
+        { border: "#dc2626", bg: "rgba(220,38,38,0.06)", dash: [],     w: 2.5 },
+        { border: "#f87171", bg: "rgba(248,113,113,0.04)", dash: [5,4], w: 1.8 },
+    ];
+
+    const buildDs = (lines, pal, prefix) => lines.map((fl, i) => {
+        const p = pal[i % pal.length];
+        return {
+            label: `${prefix} · ${fl.fyLabel}`,
+            data: fl.monthData.map((d) => (d ? (d[metricKey] ?? 0) : 0)),
+            counts: fl.monthData.map((d) => (d ? d.count : 0)),
+            topAssets: fl.monthData.map((d) => (d ? d.topAsset : null)),
+            borderColor: p.border,
+            backgroundColor: p.bg,
+            borderDash: p.dash,
+            borderWidth: p.w,
+            pointRadius: 3,
+            pointHoverRadius: 5,
+            fill: false,
+            tension: 0.35,
+            spanGaps: true,
+        };
+    });
+
+    const datasets = [...buildDs(s1Lines, s1Pal, "S1"), ...buildDs(s2Lines, s2Pal, "S2")];
+    const hasAnyData = datasets.some((ds) => ds.data.some((v) => v !== null));
+    if (!hasAnyData) { renderEmptyChart(chartId, "No critical MTTR data for the selected filters"); return; }
+
+    chartRefs[chartId] = new Chart(canvas.getContext("2d"), {
+        type: "line",
+        data: { labels: monthLabels, datasets },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: "index", intersect: false },
+            plugins: {
+                legend: { display: true, position: "top", labels: { boxWidth: 14, font: { size: 11 }, padding: 10 } },
+                tooltip: {
+                    callbacks: {
+                        title: (items) => fullLabels[items[0]?.dataIndex] || items[0]?.label || "",
+                        label: (ctx) => {
+                            const v = ctx.raw;
+                            const cnt = ctx.dataset.counts?.[ctx.dataIndex] ?? 0;
+                            const top = ctx.dataset.topAssets?.[ctx.dataIndex];
+                            if (v === null || v === undefined || (v === 0 && ctx.dataset.counts?.[ctx.dataIndex] === 0)) return `${ctx.dataset.label}: No data`;
+                            let line = `${ctx.dataset.label}: ${fmtHours(v)} (${cnt} record${cnt !== 1 ? "s" : ""})`;
+                            if (top) line += `  · top: ${top}`;
+                            return line;
+                        },
+                    },
+                },
+            },
+            scales: {
+                y: {
+                    beginAtZero: true,
+                    grid: { color: "#e8edf3" },
+                    ticks: { font: { size: 10 }, callback: (v) => v >= 24 ? `${Math.round(v / 24)}d` : `${v}h` },
+                    title: { display: true, text: yTitle, font: { size: 10 } },
+                },
+                x: { grid: { display: false }, ticks: { font: { size: 10 }, maxRotation: 0 } },
+            },
+        },
+    });
+}
+
+function kdiToggleCritCmpChart() {
+    const body = document.getElementById("kdi-crit-cmp-chart-body");
+    const btn  = document.getElementById("kdi-crit-cmp-toggle-btn");
+    if (!body || !btn) return;
+    const collapsed = body.classList.toggle("kdi-crit-cmp-chart-collapsed");
+    btn.textContent = collapsed ? "Show chart" : "Hide chart";
+}
+
+function kdiRenderCritCmpChart(model) {
+    const metricKey = ["average", "median", "p75", "p90"].includes(kdiCritCmpMetric) ? kdiCritCmpMetric : "average";
+    const metricLabel = { average: "Average MTTR", median: "Median MTTR", p75: "P75 MTTR", p90: "P90 MTTR" }[metricKey];
+    const title    = document.getElementById("kdi-crit-cmp-chart-title");
+    const subtitle = document.getElementById("kdi-crit-cmp-chart-subtitle");
+    const singleEl = document.getElementById("kdi-crit-cmp-single");
+    const dualEl   = document.getElementById("kdi-crit-cmp-dual");
+
+    // Always hide the dual mini-chart container; always use the single canvas
+    if (singleEl) singleEl.classList.remove("hidden");
+    if (dualEl) {
+        dualEl.classList.add("hidden");
+        destroyChart("kdiCritCmpChartS1");
+        destroyChart("kdiCritCmpChart2");
+    }
+
+    if (model.mode === "both") {
+        if (title)    title.textContent    = `S1 vs S2 — ${metricLabel} Monthly Trend`;
+        if (subtitle) subtitle.textContent = "S1 (indigo) = single-machine critical · S2 (red) = multi-machine critical. Lower is better.";
+        kdiRenderCritCmpBothChart("kdiCritCmpChart", model.s1Lines, model.s2Lines, model.monthLabels, model.fullLabels, metricKey, `${metricLabel} (hrs)`);
+    } else {
+        if (title)    title.textContent    = "Critical Machine MTTR Monthly Trend";
+        if (subtitle) subtitle.textContent = "Monthly MTTR trend for S1/S2 critical machine groups. Lower is better.";
+        kdiRenderCritCmpTrendChart("kdiCritCmpChart", model.lines, model.monthLabels, model.fullLabels, metricKey, `${metricLabel} (hrs)`);
+    }
+}
+
+function kdiRenderCritCmpSummaryChips(el, types, fyList, aggregates, metricKey) {
+    if (!el) return;
+    const metricLabel = { average: "Average", median: "Median", p75: "P75", p90: "P90" }[metricKey] || "Average";
+
+    // Detect any outlier across all types/FY combinations.
+    const anyOutlier = aggregates.some((row) => row.some((a) => a.hasOutlier));
+
+    const chip = (label, values, cls = "") =>
+        `<div class="kdi-crit-chip ${cls}"><span class="kdi-crit-chip-label">${label}</span><span class="kdi-crit-chip-value">${values}</span></div>`;
+
+    const fmtVal = (a, key) => a?.[key] !== null && a?.[key] !== undefined ? fmtHours(a[key]) : "n/a";
+
+    // Row 0 = selected FY, Row 1 = compare FY (if present)
+    const [agg1, agg2] = aggregates; // each is an array aligned to `types`
+
+    // Selected FY row
+    const fy1Parts = types.map((t, i) => `${t.short}: ${fmtVal(agg1[i], metricKey)}`).join(" &nbsp;|&nbsp; ");
+    const fy1Chip = chip(fyList[0].label + " " + metricLabel, fy1Parts, "kdi-crit-chip-primary");
+
+    // Compare FY row
+    const fy2Chip = fyList[1]
+        ? chip(fyList[1].label + " " + metricLabel, types.map((t, i) => `${t.short}: ${fmtVal(agg2?.[i], metricKey)}`).join(" &nbsp;|&nbsp; "), "kdi-crit-chip-secondary")
+        : "";
+
+    // Change row
+    let changeChip = "";
+    if (fyList[1] && agg2) {
+        const changeParts = types.map((t, i) => {
+            const v1 = agg1[i]?.[metricKey];
+            const v2 = agg2[i]?.[metricKey];
+            if (v1 === null || v2 === null) return `${t.short}: n/a`;
+            const diff = v1 - v2;
+            const sign = diff >= 0 ? "+" : "";
+            const dir = diff > 0 ? " worse" : (diff < 0 ? " better" : " no change");
+            return `${t.short}: ${sign}${fmtHours(Math.abs(diff))}${dir}`;
+        }).join(" &nbsp;|&nbsp; ");
+        changeChip = chip("Change vs " + fyList[1].label, changeParts, "kdi-crit-chip-change");
+    }
+
+    // Worst month row (highest metric value in selected FY)
+    const worstParts = types.map((t, i) => {
+        if (!agg1[i]?.monthData) return "";
+        let bestVal = null, bestLabel = "";
+        agg1[i].monthData.forEach((d, mi) => {
+            const v = d?.[metricKey];
+            if (v !== null && v !== undefined && (bestVal === null || v > bestVal)) {
+                bestVal = v; bestLabel = MR_FINANCIAL_MONTH_LABELS[mi] || "";
+            }
+        });
+        if (bestVal === null) return "";
+        return `<span>Worst ${t.short}: ${bestLabel} — ${fmtHours(bestVal)}</span>`;
+    }).filter(Boolean);
+    const worstChip = worstParts.length ? chip("Worst Month", worstParts.join(" &nbsp;|&nbsp; "), "") : "";
+
+    // Record count row
+    const totalCount = types.reduce((s, _, i) => s + (agg1[i]?.count ?? 0), 0);
+    const countChip = chip("Valid Records", `Based on ${totalCount.toLocaleString()} valid WO/MR record${totalCount !== 1 ? "s" : ""}`, "kdi-crit-chip-count");
+
+    // Outlier note
+    const outlierNote = anyOutlier
+        ? `<div class="kdi-crit-outlier-note">⚠ Average MTTR may be affected by long-duration/outlier work orders. Use Median MTTR for a more stable view.</div>`
+        : "";
+
+    el.innerHTML = `<div class="kdi-crit-chips-wrap">${fy1Chip}${fy2Chip}${changeChip}${worstChip}${countChip}</div>${outlierNote}`;
+}
+
+function updateKdiCritCmpSection(rows) {
+    if (!document.getElementById("kdiCritCmpChart")) return;
+    if (!Array.isArray(rows)) rows = kdiGetCritCmpRows();
+    const summaryEl = document.getElementById("kdi-crit-cmp-summary");
+
+    if (!assetListLoaded) {
+        kdiRenderCritCmpChart({ mode: "single", lines: [], monthLabels: [], fullLabels: [] });
+        if (summaryEl) summaryEl.innerHTML = "<p class='kdi-crit-loading'>Loading critical asset mapping…</p>";
+        return;
+    }
+    if (!rows.length && !downtimePayload && !mtbfHistoryPayload) {
+        if (summaryEl) summaryEl.innerHTML = "<p class='kdi-crit-loading'>Loading maintenance data…</p>";
+        return;
+    }
+
+    kdiCritCmpPopulateFyOptions(rows);
+    if (!kdiCritCmpFy) {
+        kdiRenderCritCmpChart({ mode: "single", lines: [], monthLabels: [], fullLabels: [] });
+        if (summaryEl) summaryEl.innerHTML = "<p class='kdi-crit-loading'>No completed critical work orders available for these filters.</p>";
+        return;
+    }
+
+    const { s1, s2 } = kdiBuildCriticalGroupAssetSets();
+    const types = kdiCritCmpType === "s1"
+        ? [{ short: "S1", set: s1 }]
+        : kdiCritCmpType === "s2"
+            ? [{ short: "S2", set: s2 }]
+            : [{ short: "S1", set: s1 }, { short: "S2", set: s2 }];
+
+    const fyList = [{ fy: kdiCritCmpFy, label: getMrFinancialYearLabel(kdiCritCmpFy) }];
+    if (kdiCritCmpFy2 && String(kdiCritCmpFy2) !== String(kdiCritCmpFy))
+        fyList.push({ fy: kdiCritCmpFy2, label: getMrFinancialYearLabel(kdiCritCmpFy2) });
+
+    const metricKey = ["average", "median", "p75", "p90"].includes(kdiCritCmpMetric) ? kdiCritCmpMetric : "average";
+    const monthLabels = MR_FINANCIAL_MONTH_LABELS;          // ["Apr",…,"Mar"]
+    const fullLabels  = getMrFinancialMonthLabelsWithYear(kdiCritCmpFy); // ["Apr 2026",…]
+
+    // Compute monthly data for every (type × FY) pair.
+    // Also compute whole-FY aggregates (with monthData attached) for summary chips.
+    const allAggs = fyList.map(({ fy }) =>
+        types.map((t) => {
+            const agg = kdiCritCmpMetrics(rows, t.set, fy);
+            const monthData = kdiCritCmpMonthlyMetrics(rows, t.set, fy);
+            return { ...agg, monthData };
+        })
+    );
+
+    if (kdiCritCmpType === "both") {
+        // Two mini charts: one per critical type, each with FY lines.
+        const buildLines = (typeIdx) =>
+            fyList.map(({ label }, fi) => ({
+                fyLabel: label,
+                critType: types[typeIdx].short,
+                monthData: allAggs[fi][typeIdx].monthData,
+            }));
+        kdiRenderCritCmpChart({
+            mode: "both",
+            s1Lines: buildLines(0), s2Lines: buildLines(1),
+            monthLabels, fullLabels,
+        });
+    } else {
+        // Single chart: one type, FY lines.
+        const lines = fyList.map(({ label }, fi) => ({
+            fyLabel: label,
+            critType: types[0].short,
+            monthData: allAggs[fi][0].monthData,
+        }));
+        kdiRenderCritCmpChart({ mode: "single", lines, monthLabels, fullLabels });
+    }
+
+    kdiRenderCritCmpSummaryChips(summaryEl, types, fyList, allAggs, metricKey);
+}
+
+function kdiWireCritCmpControls() {
+    const bind = (id, handler) => document.getElementById(id)?.addEventListener("change", handler);
+    bind("kdi-crit-cmp-fy", (e) => { kdiCritCmpFy = e.target.value || ""; updateKdiCritCmpSection(); });
+    bind("kdi-crit-cmp-fy2", (e) => { kdiCritCmpFy2 = e.target.value || ""; updateKdiCritCmpSection(); });
+    bind("kdi-crit-cmp-type", (e) => { kdiCritCmpType = e.target.value || "both"; updateKdiCritCmpSection(); });
+    bind("kdi-crit-cmp-metric", (e) => { kdiCritCmpMetric = e.target.value || "average"; updateKdiCritCmpSection(); });
+    bind("kdi-crit-cmp-category", (e) => { kdiCritCmpCategory = e.target.value || "all"; updateKdiCritCmpSection(); });
 }
 
 function updateKdiMtbfAnalysis() {
@@ -13241,6 +13984,7 @@ function kdiWireStaticControls() {
     wireToggle("kdi-mtbf-analysis-btn", "kdi-mtbf-analysis-panel", () => { kdiMtbfCriticalityFilter = ""; updateKdiMtbfAnalysis(); }, "MTBF");
     kdiWireGroupDrilldown("kdi-mttr-group-table-body", kdiOpenMttrGroupDrilldown);
     kdiWireGroupDrilldown("kdi-mtbf-group-table-body", kdiOpenMtbfGroupDrilldown);
+    kdiWireCritCmpControls();
 
     document.getElementById("kdi-mttr-asset-drilldown")?.addEventListener("toggle", () => {
         if (document.getElementById("kdi-mttr-asset-drilldown")?.open && kdiCurrentMttrData) {

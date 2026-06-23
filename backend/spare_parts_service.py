@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import threading
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -240,6 +241,9 @@ FLEXIBLE_COLUMN_ALIASES = {
 _SPARE_PARTS_CACHE: dict[tuple, dict] = {}
 _SPARE_PERSISTENT_CACHE_VERSION = 1
 _SPARE_PERSISTENT_CACHE_DIR = DEFAULT_DATA_DIR / "_dashboard_cache" / "spare_parts"
+_SPARE_DB_SYNC_GUARD = threading.Lock()
+_SPARE_DB_SYNC_RUNNING = False
+_SPARE_DB_SYNC_PENDING = False
 
 
 def _file_signature(path: Path | None):
@@ -1988,43 +1992,200 @@ def _sum_by(records, key, value_key):
     return [{"label": label, "value": round(value, 2)} for label, value in sorted(buckets.items(), key=lambda item: item[1], reverse=True)]
 
 
-def _build_structured_spare_parts_payload(paths, source_status):
-    errors = []
-    try:
-        inventory_records = _build_inventory_records(paths.get("spare_parts_master"), source_status.get("spare_parts_master", {}))
-    except Exception as exc:
-        errors.append(f"Current Inventory: {exc}")
-        inventory_records = []
-    inventory_lookup = {row.get("code"): row for row in inventory_records if row.get("code")}
-    master_codes = set(inventory_lookup)
+# ── Inventory valuation via derived unit cost ─────────────────────────────────
 
-    try:
-        movement_records = _build_movement_records(paths.get("inventory_movement"), source_status.get("inventory_movement", {}))
-    except Exception as exc:
-        errors.append(f"Inventory Movement: {exc}")
-        movement_records = []
-    try:
-        equipment_records = _build_equipment_master_records(paths.get("equipment_master"))
-    except Exception as exc:
-        errors.append(f"Equipment Master: {exc}")
-        equipment_records = []
-    inventory_records = _enrich_inventory_with_equipment(inventory_records, equipment_records)
-    try:
-        work_order_records = _build_work_order_records(paths.get("work_orders"))
-    except Exception as exc:
-        errors.append(f"Work Order Data: {exc}")
-        work_order_records = []
-    try:
-        stage_po_rows, stage_po_status = _load_stage_goods_received_rows()
-        if stage_po_rows:
-            po_records = _build_po_records_from_stage_rows(stage_po_rows, inventory_records, stage_po_status)
+_INVENTORY_EXCLUDE_GROUP_KEYWORDS = frozenset({
+    "service", "labour", "labor", "repair", "contractor", "cleaning",
+    "direct purchase", "non-stock", "nonstock", "capex", "consumable",
+    "chemical", "rental",
+})
+
+
+def _is_valued_inventory_item(record) -> bool:
+    """True when a record is a physical on-hand stock spare part that should be valued."""
+    qty = record.get("current_quantity")
+    if qty is None or float(qty) <= 0:
+        return False
+    group = _normalize_phrase(record.get("item_group") or record.get("category") or "")
+    return not any(kw in group for kw in _INVENTORY_EXCLUDE_GROUP_KEYWORDS)
+
+
+def _build_po_cost_lookup(po_records):
+    """Build a received-price cost lookup from GRN-completed spare PO lines.
+
+    Returns (by_code, by_desc): each maps a key to
+    {"latest_unit_cost": float, "weighted_unit_cost": float}.
+    Only completed (received) lines with a positive unit price and qty are included.
+    """
+    code_groups: dict[str, list] = defaultdict(list)
+    desc_groups: dict[str, list] = defaultdict(list)
+
+    for row in po_records:
+        if not row.get("completed"):
+            continue
+        uc = row.get("unit_cost")
+        if uc is None or float(uc) <= 0:
+            continue
+        qty = _clean_numeric(row.get("quantity_received") or row.get("quantity_ordered"))
+        if qty is None or float(qty) <= 0:
+            continue
+        date_str = str(row.get("goods_received_date") or row.get("po_date") or "")
+        entry = {"date": date_str, "unit_cost": float(uc), "qty": float(qty)}
+
+        code = _clean_code(row.get("code"))
+        if code:
+            code_groups[code].append(entry)
+
+        desc = _normalize_part_name(row.get("clean_description") or row.get("description") or "")
+        if len(desc) > 3:
+            desc_groups[desc].append(entry)
+
+    def _agg(groups):
+        result = {}
+        for key, entries in groups.items():
+            sorted_entries = sorted(entries, key=lambda e: e["date"], reverse=True)
+            latest_uc = sorted_entries[0]["unit_cost"]
+            total_qty = sum(e["qty"] for e in entries)
+            total_val = sum(e["unit_cost"] * e["qty"] for e in entries)
+            weighted_uc = round(total_val / total_qty, 4) if total_qty > 0 else None
+            result[key] = {"latest_unit_cost": round(latest_uc, 4), "weighted_unit_cost": weighted_uc}
+        return result
+
+    return _agg(code_groups), _agg(desc_groups)
+
+
+def _derive_inventory_valuation(inventory_records, po_records):
+    """Compute current on-hand inventory value using a multi-tier cost derivation.
+
+    Priority order per item:
+      1. Inventory file unit_cost (direct)
+      2. Inventory file inventory_value / current_quantity
+      3. Latest received PO price by item code
+      4. Weighted average received PO price by item code
+      5. Latest received PO price by normalised description
+      6. Weighted average received PO price by normalised description
+      7. Unvalued (None) — never forced to zero
+
+    Only counts items where current_quantity > 0 and the item is a stock spare
+    (not service, labour, CAPEX, consumable, etc.).
+
+    Mutates each inventory record to add:
+      - derived_unit_cost: best available unit cost (float | None)
+      - derived_cost_source: string tag for which source was used (str | None)
+      - derived_item_value: current_quantity * derived_unit_cost (float | None)
+    Also back-fills stock_value when it was previously None so the existing
+    frontend fallback (which sums stock_value) benefits automatically.
+
+    Returns a metrics dict.
+    """
+    po_by_code, po_by_desc = _build_po_cost_lookup(po_records)
+
+    total_in_stock = 0
+    valued_count = 0
+    unvalued_count = 0
+    total_value = 0.0
+    has_estimated = False  # True if any PO fallback price was used
+
+    for rec in inventory_records:
+        if not _is_valued_inventory_item(rec):
+            rec.setdefault("derived_unit_cost", None)
+            rec.setdefault("derived_cost_source", None)
+            rec.setdefault("derived_item_value", None)
+            continue
+
+        qty = float(rec["current_quantity"])
+        total_in_stock += 1
+        derived_uc = None
+        cost_source = None
+
+        # Priority 1: inventory file unit_cost
+        inv_uc = rec.get("unit_cost")
+        if inv_uc is not None and float(inv_uc) > 0:
+            derived_uc = float(inv_uc)
+            cost_source = "inventory_file"
+
+        # Priority 1b: derive from inventory_value / qty
+        if derived_uc is None:
+            inv_val = rec.get("inventory_value")
+            if inv_val is not None and float(inv_val) > 0 and qty > 0:
+                derived_uc = float(inv_val) / qty
+                cost_source = "inventory_value_derived"
+
+        # Priority 2–3: PO match by item code
+        if derived_uc is None:
+            code = rec.get("code")
+            if code and code in po_by_code:
+                po = po_by_code[code]
+                if po.get("latest_unit_cost"):
+                    derived_uc = po["latest_unit_cost"]
+                    cost_source = "po_code_latest"
+                    has_estimated = True
+                elif po.get("weighted_unit_cost"):
+                    derived_uc = po["weighted_unit_cost"]
+                    cost_source = "po_code_weighted"
+                    has_estimated = True
+
+        # Priority 4–5: PO match by normalised description
+        if derived_uc is None:
+            desc_key = _normalize_part_name(rec.get("name") or rec.get("description") or "")
+            if desc_key and desc_key in po_by_desc:
+                po = po_by_desc[desc_key]
+                if po.get("latest_unit_cost"):
+                    derived_uc = po["latest_unit_cost"]
+                    cost_source = "po_desc_latest"
+                    has_estimated = True
+                elif po.get("weighted_unit_cost"):
+                    derived_uc = po["weighted_unit_cost"]
+                    cost_source = "po_desc_weighted"
+                    has_estimated = True
+
+        rec["derived_unit_cost"] = round(derived_uc, 4) if derived_uc is not None else None
+        rec["derived_cost_source"] = cost_source
+
+        if derived_uc is not None:
+            item_val = round(qty * derived_uc, 2)
+            rec["derived_item_value"] = item_val
+            # Back-fill stock_value when missing so the frontend aggregate also benefits
+            if rec.get("stock_value") is None:
+                rec["stock_value"] = item_val
+            valued_count += 1
+            total_value += qty * derived_uc
         else:
-            po_records = _build_po_records(paths.get("po_list"), source_status.get("po_list", {}), master_codes)
-    except Exception as exc:
-        errors.append(f"Gen PO: {exc}")
-        po_records = []
-    po_records = _refine_po_records_with_inventory(po_records, inventory_records)
+            rec["derived_item_value"] = None
+            unvalued_count += 1
 
+    coverage_pct = round(valued_count / total_in_stock * 100, 1) if total_in_stock > 0 else None
+    return {
+        "current_inventory_value": round(total_value, 2) if valued_count > 0 else None,
+        "valued_in_stock_items": valued_count,
+        "unvalued_in_stock_items": unvalued_count,
+        "total_in_stock_items": total_in_stock,
+        "inventory_valuation_coverage_pct": coverage_pct,
+        "inventory_value_is_estimated": has_estimated,
+    }
+
+
+def _run_spare_aggregation(
+    inventory_records,
+    po_records,
+    movement_records,
+    work_order_records=None,
+    equipment_records=None,
+    source_status=None,
+    errors=None,
+):
+    """Shared aggregation pipeline used by both the Excel path and the SQL path."""
+    work_order_records = work_order_records or []
+    equipment_records = equipment_records or []
+    source_status = source_status or {}
+    errors = list(errors or [])
+
+    # Derive unit costs from PO history for items missing cost data in the inventory
+    # file. This mutates each record in-place (adds derived_unit_cost, derived_item_value,
+    # derived_cost_source) and back-fills stock_value when it was previously None.
+    inv_val_meta = _derive_inventory_valuation(inventory_records, po_records)
+
+    inventory_lookup = {row.get("code"): row for row in inventory_records if row.get("code")}
     turnover_records = _build_turnover_records(po_records, movement_records, inventory_lookup)
     usage_rows = _build_usage_by_equipment(movement_records, work_order_records, equipment_records)
 
@@ -2087,7 +2248,6 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "total_items": len(inventory_records),
                 "total_current_quantity": round(sum(float(value) for value in current_quantities), 3) if current_quantities else None,
                 "total_inventory_value": inventory_value,
-                # Current in-stock = unique items with on-hand quantity > 0, and their value.
                 "in_stock_items": sum(1 for row in inventory_records if float(row.get("current_quantity") or 0) > 0),
                 "in_stock_value": round(sum(float(row.get("stock_value") or 0) for row in inventory_records if float(row.get("current_quantity") or 0) > 0 and row.get("stock_value") is not None), 2) or None,
                 "low_stock_items": sum(1 for row in inventory_records if row.get("stock_status_group") == "Low Stock"),
@@ -2183,13 +2343,19 @@ def _build_structured_spare_parts_payload(paths, source_status):
             "inventory_purchase_summary_rows": _build_inventory_purchase_summary_rows(inventory_records, po_records),
             "top_external_spare_parts_rows": _build_top_external_spare_parts_rows(po_records),
             "summary": {
-                "current_inventory_value": inventory_value,
+                # current_inventory_value = SUM(on_hand_qty × derived_unit_cost) for
+                # in-stock stock spare items only. Uses inventory file cost first, then
+                # falls back to latest / weighted-average received PO price.
+                "current_inventory_value": inv_val_meta["current_inventory_value"],
+                "valued_in_stock_items": inv_val_meta["valued_in_stock_items"],
+                "unvalued_in_stock_items": inv_val_meta["unvalued_in_stock_items"],
+                "total_in_stock_items_for_valuation": inv_val_meta["total_in_stock_items"],
+                "inventory_valuation_coverage_pct": inv_val_meta["inventory_valuation_coverage_pct"],
+                "inventory_value_is_estimated": inv_val_meta["inventory_value_is_estimated"],
                 "current_stocked_spare_part_items": len(inventory_records),
                 "current_stock_quantity": round(sum(float(value) for value in current_quantities), 3) if current_quantities else None,
-                # Row 1 KPIs: current in-stock parts (on-hand qty > 0) and their value.
                 "in_stock_items": sum(1 for row in inventory_records if float(row.get("current_quantity") or 0) > 0),
-                "in_stock_value": round(sum(float(row.get("stock_value") or 0) for row in inventory_records if float(row.get("current_quantity") or 0) > 0 and row.get("stock_value") is not None), 2) or None,
-                # Row 2 KPIs: consumption split (drawn from store / non-stock / services) value + count.
+                "in_stock_value": inv_val_meta["current_inventory_value"],
                 "internal_drawn_value": round(internal_drawn_value, 2) if movement_records else None,
                 "internal_drawn_count": len(movement_records),
                 "non_stock_spare_part_po_count": len(non_stock_spare_records),
@@ -2203,7 +2369,7 @@ def _build_structured_spare_parts_payload(paths, source_status):
                 "consumable_po_value": consumable_po_value,
                 "manual_review_po_items": len(classified_manual_review_records),
                 "external_purchase_dependency_pct": dependency_pct,
-                "inventory_value_unavailable": inventory_value is None,
+                "inventory_value_unavailable": inv_val_meta["current_inventory_value"] is None,
                 "gen_po_spare_part_quantity": round(sum(float(row.get("quantity_ordered") or 0) for row in external_spare_records), 3) if external_spare_records else None,
                 "gen_po_non_spare_part_quantity": round(sum(float(row.get("quantity_ordered") or 0) for row in non_spare_service_records), 3) if non_spare_service_records else None,
                 "gen_po_spare_part_line_count": len(external_spare_records),
@@ -2217,32 +2383,581 @@ def _build_structured_spare_parts_payload(paths, source_status):
     }
 
 
-def build_spare_parts_payload():
-    data_dir_path = Path(__file__).resolve().parent.parent / "data"
-    future_paths, future_source_status = _resolve_future_sources(data_dir_path)
-    cache_signature = (
-        _file_signature(D365_SPARE_PARTS_PATH),
-        _file_signature(GEN_PO_SPARE_PARTS_PATH),
-        _stage_po_source_signatures(),
-        *(_file_signature(path) for path in future_paths.values()),
-    )
-    cached = _SPARE_PARTS_CACHE.get(cache_signature)
-    if cached:
-        return cached
-    persistent_cached = _read_persistent_payload_cache("spare_parts_payload", cache_signature)
-    if persistent_cached is not None:
-        _SPARE_PARTS_CACHE.clear()
-        _SPARE_PARTS_CACHE[cache_signature] = persistent_cached
-        return persistent_cached
+def _build_structured_spare_parts_payload(paths, source_status):
+    errors = []
+    try:
+        inventory_records = _build_inventory_records(paths.get("spare_parts_master"), source_status.get("spare_parts_master", {}))
+    except Exception as exc:
+        errors.append(f"Current Inventory: {exc}")
+        inventory_records = []
+    inventory_lookup = {row.get("code"): row for row in inventory_records if row.get("code")}
+    master_codes = set(inventory_lookup)
 
-    structured_payload = _build_structured_spare_parts_payload(future_paths, future_source_status)
+    try:
+        movement_records = _build_movement_records(paths.get("inventory_movement"), source_status.get("inventory_movement", {}))
+    except Exception as exc:
+        errors.append(f"Inventory Movement: {exc}")
+        movement_records = []
+    try:
+        equipment_records = _build_equipment_master_records(paths.get("equipment_master"))
+    except Exception as exc:
+        errors.append(f"Equipment Master: {exc}")
+        equipment_records = []
+    inventory_records = _enrich_inventory_with_equipment(inventory_records, equipment_records)
+    try:
+        work_order_records = _build_work_order_records(paths.get("work_orders"))
+    except Exception as exc:
+        errors.append(f"Work Order Data: {exc}")
+        work_order_records = []
+    try:
+        stage_po_rows, stage_po_status = _load_stage_goods_received_rows()
+        if stage_po_rows:
+            po_records = _build_po_records_from_stage_rows(stage_po_rows, inventory_records, stage_po_status)
+        else:
+            po_records = _build_po_records(paths.get("po_list"), source_status.get("po_list", {}), master_codes)
+    except Exception as exc:
+        errors.append(f"Gen PO: {exc}")
+        po_records = []
+    po_records = _refine_po_records_with_inventory(po_records, inventory_records)
+
+    return _run_spare_aggregation(
+        inventory_records, po_records, movement_records,
+        work_order_records=work_order_records,
+        equipment_records=equipment_records,
+        source_status=source_status,
+        errors=errors,
+    )
+
+
+# ── Phase 5: SQL helpers for spare parts ──────────────────────────────────────
+
+def _sql_has_spare_parts() -> bool:
+    try:
+        import db as _db
+        with _db.get_connection() as conn:
+            count = conn.execute("SELECT COUNT(*) FROM spare_parts").fetchone()[0]
+        return count > 0
+    except Exception:
+        return False
+
+
+def _build_spare_sql_asset_lookup():
+    lookup = {}
+    try:
+        import db as _db
+        for row in _db.query_asset_master():
+            asset_id = clean_text(row.get("asset_id"))
+            if not asset_id:
+                continue
+            lookup[asset_id.upper()] = {
+                "asset_name": clean_text(row.get("asset_name")),
+                "stage": clean_text(row.get("stage")),
+                "category": clean_text(row.get("category")),
+                "machine_group": clean_text(row.get("machine_group")),
+            }
+    except Exception:
+        return {}
+    return lookup
+
+
+def _flatten_inventory_to_sql_rows(records, asset_lookup=None):
+    asset_lookup = asset_lookup or {}
+    rows = []
+    for r in records:
+        asset_id = clean_text(r.get("equipment_asset_id"))
+        asset_meta = asset_lookup.get((asset_id or "").upper(), {})
+        extra = {
+            "equipment_criticality": r.get("equipment_criticality"),
+            "equipment_type": r.get("equipment_type"),
+            "translation_status": r.get("translation_status"),
+            "translated_name": r.get("translated_name"),
+            "search_name": r.get("search_name"),
+            "available_physical": r.get("available_physical"),
+            "reserved_physical": r.get("reserved_physical"),
+            "on_order": r.get("on_order"),
+            "inventory_value": r.get("inventory_value"),
+            "data_quality_flags": r.get("data_quality_flags"),
+            "has_negative_stock_quantity": r.get("has_negative_stock_quantity"),
+            "missing_part_number": r.get("missing_part_number"),
+            "missing_spare_part_name": r.get("missing_spare_part_name"),
+            "machine_group": asset_meta.get("machine_group"),
+        }
+        rows.append({
+            "item_number": r.get("code"),
+            "item_name": r.get("name") or r.get("translated_name"),
+            "asset_id": asset_id,
+            "asset_name": r.get("equipment_name") or asset_meta.get("asset_name"),
+            "stage": asset_meta.get("stage"),
+            "category": r.get("category") or r.get("item_group") or asset_meta.get("category"),
+            "transaction_type": "inventory",
+            "quantity": r.get("current_quantity"),
+            "unit_price": r.get("unit_cost"),
+            "total_value": r.get("stock_value"),
+            "supplier": None,
+            "po_number": None,
+            "pr_number": None,
+            "transaction_date": r.get("last_updated"),
+            "source_file": r.get("source_file"),
+            "classification": None,
+            "min_stock": r.get("min_stock"),
+            "max_stock": r.get("max_stock"),
+            "unit": r.get("unit"),
+            "location": r.get("location"),
+            "needs_review": bool(r.get("has_negative_stock_quantity") or r.get("missing_part_number")),
+            "extra_json": json.dumps({k: v for k, v in extra.items() if v is not None}, default=str),
+        })
+    return rows
+
+
+def _flatten_po_to_sql_rows(records, transaction_type="gen_po", asset_lookup=None):
+    asset_lookup = asset_lookup or {}
+    rows = []
+    for r in records:
+        asset_id = clean_text(r.get("asset_id"))
+        asset_meta = asset_lookup.get((asset_id or "").upper(), {})
+        source_stage = clean_text(r.get("source_stage"))
+        extra = {
+            "work_order_id": r.get("work_order_id"),
+            "original_description": r.get("original_description") or r.get("description"),
+            "translated_description": r.get("translated_description") or r.get("description"),
+            "group_of_cost": r.get("group_of_cost"),
+            "translated_group_of_cost": r.get("translated_group_of_cost"),
+            "type_of_cost": r.get("type_of_cost"),
+            "sub_cost": r.get("sub_cost"),
+            "pd_machine": r.get("pd_machine"),
+            "translated_pd_machine": r.get("translated_pd_machine"),
+            "grn_no": r.get("grn_no"),
+            "grn_status": r.get("grn_status"),
+            "kpi_status": r.get("kpi_status"),
+            "delivery_flag": r.get("delivery_flag"),
+            "lead_time_days": r.get("lead_time_days"),
+            "actual_lead_days": r.get("actual_lead_days"),
+            "delay_days": r.get("delay_days"),
+            "used_po_date_as_gr_fallback": r.get("used_po_date_as_gr_fallback"),
+            "goods_received_date": r.get("goods_received_date"),
+            "grn_date": r.get("grn_date"),
+            "actual_end_date": r.get("actual_end_date"),
+            "department": r.get("department"),
+            "gl_account": r.get("gl_account"),
+            "asset_name": r.get("asset_name") or r.get("equipment_name"),
+            "translation_status": r.get("translation_status"),
+            "confidence": r.get("confidence"),
+            "classification_reason": r.get("classification_reason"),
+            "inventory_match_status": r.get("inventory_match_status"),
+            "inventory_match_confidence": r.get("inventory_match_confidence"),
+            "inventory_match_reason": r.get("inventory_match_reason"),
+            "inventory_match_code": r.get("inventory_match_code"),
+            "inventory_match_name": r.get("inventory_match_name"),
+            "completed": r.get("completed"),
+            "review_reasons": r.get("review_reasons"),
+            "quantity_received": r.get("quantity_received"),
+            "machine_group": asset_meta.get("machine_group"),
+        }
+        rows.append({
+            "item_number": r.get("code"),
+            "item_name": r.get("translated_description") or r.get("description"),
+            "asset_id": asset_id,
+            "asset_name": r.get("asset_name") or r.get("equipment_name") or asset_meta.get("asset_name"),
+            "stage": source_stage or asset_meta.get("stage"),
+            "category": r.get("group_of_cost") or r.get("translated_group_of_cost") or asset_meta.get("category"),
+            "transaction_type": transaction_type,
+            "quantity": r.get("quantity_ordered"),
+            "unit_price": r.get("unit_cost"),
+            "total_value": r.get("total_cost"),
+            "supplier": r.get("supplier") or r.get("vendor_name"),
+            "po_number": r.get("po_number"),
+            "pr_number": r.get("work_order_id"),
+            "transaction_date": r.get("po_date"),
+            "source_file": r.get("source_file"),
+            "classification": r.get("classification"),
+            "min_stock": None,
+            "max_stock": None,
+            "unit": r.get("unit"),
+            "location": None,
+            "needs_review": bool(r.get("needs_manual_review")),
+            "extra_json": json.dumps({k: v for k, v in extra.items() if v is not None}, default=str),
+        })
+    return rows
+
+
+def _flatten_movement_to_sql_rows(records, asset_lookup=None):
+    asset_lookup = asset_lookup or {}
+    rows = []
+    for r in records:
+        asset_id = clean_text(r.get("asset_id"))
+        asset_meta = asset_lookup.get((asset_id or "").upper(), {})
+        extra = {
+            "value": r.get("value"),
+            "document_number": r.get("document_number"),
+            "movement_type": r.get("movement_type"),
+            "work_order_id": r.get("work_order_id"),
+            "machine_group": r.get("machine_group"),
+            "general_area": r.get("general_area"),
+        }
+        rows.append({
+            "item_number": r.get("code"),
+            "item_name": r.get("name"),
+            "asset_id": asset_id,
+            "asset_name": r.get("equipment_name") or asset_meta.get("asset_name"),
+            "stage": asset_meta.get("stage"),
+            "category": r.get("category") or asset_meta.get("category"),
+            "transaction_type": "movement",
+            "quantity": r.get("quantity_drawn"),
+            "unit_price": r.get("unit_cost"),
+            "total_value": r.get("value"),
+            "supplier": None,
+            "po_number": None,
+            "pr_number": None,
+            "transaction_date": r.get("date"),
+            "source_file": r.get("source_file"),
+            "classification": None,
+            "min_stock": None,
+            "max_stock": None,
+            "unit": None,
+            "location": None,
+            "needs_review": False,
+            "extra_json": json.dumps({k: v for k, v in extra.items() if v is not None}, default=str),
+        })
+    return rows
+
+
+def _flatten_project_transactions_to_sql_rows(records, asset_lookup=None, source_file="project_transactions_sql_sync"):
+    asset_lookup = asset_lookup or {}
+    rows = []
+    for r in records:
+        asset_id = clean_text(r.get("asset_id"))
+        asset_meta = asset_lookup.get((asset_id or "").upper(), {})
+        description = (
+            clean_text(r.get("translated_description"))
+            or clean_text(r.get("original_description"))
+            or clean_text(r.get("clean_description"))
+            or "Unknown"
+        )
+        extra = {
+            "transaction_id": r.get("transaction_id"),
+            "original_description": r.get("original_description"),
+            "translated_description": r.get("translated_description"),
+            "clean_description": r.get("clean_description"),
+            "item_category": r.get("item_category"),
+            "quantity_used": r.get("quantity_used"),
+            "total_consumption": r.get("total_consumption"),
+            "unit_cost_estimate": r.get("unit_cost_estimate"),
+            "link_status": r.get("link_status"),
+            "equipment_name": r.get("equipment_name"),
+            "year": r.get("year"),
+            "month": r.get("month"),
+            "fy": r.get("fy"),
+            "machine_group": asset_meta.get("machine_group"),
+        }
+        rows.append({
+            "item_number": clean_text(r.get("transaction_id")) or None,
+            "item_name": description,
+            "asset_id": asset_id,
+            "asset_name": clean_text(r.get("equipment_name")) or asset_meta.get("asset_name"),
+            "stage": asset_meta.get("stage"),
+            "category": clean_text(r.get("item_category")) or asset_meta.get("category"),
+            "transaction_type": "project_txn",
+            "quantity": r.get("quantity_used"),
+            "unit_price": r.get("unit_cost_estimate"),
+            "total_value": r.get("total_consumption"),
+            "supplier": None,
+            "po_number": None,
+            "pr_number": clean_text(r.get("work_order_id")) or None,
+            "transaction_date": r.get("project_date"),
+            "source_file": source_file,
+            "classification": clean_text(r.get("link_status")) or None,
+            "min_stock": None,
+            "max_stock": None,
+            "unit": None,
+            "location": None,
+            "needs_review": clean_text(r.get("link_status")) not in {"", "Linked"},
+            "extra_json": json.dumps({k: v for k, v in extra.items() if v is not None}, default=str),
+        })
+    return rows
+
+
+def _sql_to_inventory_record(row):
+    try:
+        extra = json.loads(row.get("extra_json") or "{}") or {}
+    except Exception:
+        extra = {}
+    record = {
+        "code": row.get("item_number"),
+        "name": row.get("item_name") or row.get("item_number") or "Unmatched",
+        "description": row.get("item_name") or row.get("item_number") or "Unmatched",
+        "search_name": row.get("item_name"),
+        "translated_name": row.get("item_name") or row.get("item_number") or "Unmatched",
+        "translation_status": "No translation needed",
+        "missing_part_number": not bool(row.get("item_number")),
+        "missing_spare_part_name": not bool(row.get("item_name")),
+        "has_negative_stock_quantity": row.get("quantity") is not None and float(row.get("quantity") or 0) < 0,
+        "category": row.get("category") or "Unclassified",
+        "item_group": row.get("category") or "Unclassified",
+        "available_physical": row.get("quantity"),
+        "reserved_physical": None,
+        "total_available": row.get("quantity"),
+        "on_order": None,
+        "current_quantity": row.get("quantity"),
+        "unit": row.get("unit"),
+        "min_stock": row.get("min_stock"),
+        "max_stock": row.get("max_stock"),
+        "unit_cost": row.get("unit_price"),
+        "inventory_value": row.get("total_value"),
+        "stock_value": row.get("total_value"),
+        "location": row.get("location") or "Unmatched",
+        "equipment_name": row.get("asset_name"),
+        "equipment_asset_id": row.get("asset_id"),
+        "equipment_criticality": "Unclassified",
+        "equipment_type": "Unclassified",
+        "last_updated": row.get("transaction_date"),
+        "source_file": row.get("source_file"),
+    }
+    record.update(extra)
+    return _finalize_inventory_health(record)
+
+
+def _sql_to_po_record(row):
+    try:
+        extra = json.loads(row.get("extra_json") or "{}") or {}
+    except Exception:
+        extra = {}
+    classification = row.get("classification") or PURCHASE_CLASS_OTHER
+    completed = bool(row.get("po_number") and row.get("transaction_date"))
+    base = {
+        "po_date": row.get("transaction_date"),
+        "goods_received_date": None,
+        "po_number": row.get("po_number"),
+        "code": row.get("item_number"),
+        "description": row.get("item_name") or row.get("item_number") or "Unmatched",
+        "original_description": row.get("item_name") or row.get("item_number") or "Unmatched",
+        "translated_description": row.get("item_name") or row.get("item_number") or "Unmatched",
+        "clean_description": _normalize_part_name(row.get("item_name") or row.get("item_number") or ""),
+        "quantity_ordered": row.get("quantity"),
+        "quantity_received": row.get("quantity"),
+        "unit": row.get("unit"),
+        "unit_cost": row.get("unit_price"),
+        "total_cost": row.get("total_value"),
+        "supplier": row.get("supplier") or "Unmatched",
+        "vendor_name": row.get("supplier") or "Unmatched",
+        "work_order_id": row.get("pr_number"),
+        "asset_id": row.get("asset_id"),
+        "group_of_cost": row.get("category"),
+        "translated_group_of_cost": row.get("category"),
+        "type_of_cost": None,
+        "sub_cost": None,
+        "pd_machine": row.get("asset_id"),
+        "translated_pd_machine": row.get("asset_id"),
+        "classification": classification,
+        "purchase_classification": classification,
+        "confidence": "High" if classification != PURCHASE_CLASS_OTHER else "Low",
+        "classification_reason": "Stored classification from import",
+        "translation_status": "No translation needed",
+        "inventory_match_status": "No Inventory Match",
+        "inventory_match_confidence": "Low",
+        "inventory_match_reason": "No inventory item code or strong description match was found",
+        "inventory_match_code": None,
+        "inventory_match_name": None,
+        "department": None,
+        "gl_account": None,
+        "grn_no": None,
+        "grn_status": None,
+        "kpi_status": "",
+        "source_stage": row.get("stage") or "Unmapped Stage",
+        "completed": completed,
+        "delivery_flag": "Delivered" if completed else "Pending",
+        "lead_time_days": None,
+        "actual_lead_days": None,
+        "used_po_date_as_gr_fallback": False,
+        "source_file": row.get("source_file"),
+        "review_reasons": [],
+        "needs_manual_review": bool(row.get("needs_review")),
+    }
+    base.update(extra)
+    return base
+
+
+def _sql_to_movement_record(row):
+    try:
+        extra = json.loads(row.get("extra_json") or "{}") or {}
+    except Exception:
+        extra = {}
+    base = {
+        "date": row.get("transaction_date"),
+        "code": row.get("item_number"),
+        "name": row.get("item_name") or row.get("item_number") or "Unmatched",
+        "category": row.get("category") or "Unclassified",
+        "quantity_drawn": row.get("quantity"),
+        "quantity_received": None,
+        "unit_cost": row.get("unit_price"),
+        "value": row.get("total_value"),
+        "work_order_id": None,
+        "asset_id": row.get("asset_id"),
+        "issued_by": None,
+        "transaction_type": "Issue",
+        "source_file": row.get("source_file"),
+    }
+    base.update(extra)
+    return base
+
+
+def _build_structured_spare_parts_payload_from_sql(source_status):
+    """Build the structured payload using pre-classified SQL records instead of Excel."""
+    try:
+        import db as _db
+        inv_rows = _db.load_spare_parts_from_sql(transaction_type="inventory")
+        po_rows = (
+            _db.load_spare_parts_from_sql(transaction_type="gen_po")
+            + _db.load_spare_parts_from_sql(transaction_type="stage_po")
+        )
+        mov_rows = _db.load_spare_parts_from_sql(transaction_type="movement")
+    except Exception as exc:
+        print(f"[db] spare parts SQL load failed: {exc}")
+        return None
+
+    if not inv_rows and not po_rows:
+        return None
+
+    inventory_records = _aggregate_inventory_records([_sql_to_inventory_record(r) for r in inv_rows])
+    po_records = _refine_po_records_with_inventory(
+        [_sql_to_po_record(r) for r in po_rows],
+        inventory_records,
+    )
+    movement_records = [_sql_to_movement_record(r) for r in mov_rows]
+
+    return _run_spare_aggregation(
+        inventory_records, po_records, movement_records,
+        source_status=source_status,
+    )
+
+
+def write_spare_parts_to_db() -> dict:
+    """Build spare parts records from Excel and sync to SQL."""
+    try:
+        import db as _db
+    except Exception as exc:
+        return {"ok": False, "rows": 0, "message": f"db module unavailable: {exc}"}
+    try:
+        data_dir_path = Path(__file__).resolve().parent.parent / "data"
+        paths, source_status = _resolve_future_sources(data_dir_path)
+        asset_lookup = _build_spare_sql_asset_lookup()
+
+        inventory_records = []
+        try:
+            inventory_records = _build_inventory_records(
+                paths.get("spare_parts_master"), source_status.get("spare_parts_master", {})
+            )
+        except Exception as exc:
+            print(f"[db] spare parts inventory build error: {exc}")
+
+        movement_records = []
+        try:
+            movement_records = _build_movement_records(
+                paths.get("inventory_movement"), source_status.get("inventory_movement", {})
+            )
+        except Exception as exc:
+            print(f"[db] spare parts movement build error: {exc}")
+
+        master_codes = {r["code"] for r in inventory_records if r.get("code")}
+        po_records = []
+        po_ttype = "gen_po"
+        try:
+            stage_po_rows, stage_po_status = _load_stage_goods_received_rows()
+            if stage_po_rows:
+                po_records = _build_po_records_from_stage_rows(stage_po_rows, inventory_records, stage_po_status)
+                po_ttype = "stage_po"
+            else:
+                po_records = _build_po_records(paths.get("po_list"), source_status.get("po_list", {}), master_codes)
+            po_records = _refine_po_records_with_inventory(po_records, inventory_records)
+        except Exception as exc:
+            print(f"[db] spare parts PO build error: {exc}")
+
+        project_transaction_records = []
+        try:
+            project_payload = build_all_years_transactions_payload()
+            if project_payload.get("status") == "ok":
+                project_transaction_records = list(project_payload.get("transactions") or [])
+            else:
+                print(f"[db] spare parts project transactions unavailable: {project_payload.get('error')}")
+        except Exception as exc:
+            print(f"[db] spare parts project transactions build error: {exc}")
+
+        sql_rows = (
+            _flatten_inventory_to_sql_rows(inventory_records, asset_lookup=asset_lookup)
+            + _flatten_po_to_sql_rows(po_records, po_ttype, asset_lookup=asset_lookup)
+            + _flatten_movement_to_sql_rows(movement_records, asset_lookup=asset_lookup)
+            + _flatten_project_transactions_to_sql_rows(
+                project_transaction_records,
+                asset_lookup=asset_lookup,
+                source_file="project_transactions_history",
+            )
+        )
+
+        result = _db.upsert_spare_parts(sql_rows)
+        total_rows = result.get("rows", 0)
+        file_names = ", ".join(p.name for p in paths.values() if p)
+        _db.log_import(
+            source_type="spare_parts",
+            source_file=file_names or "unknown",
+            row_count=total_rows,
+            valid_count=total_rows,
+            invalid_count=0,
+            notes=f"types: {result.get('types', [])}",
+        )
+        return {
+            "ok": True,
+            "rows": total_rows,
+            "message": (
+                f"Synced {total_rows} spare parts row(s) to SQL "
+                f"({len(inventory_records)} inventory, {len(po_records)} PO, {len(movement_records)} movement, "
+                f"{len(project_transaction_records)} project transactions)."
+            ),
+        }
+    except Exception as exc:
+        return {"ok": False, "rows": 0, "message": f"Spare parts SQL sync failed: {exc}"}
+
+
+def _write_spare_to_db_background() -> None:
+    global _SPARE_DB_SYNC_RUNNING, _SPARE_DB_SYNC_PENDING
+    while True:
+        try:
+            result = write_spare_parts_to_db()
+            print(f"[db] spare parts: {result.get('message', result)}")
+        except Exception as exc:
+            print(f"[db] spare parts SQL sync error: {exc}")
+        with _SPARE_DB_SYNC_GUARD:
+            if _SPARE_DB_SYNC_PENDING:
+                _SPARE_DB_SYNC_PENDING = False
+                continue
+            _SPARE_DB_SYNC_RUNNING = False
+            break
+
+
+def request_spare_db_sync() -> bool:
+    """Queue a single background SQL sync; collapse bursts of repeated requests."""
+    global _SPARE_DB_SYNC_RUNNING, _SPARE_DB_SYNC_PENDING
+    with _SPARE_DB_SYNC_GUARD:
+        if _SPARE_DB_SYNC_RUNNING:
+            _SPARE_DB_SYNC_PENDING = True
+            return False
+        _SPARE_DB_SYNC_RUNNING = True
+        _SPARE_DB_SYNC_PENDING = False
+    threading.Thread(
+        target=_write_spare_to_db_background,
+        name="db-spare-sync",
+        daemon=True,
+    ).start()
+    return True
+
+
+def _build_full_payload_from_structured(structured_payload, source_paths):
+    """Wrap a structured spare parts payload in the full API response envelope."""
     inventory_records = structured_payload.get("inventory", {}).get("records", [])
     po_records = structured_payload.get("po_classification", {}).get("records", [])
     external_spare_records = [row for row in po_records if _is_spare_purchase_classification(row.get("classification"))]
-    source_paths = [path for path in future_paths.values() if path]
     source_errors = structured_payload.get("structured_errors", [])
     inventory_value = structured_payload.get("inventory", {}).get("summary", {}).get("total_inventory_value")
     external_value = structured_payload.get("po_classification", {}).get("summary", {}).get("spare_part_po_value")
+
     legacy_records = [
         {
             "source_type": "Inventory",
@@ -2280,17 +2995,26 @@ def build_spare_parts_payload():
         }
         for row in external_spare_records
     ]
+
     trend = _build_trend(legacy_records)
     planned_count = len(inventory_records)
     urgent_count = len(external_spare_records)
     classified_total = planned_count + urgent_count
-    payload = {
+
+    last_synced = None
+    if source_paths:
+        timestamps = []
+        for p in source_paths:
+            try:
+                timestamps.append(datetime.fromtimestamp(p.stat().st_mtime).isoformat())
+            except OSError:
+                pass
+        last_synced = max(timestamps, default=None)
+
+    return {
         "meta": {
-            "last_synced": max(
-                [datetime.fromtimestamp(path.stat().st_mtime).isoformat() for path in source_paths],
-                default=None,
-            ),
-            "source_paths": [str(path) for path in source_paths],
+            "last_synced": last_synced,
+            "source_paths": [str(p) for p in source_paths],
             "errors": source_errors,
         },
         "summary": {
@@ -2340,231 +3064,50 @@ def build_spare_parts_payload():
         },
         **structured_payload,
     }
+
+
+def build_spare_parts_payload():
+    data_dir_path = Path(__file__).resolve().parent.parent / "data"
+    future_paths, future_source_status = _resolve_future_sources(data_dir_path)
+    source_paths = [p for p in future_paths.values() if p]
+    cache_signature = (
+        _file_signature(D365_SPARE_PARTS_PATH),
+        _file_signature(GEN_PO_SPARE_PARTS_PATH),
+        _stage_po_source_signatures(),
+        *(_file_signature(path) for path in future_paths.values()),
+    )
+
+    cached = _SPARE_PARTS_CACHE.get(cache_signature)
+    if cached:
+        return cached
+    persistent_cached = _read_persistent_payload_cache("spare_parts_payload", cache_signature)
+    if persistent_cached is not None:
+        _SPARE_PARTS_CACHE.clear()
+        _SPARE_PARTS_CACHE[cache_signature] = persistent_cached
+        return persistent_cached
+
+    # SQL path — fast cold-start when disk cache is empty but SQL has records.
+    if _sql_has_spare_parts():
+        try:
+            sql_struct = _build_structured_spare_parts_payload_from_sql(future_source_status)
+            if sql_struct is not None:
+                payload = _build_full_payload_from_structured(sql_struct, source_paths)
+                _SPARE_PARTS_CACHE.clear()
+                _SPARE_PARTS_CACHE[cache_signature] = payload
+                _write_persistent_payload_cache("spare_parts_payload", cache_signature, payload)
+                return payload
+        except Exception as exc:
+            print(f"[db] spare parts SQL path failed, falling back to Excel: {exc}")
+
+    # Excel path (cold build — may be slow for large files).
+    structured_payload = _build_structured_spare_parts_payload(future_paths, future_source_status)
+    payload = _build_full_payload_from_structured(structured_payload, source_paths)
     _SPARE_PARTS_CACHE.clear()
     _SPARE_PARTS_CACHE[cache_signature] = payload
     _write_persistent_payload_cache("spare_parts_payload", cache_signature, payload)
+    request_spare_db_sync()
     return payload
 
-    records = []
-    source_errors = []
-    inventory_part_count = 0
-    external_part_count = 0
-    external_purchase_value_total = 0.0
-    data_dir = str(data_dir_path)
-    equipment_candidates = _build_equipment_candidates(data_dir)
-
-    if D365_SPARE_PARTS_PATH.exists():
-        try:
-            frame = pd.read_excel(D365_SPARE_PARTS_PATH)
-            for _, row in frame.iterrows():
-                if not _is_relevant_inventory_row(row):
-                    continue
-                inventory_part_count += 1
-                item_description = clean_text(row.get("Product name")) or clean_text(row.get("Search name"))
-                record = {
-                    "source_type": "Inventory",
-                    "item_description": item_description,
-                    "normalized_part_name": _normalize_part_name(item_description or row.get("Search name")),
-                    "quantity": _clean_numeric(row.get("Available physical")),
-                    "unit": clean_text(row.get("Unit of measure")) or clean_text(row.get("Inventory unit")),
-                    "date": None,
-                    "work_order_id": None,
-                    "request_id": None,
-                    "po_id": None,
-                    "equipment_name": None,
-                    "asset_id": clean_text(row.get("Product identification")) if re.search(r"[A-Z]{2,}[A-Z0-9]*-\d+", str(row.get("Product identification") or "")) else None,
-                    "equipment_group": None,
-                    "supplier_vendor": clean_text(row.get("Vendor Name")),
-                    "cost_value": None,
-                    "raw_source_reference": clean_text(row.get("Item number")),
-                    "raw_description": clean_text(row.get("Search name")) or item_description,
-                    "machine_hint": None,
-                    "remarks": clean_text(row.get("Item Group")),
-                }
-                record.update(_link_equipment(record, equipment_candidates))
-                record["urgency_type"] = _classify_record(record)
-                records.append(record)
-        except Exception as exc:
-            source_errors.append(f"D365 inventory: {exc}")
-    else:
-        source_errors.append(f"Missing source file: {D365_SPARE_PARTS_PATH}")
-
-    if GEN_PO_SPARE_PARTS_PATH.exists():
-        try:
-            frame = pd.read_excel(GEN_PO_SPARE_PARTS_PATH)
-            for _, row in frame.iterrows():
-                if _row_has_any_content(
-                    row,
-                    ["Description", "PO No.", "PR No.", "CPP No.", "Vendor name", "PD Machine", "Group of cost", "Type of cost"],
-                ):
-                    external_part_count += 1
-                if not _is_relevant_external_row(row):
-                    continue
-                description = clean_text(row.get("Description"))
-                machine_hint = clean_text(row.get("PD Machine"))
-                note = clean_text(row.get("Note"))
-                group_cost = clean_text(row.get("Group of cost"))
-                date_value = (
-                    _parse_date(row.get("Date Gen PO"))
-                    or _parse_date(row.get("DMY Create(EN) CPP"))
-                    or _parse_date(row.get("DMY Create PR"))
-                )
-                record = {
-                    "source_type": "External Purchase",
-                    "item_description": description,
-                    "normalized_part_name": _normalize_part_name(description),
-                    "quantity": _clean_numeric(row.get("Qty'")),
-                    "unit": clean_text(row.get("Unit")),
-                    "date": date_value.isoformat() if date_value else None,
-                    "work_order_id": clean_text(row.get("PR No.")),
-                    "request_id": clean_text(row.get("CPP No.")),
-                    "po_id": clean_text(row.get("PO No.")),
-                    "equipment_name": machine_hint,
-                    "asset_id": clean_text(row.get("PD Machine")) if re.search(r"[A-Z]{2,}[A-Z0-9]*-\d+", str(row.get("PD Machine") or "")) else None,
-                    "equipment_group": group_cost,
-                    "supplier_vendor": clean_text(row.get("Vendor name")),
-                    "cost_value": _clean_numeric(row.get("Total price")),
-                    "raw_source_reference": clean_text(row.get("PO No.")) or clean_text(row.get("PR No.")),
-                    "raw_description": description,
-                    "machine_hint": machine_hint,
-                    "remarks": note,
-                }
-                external_purchase_value_total += float(record.get("cost_value") or 0)
-                record.update(_link_equipment(record, equipment_candidates))
-                record["urgency_type"] = _classify_record(record)
-                if record["urgency_type"] != "Urgent":
-                    continue
-                records.append(record)
-        except Exception as exc:
-            source_errors.append(f"Gen PO: {exc}")
-    else:
-        source_errors.append(f"Missing source file: {GEN_PO_SPARE_PARTS_PATH}")
-
-    equipment_usage = defaultdict(lambda: {"record_count": 0, "urgent_count": 0, "planned_count": 0, "inventory_count": 0, "external_count": 0, "part_names": Counter(), "last_date": None})
-    unlinked_rows = []
-    for row in records:
-        if row.get("unlinked_flag"):
-            unlinked_rows.append(
-                {
-                    "raw_description": row.get("raw_description") or row.get("item_description") or "-",
-                    "source_type": row.get("source_type"),
-                    "possible_equipment_match": row.get("machine_hint") or "-",
-                    "link_confidence": row.get("link_confidence"),
-                }
-            )
-            continue
-        equipment_name = row.get("linked_equipment_name") or "Unknown"
-        usage = equipment_usage[equipment_name]
-        usage["record_count"] += 1
-        usage["urgent_count"] += 1 if row.get("urgency_type") == "Urgent" else 0
-        usage["planned_count"] += 1 if row.get("urgency_type") == "Planned" else 0
-        usage["inventory_count"] += 1 if row.get("source_type") == "Inventory" else 0
-        usage["external_count"] += 1 if row.get("source_type") == "External Purchase" else 0
-        if row.get("normalized_part_name"):
-            usage["part_names"][row["normalized_part_name"]] += 1
-        if row.get("date") and (usage["last_date"] is None or row["date"] > usage["last_date"]):
-            usage["last_date"] = row["date"]
-
-    equipment_rows = []
-    for equipment_name, usage in equipment_usage.items():
-        top_parts = [name for name, _ in usage["part_names"].most_common(3)]
-        equipment_rows.append(
-            {
-                "equipment_name": equipment_name,
-                "linked_asset_id": next((row.get("linked_asset_id") for row in records if row.get("linked_equipment_name") == equipment_name and row.get("linked_asset_id")), None),
-                "machine_group": next((row.get("linked_machine_group") for row in records if row.get("linked_equipment_name") == equipment_name and row.get("linked_machine_group")), None),
-                "record_count": usage["record_count"],
-                "urgent_count": usage["urgent_count"],
-                "planned_count": usage["planned_count"],
-                "inventory_count": usage["inventory_count"],
-                "external_count": usage["external_count"],
-                "part_names": top_parts,
-                "last_date": usage["last_date"],
-            }
-        )
-    equipment_rows.sort(key=lambda row: (-row["urgent_count"], -row["record_count"], row["equipment_name"]))
-
-    planned_count = sum(1 for row in records if row.get("urgency_type") == "Planned")
-    urgent_count = sum(1 for row in records if row.get("urgency_type") == "Urgent")
-    inventory_count = inventory_part_count
-    external_count = external_part_count
-    linked_equipment_count = len({row.get("linked_equipment_name") for row in records if row.get("linked_equipment_name")})
-    total_external_purchase_value = round(external_purchase_value_total, 2)
-    top_equipment = equipment_rows[0]["equipment_name"] if equipment_rows else None
-
-    external_part_counter = Counter(row.get("normalized_part_name") or row.get("item_description") for row in records if row.get("source_type") == "External Purchase")
-    urgent_part_counter = Counter(row.get("normalized_part_name") or row.get("item_description") for row in records if row.get("urgency_type") == "Urgent")
-    trend = _build_trend(records)
-
-    classified_total = planned_count + urgent_count
-    payload = {
-        "meta": {
-            "last_synced": max(
-                [timestamp for timestamp in [
-                    datetime.fromtimestamp(D365_SPARE_PARTS_PATH.stat().st_mtime).isoformat() if D365_SPARE_PARTS_PATH.exists() else None,
-                    datetime.fromtimestamp(GEN_PO_SPARE_PARTS_PATH.stat().st_mtime).isoformat() if GEN_PO_SPARE_PARTS_PATH.exists() else None,
-                ] if timestamp],
-                default=None,
-            ),
-            "source_paths": [str(D365_SPARE_PARTS_PATH), str(GEN_PO_SPARE_PARTS_PATH)],
-            "errors": source_errors,
-        },
-        "summary": {
-            "total_records": len(records),
-            "planned_count": planned_count,
-            "urgent_count": urgent_count,
-            "inventory_count": inventory_count,
-            "external_count": external_count,
-            "linked_equipment_count": linked_equipment_count,
-            "unlinked_count": len(unlinked_rows),
-            "top_equipment_name": top_equipment,
-            "top_equipment_usage_count": equipment_rows[0]["record_count"] if equipment_rows else 0,
-            "total_external_purchase_value": total_external_purchase_value,
-        },
-        "planned_vs_urgent": {
-            "planned_count": planned_count,
-            "urgent_count": urgent_count,
-            "planned_pct": round((planned_count / classified_total) * 100, 1) if classified_total else 0,
-            "urgent_pct": round((urgent_count / classified_total) * 100, 1) if classified_total else 0,
-            "trend": trend,
-        },
-        "source_split": {
-            "inventory": {
-                "count": inventory_count,
-                "part_count": inventory_count,
-                "quantity": inventory_count,
-                "value": None,
-            },
-            "external_purchase": {
-                "count": external_count,
-                "part_count": external_count,
-                "quantity": external_count,
-                "value": total_external_purchase_value,
-            },
-        },
-        "equipment_rows": equipment_rows,
-        "top_external_parts": [
-            {"part_name": name, "count": count}
-            for name, count in external_part_counter.most_common(10)
-            if name
-        ],
-        "top_urgent_parts": [
-            {"part_name": name, "count": count}
-            for name, count in urgent_part_counter.most_common(10)
-            if name
-        ],
-        "records": sorted(records, key=lambda row: (row.get("urgency_type") != "Urgent", -(int(bool(row.get("date")))), row.get("date") or "", row.get("item_description") or ""), reverse=False),
-        "unlinked_rows": unlinked_rows[:100],
-        "filter_options": _build_filter_options(records),
-        "matching_rules": {
-            "urgency": "Adjust _classify_record() and _has_pd_machine_reference() in backend/spare_parts_service.py",
-            "part_filter": "Adjust _is_relevant_inventory_row() and _is_relevant_external_row() in backend/spare_parts_service.py",
-            "equipment_linking": "Adjust _build_equipment_candidates() and _link_equipment() in backend/spare_parts_service.py",
-        },
-    }
-    _SPARE_PARTS_CACHE.clear()
-    _SPARE_PARTS_CACHE[cache_signature] = payload
-    return payload
 
 
 # ── Project Actual Transactions Parser ──────────────────────────────────────
@@ -5784,6 +6327,7 @@ def import_spare_inventory_file(file_storage):
         row_count = len(df)
         final_path = _promote_uploaded_file(temp_path, SPARE_IMPORT_CANONICAL_FILES["inventory"])
         _clear_spare_related_caches()
+        request_spare_db_sync()
         return {
             "ok": True,
             "message": f"Imported {row_count} inventory row(s).",
@@ -5813,6 +6357,7 @@ def import_external_po_file(file_storage):
         row_count = len(df)
         final_path = _promote_uploaded_file(temp_path, SPARE_IMPORT_CANONICAL_FILES["external_po"])
         _clear_spare_related_caches()
+        request_spare_db_sync()
         return {
             "ok": True,
             "message": f"Imported {row_count} Gen PO row(s).",
@@ -5845,6 +6390,46 @@ def _quick_validate_project_transactions(path: Path) -> None:
         raise ValueError("No 'Item' transaction rows found. Check you uploaded the correct Project actual transactions export.")
 
 
+def _path_mtime_iso(path: Path | None) -> str | None:
+    if not path:
+        return None
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds")
+    except OSError:
+        return None
+
+
+def get_project_transactions_import_status() -> dict:
+    """Lightweight file-based status; never parses the full consumption dataset."""
+    path = _resolve_project_transactions_source_path()
+    if not path:
+        return {
+            "uploaded": False,
+            "file_name": None,
+            "imported_at": None,
+            "transaction_count": None,
+            "message": "Project transactions file not uploaded.",
+        }
+
+    transaction_count = None
+    try:
+        current_sig = (_PT_CACHE.get("mtime") or (None,))[1] if isinstance(_PT_CACHE.get("mtime"), tuple) else None
+        cached_sig = _file_signature(path)
+        cached_payload = _PT_CACHE.get("result")
+        if current_sig == cached_sig and isinstance(cached_payload, dict):
+            transaction_count = len(cached_payload.get("transactions") or [])
+    except Exception:
+        transaction_count = None
+
+    return {
+        "uploaded": True,
+        "file_name": path.name,
+        "imported_at": _path_mtime_iso(path),
+        "transaction_count": transaction_count,
+        "message": f"Using {path.name}",
+    }
+
+
 def import_project_transactions_file(file_storage):
     temp_path = None
     try:
@@ -5869,6 +6454,7 @@ def import_project_transactions_file(file_storage):
             archive_stem=_spare_import_safe_stem(getattr(file_storage, "filename", "") or "project_transactions_current", "project_transactions_current"),
         )
         _clear_spare_related_caches()
+        request_spare_db_sync()
         return {
             "ok": True,
             "message": f"Imported {row_count} spare-parts consumption row(s).",

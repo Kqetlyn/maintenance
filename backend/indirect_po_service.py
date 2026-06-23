@@ -35,6 +35,41 @@ _INDIRECT_PO_PATTERNS = [
 _ROWS_CACHE: dict = {}
 _RECON_CACHE: dict = {}
 
+FINANCIAL_TYPE_OPEX = "OPEX"
+FINANCIAL_TYPE_CAPEX = "CAPEX"
+FINANCIAL_TYPE_EXCLUDED = "Non-engineering / Excluded"
+FINANCIAL_TYPE_UNCLASSIFIED = "Unclassified"
+
+FINANCIAL_VIEW_OPEX = "engineering_opex"
+FINANCIAL_VIEW_CAPEX = "engineering_capex"
+FINANCIAL_VIEW_ALL_ENGINEERING = "all_engineering_po"
+FINANCIAL_VIEW_PROCUREMENT = "procurement_reference"
+
+_CAPEX_PATTERNS = [
+    r"\bcapex\b",
+    r"building|construction|civil work",
+    r"new machine|new equipment|equipment purchase|machine purchase",
+    r"major installation|installation project",
+    r"facility expansion|expansion",
+    r"project asset upgrade|asset upgrade",
+    r"renovation|fabrication",
+]
+
+_OPEX_PATTERNS = [
+    r"\bopex\b",
+    r"spare ?parts?|maintenance|repair|service",
+    r"labou?r|contractor",
+    r"consumable|refrigerant|inspection|cleaning",
+    r"chemical|oil|grease|filter|bearing|seal|gasket|belt",
+]
+
+_EXCLUDED_PATTERNS = [
+    r"packaging|logistics|warehouse",
+    r"corporate|general admin|administration|office",
+    r"staff welfare|welfare",
+    r"rental|lease",
+]
+
 
 # ── File discovery ────────────────────────────────────────────────────────────
 
@@ -126,6 +161,48 @@ def _date(v):
         return None
 
 
+def _normalize_financial_view(value) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": FINANCIAL_VIEW_OPEX,
+        "all": FINANCIAL_VIEW_OPEX,
+        "opex": FINANCIAL_VIEW_OPEX,
+        "engineering_opex": FINANCIAL_VIEW_OPEX,
+        "capex": FINANCIAL_VIEW_CAPEX,
+        "engineering_capex": FINANCIAL_VIEW_CAPEX,
+        "all_engineering": FINANCIAL_VIEW_ALL_ENGINEERING,
+        "all_engineering_po": FINANCIAL_VIEW_ALL_ENGINEERING,
+        "procurement": FINANCIAL_VIEW_PROCUREMENT,
+        "procurement_reference": FINANCIAL_VIEW_PROCUREMENT,
+        "all_indirect_po": FINANCIAL_VIEW_PROCUREMENT,
+        "procurement_reference_all_indirect_po": FINANCIAL_VIEW_PROCUREMENT,
+    }
+    return aliases.get(raw, FINANCIAL_VIEW_OPEX)
+
+
+def _classify_financial_type(*values, source_file: str = "") -> str:
+    text = " ".join(str(v or "") for v in values + (source_file,)).lower()
+    if any(re.search(pat, text) for pat in _EXCLUDED_PATTERNS):
+        return FINANCIAL_TYPE_EXCLUDED
+    if any(re.search(pat, text) for pat in _CAPEX_PATTERNS):
+        return FINANCIAL_TYPE_CAPEX
+    if any(re.search(pat, text) for pat in _OPEX_PATTERNS):
+        return FINANCIAL_TYPE_OPEX
+    return FINANCIAL_TYPE_UNCLASSIFIED
+
+
+def _financial_view_allows(row: dict, financial_view=None) -> bool:
+    view = _normalize_financial_view(financial_view)
+    ftype = row.get("financial_type") or FINANCIAL_TYPE_UNCLASSIFIED
+    if view == FINANCIAL_VIEW_OPEX:
+        return ftype == FINANCIAL_TYPE_OPEX
+    if view == FINANCIAL_VIEW_CAPEX:
+        return ftype == FINANCIAL_TYPE_CAPEX
+    if view in (FINANCIAL_VIEW_ALL_ENGINEERING, FINANCIAL_VIEW_PROCUREMENT):
+        return ftype != FINANCIAL_TYPE_EXCLUDED
+    return True
+
+
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
 def _parse_indirect_po(path: Path) -> list[dict]:
@@ -159,6 +236,10 @@ def _parse_indirect_po(path: Path) -> list[dict]:
         if not po and not pr:
             continue
         dval = _date(r.get(c_date)) if c_date else None
+        procurement_category = _clean(r.get(c_category)) if c_category else ""
+        item_description = _clean(r.get(c_name)) if c_name else ""
+        flag = _clean(r.get(c_flag)) if c_flag else ""
+        pool_id = _clean(r.get(c_pool)) if c_pool else ""
         rows.append({
             "source": "Indirect PO",
             "po_no": po,
@@ -167,9 +248,9 @@ def _parse_indirect_po(path: Path) -> list[dict]:
             "date": dval.isoformat()[:10] if dval else "",
             "year": str(dval.year) if dval else "",
             "month": f"{dval.year}-{dval.month:02d}" if dval else "",
-            "procurement_category": _clean(r.get(c_category)) if c_category else "",
+            "procurement_category": procurement_category,
             "item_code": _clean(r.get(c_item)) if c_item else "",
-            "item_description": _clean(r.get(c_name)) if c_name else "",
+            "item_description": item_description,
             "vendor_id": _clean(r.get(c_vendor_id)) if c_vendor_id else "",
             "vendor_name": _clean(r.get(c_vendor)) if c_vendor else "",
             "qty": _num(r.get(c_qty)) if c_qty else None,
@@ -178,8 +259,15 @@ def _parse_indirect_po(path: Path) -> list[dict]:
             "net_amount": _num(r.get(c_net)) if c_net else None,
             "currency": _clean(r.get(c_currency)) if c_currency else "THB",
             "line_status": _clean(r.get(c_status)) if c_status else "",
-            "flag": _clean(r.get(c_flag)) if c_flag else "",
-            "pool_id": _clean(r.get(c_pool)) if c_pool else "",
+            "flag": flag,
+            "pool_id": pool_id,
+            "financial_type": _classify_financial_type(
+                procurement_category,
+                item_description,
+                flag,
+                pool_id,
+                source_file="Indirect PO",
+            ),
         })
     return rows
 
@@ -358,6 +446,7 @@ def reconcile_with_engineering(indirect_rows: list[dict], engineering_rows: list
                 "eng_group_of_cost": best_eng.get("group_of_cost", ""),
                 "eng_stage": best_eng.get("stage", ""),
                 "eng_category": best_eng.get("category", ""),
+                "eng_financial_type": best_eng.get("financial_type", ""),
                 "qty_diff": round((ind_qty or 0) - (eng_qty or 0), 4) if ind_qty is not None and eng_qty is not None else None,
                 "price_diff": round((ind_price or 0) - (eng_price or 0), 4) if ind_price is not None and eng_price is not None else None,
                 "amount_diff": round((ind_net or 0) - (eng_total or 0), 2) if ind_net is not None and eng_total is not None else None,
@@ -371,7 +460,7 @@ def reconcile_with_engineering(indirect_rows: list[dict], engineering_rows: list
                 "eng_po_no": "", "eng_pr_no": "", "eng_item_number": "",
                 "eng_description": "", "eng_vendor": "",
                 "eng_qty": None, "eng_unit_price": None, "eng_total_price": None,
-                "eng_group_of_cost": "", "eng_stage": "", "eng_category": "",
+                "eng_group_of_cost": "", "eng_stage": "", "eng_category": "", "eng_financial_type": "",
                 "qty_diff": None, "price_diff": None, "amount_diff": None,
             })
 
@@ -400,6 +489,7 @@ def reconcile_with_engineering(indirect_rows: list[dict], engineering_rows: list
             "line_status": "",
             "flag": "",
             "pool_id": "",
+            "financial_type": eng.get("financial_type", ""),
             "matched": False,
             "match_key": "",
             "recon_status": "Engineering Copy Only",
@@ -414,6 +504,7 @@ def reconcile_with_engineering(indirect_rows: list[dict], engineering_rows: list
             "eng_group_of_cost": eng.get("group_of_cost", ""),
             "eng_stage": eng.get("stage", ""),
             "eng_category": eng.get("category", ""),
+            "eng_financial_type": eng.get("financial_type", ""),
             "qty_diff": None,
             "price_diff": None,
             "amount_diff": None,
@@ -427,6 +518,7 @@ def reconcile_with_engineering(indirect_rows: list[dict], engineering_rows: list
 def _procurement_kpis(recon_rows: list[dict]) -> dict:
     indirect_rows = [r for r in recon_rows if r.get("source") == "Indirect PO"]
     matched = [r for r in indirect_rows if r.get("matched")]
+    matched_in_scope = [r for r in matched if r.get("scope_match", True)]
     unmatched = [r for r in indirect_rows if not r.get("matched")]
     mismatch_statuses = {
         "Matched - Price Mismatch",
@@ -435,11 +527,12 @@ def _procurement_kpis(recon_rows: list[dict]) -> dict:
         "Requires Review",
     }
     total_val = sum(r.get("net_amount") or 0 for r in indirect_rows)
-    matched_eng_val = sum(r.get("eng_total_price") or 0 for r in matched)
+    matched_eng_val = sum(r.get("eng_total_price") or 0 for r in matched_in_scope)
     unmatched_val = sum(r.get("net_amount") or 0 for r in unmatched)
-    mismatch_count = sum(1 for r in matched if r.get("recon_status") in mismatch_statuses)
+    non_eng_unmatched_val = max(total_val - matched_eng_val, 0)
+    mismatch_count = sum(1 for r in matched_in_scope if r.get("recon_status") in mismatch_statuses)
     total = len(indirect_rows)
-    match_rate = round(100 * len(matched) / total, 1) if total > 0 else None
+    match_rate = round(100 * len(matched_in_scope) / total, 1) if total > 0 else None
 
     status_breakdown: dict[str, int] = {}
     for r in recon_rows:
@@ -450,10 +543,11 @@ def _procurement_kpis(recon_rows: list[dict]) -> dict:
         "total_indirect_po_value": round(total_val, 2),
         "matched_engineering_po_value": round(matched_eng_val, 2),
         "unmatched_procurement_value": round(unmatched_val, 2),
+        "non_engineering_unmatched_procurement_value": round(non_eng_unmatched_val, 2),
         "price_qty_mismatch_count": mismatch_count,
         "match_rate_pct": match_rate,
         "total_indirect_lines": total,
-        "matched_lines": len(matched),
+        "matched_lines": len(matched_in_scope),
         "status_breakdown": [
             {"label": k, "count": v}
             for k, v in sorted(status_breakdown.items(), key=lambda x: -x[1])
@@ -554,7 +648,7 @@ def _get_recon(indirect_rows: list[dict], engineering_rows: list[dict]) -> list[
 
 # ── Public payload builder ────────────────────────────────────────────────────
 
-def build_procurement_reconciliation(stage=None, category=None, year=None, month=None) -> dict:
+def build_procurement_reconciliation(stage=None, category=None, year=None, month=None, financial_view=None) -> dict:
     """Full procurement reconciliation payload including KPIs, vendor performance,
     and Engineering lines annotated with reconciliation status."""
     import spare_parts_views as spv  # avoid circular import at module level
@@ -572,34 +666,46 @@ def build_procurement_reconciliation(stage=None, category=None, year=None, month
 
     filtered_indirect = [r for r in indirect_rows if _ind_filter(r)]
 
-    # Apply stage/year/month filter to engineering rows
+    # Apply stage/category/year/month/financial filter to engineering rows.
     eng_filtered = engineering_rows
     if stage and stage not in ("", "all", "All Stages"):
         eng_filtered = [r for r in eng_filtered if r.get("stage") == stage]
+    if category and category not in ("", "all", "All"):
+        eng_filtered = [r for r in eng_filtered if r.get("category") == category]
     if year and year not in ("", "all"):
         eng_filtered = [r for r in eng_filtered if r.get("year") == str(year)]
     if month and month not in ("", "all"):
         eng_filtered = [r for r in eng_filtered if r.get("month") == str(month)]
+    if financial_view:
+        eng_filtered = [r for r in eng_filtered if _financial_view_allows(r, financial_view)]
 
     recon_rows = _get_recon(indirect_rows, engineering_rows)
 
-    # Filter recon rows to filtered indirect + any engineering-only in eng_filtered
+    eng_po_scope = {_norm_po(e.get("po_no", "")) for e in eng_filtered if e.get("po_no")}
+    eng_pr_scope = {_norm_po(e.get("pr_no", "")) for e in eng_filtered if e.get("pr_no")}
+
+    def _scope_match(row: dict) -> bool:
+        if not row.get("matched"):
+            return False
+        po = _norm_po(row.get("eng_po_no", ""))
+        pr = _norm_po(row.get("eng_pr_no", ""))
+        return (po and po in eng_po_scope) or (pr and pr in eng_pr_scope)
+
+    # Indirect rows remain company-wide reference rows. The scope_match flag
+    # controls Engineering matched value KPIs without rewriting source data.
     filtered_recon: list[dict] = []
-    ind_ids = {id(r) for r in filtered_indirect}
     for r in recon_rows:
         if r.get("source") == "Indirect PO" and any(
             r.get("po_no") == fi.get("po_no") and r.get("pr_no") == fi.get("pr_no")
             and r.get("line_no") == fi.get("line_no")
             for fi in filtered_indirect
         ):
-            filtered_recon.append(r)
+            filtered_recon.append({**r, "scope_match": _scope_match(r)})
         elif r.get("source") == "Engineering Copy Only":
             eng_po = _norm_po(r.get("po_no", ""))
-            if any(_norm_po(e.get("po_no", "")) == eng_po for e in eng_filtered):
-                filtered_recon.append(r)
-
-    if not filtered_recon:
-        filtered_recon = recon_rows  # fallback: use all if filter produced nothing
+            eng_pr = _norm_po(r.get("pr_no", ""))
+            if (eng_po and eng_po in eng_po_scope) or (eng_pr and eng_pr in eng_pr_scope):
+                filtered_recon.append({**r, "scope_match": False})
 
     kpis = _procurement_kpis(filtered_recon)
     vendor_perf = _vendor_performance(
@@ -635,35 +741,19 @@ def build_procurement_reconciliation(stage=None, category=None, year=None, month
             "category": category or "all",
             "year": year or "all",
             "month": month or "all",
+            "financial_view": _normalize_financial_view(financial_view),
         },
     }
 
 
-def get_procurement_kpis_for_overview(year=None, month=None) -> dict:
+def get_procurement_kpis_for_overview(year=None, month=None, stage=None, category=None, financial_view=None) -> dict:
     """Lightweight KPI summary for embedding in the overview payload.
     Uses cached reconciliation rows — does not re-parse if already warm."""
-    import spare_parts_views as spv  # avoid circular import at module level
-
-    indirect_rows, indirect_status = get_indirect_po_rows()
+    payload = build_procurement_reconciliation(stage, category, year, month, financial_view)
+    indirect_status = (payload.get("source_status") or {}).get("indirect_po") or {}
     if not indirect_status.get("available"):
         return {"available": False, "message": indirect_status.get("message", "")}
-
-    engineering_rows, _ = spv.get_goods_received_rows()
-    recon_rows = _get_recon(indirect_rows, engineering_rows)
-
-    # Filter by year/month if requested
-    if year and year not in ("", "all"):
-        recon_rows = [
-            r for r in recon_rows
-            if r.get("year") == str(year) or r.get("source") == "Engineering Copy Only"
-        ]
-    if month and month not in ("", "all"):
-        recon_rows = [
-            r for r in recon_rows
-            if r.get("month") == str(month) or r.get("source") == "Engineering Copy Only"
-        ]
-
-    kpis = _procurement_kpis(recon_rows)
+    kpis = payload.get("kpis") or {}
     kpis["available"] = True
     return kpis
 

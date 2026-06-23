@@ -241,6 +241,12 @@ def enrich_work_order_records(records, data_dir):
             "mappedStage": mapped_stage,
             "mappedAssetName": classified.get("mappedAssetName") or classified.get("mapped_asset_name") or classified.get("asset_display_name") or machine_name,
             "mappedMainAssetGroup": classified.get("mappedMainAssetGroup") or classified.get("mapped_main_asset_group") or machine_group,
+            # Real Asset_Master[Machine Group] column (Bratt Pans, Combi Ovens, Water
+            # System, HVAC…). Distinct from machine_group, which holds the Category.
+            # Surfaced here so consumers (MIRA predictive) can group by the true
+            # machine group instead of falling back to job_trade buckets.
+            "mappedMachineGroup": classified.get("mappedMachineGroup") or classified.get("asset_machine_group") or "",
+            "asset_machine_group": classified.get("mappedMachineGroup") or classified.get("asset_machine_group") or "",
             "mappedSubAssetGroup": classified.get("mappedSubAssetGroup") or classified.get("mapped_sub_asset_group") or "",
             "mappedLocation": classified.get("mappedLocation") or classified.get("mapped_location") or classified.get("location") or "",
             "mappedSystemArea": classified.get("mappedSystemArea") or classified.get("mapped_system_area") or "",
@@ -926,7 +932,16 @@ def _build_historical_trend(records):
     return rows
 
 
-def build_management_downtime_payload(records, status_events, period_start, period_end, data_dir, mtbf_records=None, historical_records=None):
+def build_management_downtime_payload(
+    records,
+    status_events,
+    period_start,
+    period_end,
+    data_dir,
+    mtbf_records=None,
+    historical_records=None,
+    mapping_meta=None,
+):
     period_floor = period_start or _resolve_year_floor(period_start, period_end)
     work_order_ids = [
         _clean_text(row.get("work_order_id"))
@@ -1306,6 +1321,6 @@ def build_management_downtime_payload(records, status_events, period_start, peri
         "work_orders": detailed_rows,
         "filters": filters,
         "alerts": alerts,
-        "mapping_meta": get_grouped_machine_mapping_meta(data_dir),
+        "mapping_meta": mapping_meta if mapping_meta is not None else get_grouped_machine_mapping_meta(data_dir),
         "historical_trend": historical_trend,
     }

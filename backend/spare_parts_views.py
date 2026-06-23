@@ -245,6 +245,48 @@ _PO_CATEGORY_KEYWORDS = [
     ("Production Equipment", r"production|\bmachine|conveyor|oven|fryer|bratt|sealer|vacuum|x-?ray|weigh|packing|robot|dicer|slicer|mixer|grinder|chopper|former|filler"),
 ]
 
+FINANCIAL_TYPE_OPEX = "OPEX"
+FINANCIAL_TYPE_CAPEX = "CAPEX"
+FINANCIAL_TYPE_EXCLUDED = "Non-engineering / Excluded"
+FINANCIAL_TYPE_UNCLASSIFIED = "Unclassified"
+
+FINANCIAL_VIEW_OPEX = "engineering_opex"
+FINANCIAL_VIEW_CAPEX = "engineering_capex"
+FINANCIAL_VIEW_ALL_ENGINEERING = "all_engineering_po"
+FINANCIAL_VIEW_PROCUREMENT = "procurement_reference"
+
+_FINANCIAL_VIEW_LABELS = {
+    FINANCIAL_VIEW_OPEX: "Engineering Operational Spend excluding CAPEX",
+    FINANCIAL_VIEW_CAPEX: "Engineering CAPEX / Project Spend",
+    FINANCIAL_VIEW_ALL_ENGINEERING: "All Engineering PO",
+    FINANCIAL_VIEW_PROCUREMENT: "Procurement Reference / All Indirect PO",
+}
+
+_CAPEX_PATTERNS = [
+    r"\bcapex\b",
+    r"building|construction|civil work",
+    r"new machine|new equipment|equipment purchase|machine purchase",
+    r"major installation|installation project",
+    r"facility expansion|expansion",
+    r"project asset upgrade|asset upgrade",
+    r"renovation|fabrication",
+]
+
+_OPEX_PATTERNS = [
+    r"\bopex\b",
+    r"spare ?parts?|maintenance|repair|service",
+    r"labou?r|contractor",
+    r"consumable|refrigerant|inspection|cleaning",
+    r"chemical|oil|grease|filter|bearing|seal|gasket|belt",
+]
+
+_EXCLUDED_PATTERNS = [
+    r"packaging|logistics|warehouse",
+    r"corporate|general admin|administration|office",
+    r"staff welfare|welfare",
+    r"rental|lease",
+]
+
 
 def _po_category(group_of_cost: str, sub_cost: str, description: str) -> str:
     text = f"{group_of_cost} {sub_cost} {description}".lower()
@@ -252,6 +294,61 @@ def _po_category(group_of_cost: str, sub_cost: str, description: str) -> str:
         if re.search(pat, text):
             return cat
     return "Unclassified"
+
+
+def normalize_financial_view(value) -> str:
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "": FINANCIAL_VIEW_OPEX,
+        "all": FINANCIAL_VIEW_OPEX,
+        "opex": FINANCIAL_VIEW_OPEX,
+        "engineering_opex": FINANCIAL_VIEW_OPEX,
+        "engineering_operational_spend_excluding_capex": FINANCIAL_VIEW_OPEX,
+        "capex": FINANCIAL_VIEW_CAPEX,
+        "engineering_capex": FINANCIAL_VIEW_CAPEX,
+        "engineering_capex_project_spend": FINANCIAL_VIEW_CAPEX,
+        "all_engineering": FINANCIAL_VIEW_ALL_ENGINEERING,
+        "all_engineering_po": FINANCIAL_VIEW_ALL_ENGINEERING,
+        "procurement": FINANCIAL_VIEW_PROCUREMENT,
+        "procurement_reference": FINANCIAL_VIEW_PROCUREMENT,
+        "procurement_reference_all_indirect_po": FINANCIAL_VIEW_PROCUREMENT,
+        "all_indirect_po": FINANCIAL_VIEW_PROCUREMENT,
+    }
+    return aliases.get(raw, FINANCIAL_VIEW_OPEX)
+
+
+def financial_scope_meta(financial_view=None) -> dict:
+    view = normalize_financial_view(financial_view)
+    return {
+        "view": view,
+        "label": _FINANCIAL_VIEW_LABELS.get(view, _FINANCIAL_VIEW_LABELS[FINANCIAL_VIEW_OPEX]),
+        "engineering_source_note": "Source: Engineering PO files (Stage 1 and Stage 2 Gen PO)",
+        "procurement_source_note": "Source: Indirect PO procurement file (reference only)",
+        "consumption_source_note": "Source: Project Actual Transactions",
+    }
+
+
+def classify_financial_type(*values, source_file: str = "") -> str:
+    text = " ".join(str(v or "") for v in values + (source_file,)).lower()
+    if any(re.search(pat, text) for pat in _EXCLUDED_PATTERNS):
+        return FINANCIAL_TYPE_EXCLUDED
+    if any(re.search(pat, text) for pat in _CAPEX_PATTERNS):
+        return FINANCIAL_TYPE_CAPEX
+    if any(re.search(pat, text) for pat in _OPEX_PATTERNS):
+        return FINANCIAL_TYPE_OPEX
+    return FINANCIAL_TYPE_UNCLASSIFIED
+
+
+def _financial_view_allows(row: dict, financial_view=None) -> bool:
+    view = normalize_financial_view(financial_view)
+    ftype = row.get("financial_type") or FINANCIAL_TYPE_UNCLASSIFIED
+    if view == FINANCIAL_VIEW_OPEX:
+        return ftype == FINANCIAL_TYPE_OPEX
+    if view == FINANCIAL_VIEW_CAPEX:
+        return ftype == FINANCIAL_TYPE_CAPEX
+    if view in (FINANCIAL_VIEW_ALL_ENGINEERING, FINANCIAL_VIEW_PROCUREMENT):
+        return ftype != FINANCIAL_TYPE_EXCLUDED
+    return True
 
 
 # ── Goods Received parser ─────────────────────────────────────────────────────
@@ -297,7 +394,19 @@ def _parse_goods_received_stage(path: Path, stage: str) -> tuple[list[dict], lis
         dgen = _date(r.get(c_dategen)) if c_dategen else None
         group_of_cost = _clean(r.get(c_group)) if c_group else ""
         sub_cost = _clean(r.get(c_sub)) if c_sub else ""
+        type_of_cost = _clean(r.get(c_type)) if c_type else ""
         desc = _clean(r.get(c_desc)) if c_desc else ""
+        note = _clean(r.get(c_note)) if c_note else ""
+        category = _po_category(group_of_cost, sub_cost, desc)
+        financial_type = classify_financial_type(
+            group_of_cost,
+            sub_cost,
+            type_of_cost,
+            desc,
+            category,
+            note,
+            source_file=f"{stage} Engineering PO",
+        )
         rows.append({
             "stage": stage,
             "pr_no": pr,
@@ -307,7 +416,8 @@ def _parse_goods_received_stage(path: Path, stage: str) -> tuple[list[dict], lis
             "item_number": _clean(r.get(c_item)) if c_item else "",
             "group_of_cost": group_of_cost,
             "sub_cost": sub_cost,
-            "type_of_cost": _clean(r.get(c_type)) if c_type else "",
+            "type_of_cost": type_of_cost,
+            "financial_type": financial_type,
             "description": desc,
             "qty": _num(r.get(c_qty)) if c_qty else None,
             "unit": _clean(r.get(c_unit)) if c_unit else "",
@@ -325,8 +435,8 @@ def _parse_goods_received_stage(path: Path, stage: str) -> tuple[list[dict], lis
             "on_time": kpi.lower() == "ontime",
             "over_delivery": "over" in kpi.lower(),
             "customer_group": _clean(r.get(c_cust)) if c_cust else "",
-            "note": _clean(r.get(c_note)) if c_note else "",
-            "category": _po_category(group_of_cost, sub_cost, desc),
+            "note": note,
+            "category": category,
             "year": str(dgen.year) if dgen else "",
             "month": f"{dgen.year}-{dgen.month:02d}" if dgen else "",
         })
@@ -473,11 +583,14 @@ def get_import_status() -> dict:
             "issues": entry.get("issues") or [],
         }
     try:
-        _, gi_status = get_goods_issued_rows()
+        import spare_parts_service as sp
+        gi_status = sp.get_project_transactions_import_status()
     except Exception as exc:  # pragma: no cover - defensive
-        gi_status = {"available": False, "message": str(exc)}
+        gi_status = {"uploaded": False, "message": str(exc)}
     out["Goods Issued"] = {
-        "uploaded": bool(gi_status.get("available")),
+        "uploaded": bool(gi_status.get("uploaded")),
+        "file_name": gi_status.get("file_name"),
+        "imported_at": gi_status.get("imported_at"),
         "transaction_count": gi_status.get("transaction_count"),
         "message": gi_status.get("message"),
     }
@@ -485,6 +598,7 @@ def get_import_status() -> dict:
     out["Inventory"] = {
         "uploaded": inv_path.exists(),
         "file_name": inv_path.name if inv_path.exists() else None,
+        "imported_at": datetime.fromtimestamp(inv_path.stat().st_mtime).isoformat(timespec="seconds") if inv_path.exists() else None,
         "message": "Inventory master present" if inv_path.exists() else "No inventory file imported yet.",
     }
     try:
@@ -529,7 +643,7 @@ def get_goods_issued_rows() -> tuple[list[dict], dict]:
 
 
 # ── filtering ─────────────────────────────────────────────────────────────────
-def _apply_filters(rows: list[dict], stage=None, category=None, year=None, month=None) -> list[dict]:
+def _apply_filters(rows: list[dict], stage=None, category=None, year=None, month=None, financial_view=None) -> list[dict]:
     def keep(r):
         if stage and stage not in ("", "all", "All Stages") and r.get("stage") and r["stage"] != stage:
             return False
@@ -538,6 +652,8 @@ def _apply_filters(rows: list[dict], stage=None, category=None, year=None, month
         if year and year not in ("", "all") and r.get("year") != str(year):
             return False
         if month and month not in ("", "all") and r.get("month") != str(month):
+            return False
+        if financial_view and not _financial_view_allows(r, financial_view):
             return False
         return True
     return [r for r in rows if keep(r)]
@@ -564,9 +680,9 @@ def _monthly(rows, val_fn):
 
 
 # ── public builders (cached/efficient) ───────────────────────────────────────
-def build_goods_received(stage=None, category=None, year=None, month=None) -> dict:
+def build_goods_received(stage=None, category=None, year=None, month=None, financial_view=None) -> dict:
     all_rows, status = get_goods_received_rows()
-    rows = _apply_filters(all_rows, stage, category, year, month)
+    rows = _apply_filters(all_rows, stage, category, year, month, financial_view)
     completed = [r for r in rows if r["completed"]]
     pending = [r for r in rows if not r["completed"]]
     valid_kpi = [r for r in rows if r["kpi_status"]]
@@ -603,6 +719,7 @@ def build_goods_received(stage=None, category=None, year=None, month=None) -> di
         "top_cost_groups": _top(rows, lambda r: r["group_of_cost"], lambda r: r["total_price"]),
         "rows": rows,
         "source_status": status,
+        "financial_scope": financial_scope_meta(financial_view),
         "data_quality": {
             "missing_grn_number": missing_grn_no,
             "missing_date": missing_date,
@@ -673,8 +790,8 @@ def build_goods_issued(stage=None, category=None, year=None, month=None) -> dict
     }
 
 
-def build_overview(stage=None, category=None, year=None, month=None) -> dict:
-    gr = build_goods_received(stage, category, year, month)
+def build_overview(stage=None, category=None, year=None, month=None, financial_view=None) -> dict:
+    gr = build_goods_received(stage, category, year, month, financial_view)
     gi = build_goods_issued(stage, category, year, month)
     import spare_parts_service as sp
     spare_payload = sp.build_spare_parts_payload()
@@ -682,6 +799,13 @@ def build_overview(stage=None, category=None, year=None, month=None) -> dict:
     inventory_missing_qty = sum(1 for row in inventory_rows if row.get("current_quantity") is None)
     inventory_missing_value = sum(1 for row in inventory_rows if row.get("stock_value") is None and row.get("unit_cost") is None)
     unclassified_po_rows = ((spare_payload.get("po_classification") or {}).get("summary") or {}).get("other_unclassified_po_count", 0)
+    comp_summary = (spare_payload.get("comparison") or {}).get("summary") or {}
+    po_class_summary = (spare_payload.get("po_classification") or {}).get("summary") or {}
+    item_group_counts: dict[str, int] = {}
+    for _row in inventory_rows:
+        if float(_row.get("current_quantity") or 0) > 0:
+            _grp = str(_row.get("item_group") or "Unclassified").strip()
+            item_group_counts[_grp] = item_group_counts.get(_grp, 0) + 1
     top_vendor = gr["top_vendors"][0] if gr["top_vendors"] else None
     top_cost = gr["top_cost_groups"][0] if gr["top_cost_groups"] else None
     top_item = gi["top_items_by_value"][0] if gi["top_items_by_value"] else None
@@ -689,7 +813,13 @@ def build_overview(stage=None, category=None, year=None, month=None) -> dict:
     # Indirect PO procurement reconciliation KPIs (lightweight — uses cached reconciliation)
     try:
         import indirect_po_service as ipo
-        procurement_kpis = ipo.get_procurement_kpis_for_overview(year=year, month=month)
+        procurement_kpis = ipo.get_procurement_kpis_for_overview(
+            year=year,
+            month=month,
+            stage=stage,
+            category=category,
+            financial_view=financial_view,
+        )
     except Exception:
         procurement_kpis = {"available": False}
 
@@ -739,8 +869,33 @@ def build_overview(stage=None, category=None, year=None, month=None) -> dict:
             "on_hand_missing_unit_cost_or_value": inventory_missing_value,
             "unclassified_po_rows": unclassified_po_rows,
         },
-        "filters_applied": {"stage": stage or "all", "category": category or "all", "year": year or "all", "month": month or "all"},
+        "filters_applied": {
+            "stage": stage or "all",
+            "category": category or "all",
+            "year": year or "all",
+            "month": month or "all",
+            "financial_view": normalize_financial_view(financial_view),
+        },
+        "financial_scope": financial_scope_meta(financial_view),
         "procurement_kpis": procurement_kpis,
+        # Section C — Current inventory KPIs (On-hand list; not stage-filtered)
+        "inventory_kpis": {
+            "in_stock_items": comp_summary.get("in_stock_items"),
+            "current_inventory_value": comp_summary.get("current_inventory_value"),
+            "unvalued_in_stock_items": comp_summary.get("unvalued_in_stock_items"),
+            "valued_in_stock_items": comp_summary.get("valued_in_stock_items"),
+            "inventory_valuation_coverage_pct": comp_summary.get("inventory_valuation_coverage_pct"),
+            "item_group_breakdown": item_group_counts,
+        },
+        # Section D — Gen PO category split (Stock spare / Non-stock / Services)
+        "po_category_kpis": {
+            "stocked_spare_part_po_value": po_class_summary.get("stocked_spare_part_po_value"),
+            "stocked_spare_part_po_count": po_class_summary.get("stocked_spare_part_po_count"),
+            "non_stock_spare_part_po_value": po_class_summary.get("non_stock_spare_part_po_value"),
+            "non_stock_spare_part_po_count": po_class_summary.get("non_stock_spare_part_po_count"),
+            "service_labour_repair_po_value": po_class_summary.get("service_labour_repair_po_value"),
+            "service_labour_repair_po_count": po_class_summary.get("service_labour_repair_po_count"),
+        },
     }
 
 
@@ -750,13 +905,13 @@ def _norm_item(s) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def build_item_vendor_analysis(stage=None, category=None, year=None, month=None) -> dict:
+def build_item_vendor_analysis(stage=None, category=None, year=None, month=None, financial_view=None) -> dict:
     """Purchased vs issued item view + vendor + critical-spare signals.
 
     Matching is conservative: descriptions are lowercased / de-punctuated and only
     matched on an exact normalised key. Low-confidence pairs stay unmatched.
     """
-    gr = build_goods_received(stage, category, year, month)
+    gr = build_goods_received(stage, category, year, month, financial_view)
     gi = build_goods_issued(stage, category, year, month)
 
     purchased: dict = {}
@@ -830,5 +985,12 @@ def build_item_vendor_analysis(stage=None, category=None, year=None, month=None)
         "high_purchase_low_issue": high_low,
         "repeated_consumption": repeated,
         "possible_critical_spares": critical,
-        "filters_applied": {"stage": stage or "all", "category": category or "all", "year": year or "all", "month": month or "all"},
+        "filters_applied": {
+            "stage": stage or "all",
+            "category": category or "all",
+            "year": year or "all",
+            "month": month or "all",
+            "financial_view": normalize_financial_view(financial_view),
+        },
+        "financial_scope": financial_scope_meta(financial_view),
     }
