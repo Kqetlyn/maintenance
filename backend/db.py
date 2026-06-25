@@ -19,8 +19,8 @@ from datetime import datetime
 from pathlib import Path
 
 # ── Database path ──────────────────────────────────────────────────────────────
-# Mirrors how every other service resolves DATA_DIR so Railway / local dev both
-# work without extra configuration.
+# Resolves DATA_DIR from environment variable or defaults to local data directory
+# for compatibility with different deployment environments.
 _BASE_DIR = Path(__file__).resolve().parent
 _DEFAULT_DATA_DIR = _BASE_DIR.parent / "data"
 DB_PATH = Path(os.environ.get("DATA_DIR") or str(_DEFAULT_DATA_DIR)) / "dashboard.db"

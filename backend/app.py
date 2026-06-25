@@ -57,7 +57,6 @@ else:
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
 # DATA_DIR can be overridden via environment variable for deployed environments
-# (e.g. Railway persistent volume mounted at /data)
 DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
 os.makedirs(DATA_DIR, exist_ok=True)
 ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
