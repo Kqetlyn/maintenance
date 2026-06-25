@@ -300,11 +300,7 @@ def _build_management_presentation(data: dict, filters: dict, provider_name: str
 
 
 def _build_downtime_section(data: dict, period: str) -> dict:
-    """Overview-card version: 6 key metrics only.
-
-    Detailed rows (Top Asset, Severity, WO Created %, Preventive/Corrective)
-    belong on the Downtime and Machine Explorer pages, not the management overview.
-    """
+    """Overview-card version: 4 key metrics only (Open, Closed, Rate, Carry-over)."""
     work_orders = data.get("work_orders") or {}
     summary = data.get("downtime_summary") or {}
     open_count = work_orders.get("open")
@@ -313,11 +309,6 @@ def _build_downtime_section(data: dict, period: str) -> dict:
     opening_backlog = summary.get("carry_over_open_mr", summary.get("opening_backlog_count"))
     missing_asset = summary.get("missing_asset_count") or 0
     general_area = summary.get("general_area_asset_count") or 0
-    dq_display = (
-        f"{_display_value(missing_asset)} missing asset IDs"
-        + (f" + {_display_value(general_area)} general area entries" if general_area else "")
-        if (missing_asset or general_area) else "None"
-    )
     in_progress = summary.get("in_progress_count")
     new_count = summary.get("new_count")
     finished = summary.get("finished_count")
@@ -330,24 +321,35 @@ def _build_downtime_section(data: dict, period: str) -> dict:
         f"Finished {_display_value(finished)} + Confirm {_display_value(confirm)}"
         if finished is not None else "Raised in selected period and now closed / confirmed"
     )
+    dq_parts = []
+    if missing_asset:
+        dq_parts.append(f"{_display_value(missing_asset)} MR missing asset IDs")
+    if general_area:
+        dq_parts.append(f"{_display_value(general_area)} general-area entries")
+    attention_note = ("Data quality: " + ", ".join(dq_parts)) if dq_parts else None
+    cr = closure_rate or 0
+    backlog = opening_backlog or 0
+    if cr >= 85 and backlog == 0:
+        health_status = "Healthy"
+    elif cr >= 70:
+        health_status = "Watch"
+    else:
+        health_status = "Attention"
     return {
         "title": "Downtime / Work Order Summary",
         "subtitle": "MR activity and closure status for selected period.",
+        "health_status": health_status,
+        "attention_note": attention_note,
         "metrics": [
-            _metric("MR Raised", work_orders.get("total"), note=f"Raised in {period}"),
             _metric("Open / In Progress", open_count,
                     tone=_reverse_ratio_tone(open_count, good=0, watch=10), note=open_note),
             _metric("Closed / Confirmed", closed_count, tone="good", note=closed_note),
             _metric("Closure Rate", closure_rate, display=_percent(closure_rate),
                     tone=_ratio_tone(closure_rate, good=85, watch=70),
-                    note="Closed / Confirmed ÷ MR Raised"),
+                    note=f"{_display_value(work_orders.get('total'))} MR raised in {period}"),
             _metric("Carry-over Open MR", opening_backlog,
                     tone=_reverse_ratio_tone(opening_backlog, good=0, watch=25),
                     note=f"Raised before {period} and still open"),
-            _metric("Data Quality Issues", None, display=dq_display,
-                    tone=_reverse_ratio_tone(
-                        (missing_asset or 0) + (general_area or 0), good=0, watch=5),
-                    note="Missing asset IDs and general area / placeholder entries — correct for asset-level analysis"),
         ],
         "summary": (
             f"{_display_value(work_orders.get('total'))} MR raised in {period}. "
@@ -367,17 +369,29 @@ def _build_pm_section(data: dict, period: str) -> dict:
     compliance = pm.get("compliance_pct")
     completed = pm.get("completed") or 0
     scheduled = pm.get("total_scheduled") or 0
+    overdue = pm.get("overdue") or 0
     zero_completion = completed == 0 and scheduled > 0
     completion_tone = "watch" if zero_completion else ("good" if completed > 0 else "neutral")
     completion_note = (
         "Shows 0 — verify completion records before assuming non-compliance"
         if zero_completion else "Manual Done only"
     )
+    if compliance is not None and compliance >= 90 and overdue == 0:
+        health_status = "Healthy"
+    elif compliance is not None and compliance >= 75:
+        health_status = "Watch"
+    else:
+        health_status = "Attention"
     return {
         "title": "PM Schedule Summary",
+        "health_status": health_status,
         "completion_warning": (
             "PM completion shows 0. This may indicate missing manual completion records, "
             "not confirmed non-compliance. Verify with the PM team before action."
+            if zero_completion else None
+        ),
+        "attention_note": (
+            "PM completion shows 0 — may indicate missing records, not confirmed non-compliance."
             if zero_completion else None
         ),
         "metrics": [
@@ -386,8 +400,6 @@ def _build_pm_section(data: dict, period: str) -> dict:
                     tone=completion_tone, note=completion_note),
             _metric("PM Overdue", pm.get("overdue"),
                     tone=_reverse_ratio_tone(pm.get("overdue"), good=0, watch=20)),
-            _metric("PM Backlog", pm.get("backlog"),
-                    tone=_reverse_ratio_tone(pm.get("backlog"), good=0, watch=20)),
             _metric("PM Compliance", compliance, display=_percent(compliance),
                     tone=_ratio_tone(compliance, good=90, watch=75)),
         ],
@@ -425,8 +437,15 @@ def _build_spare_section(data: dict, period: str) -> dict:
         in_stock_value_note = None
         in_stock_value_tone = "neutral"
 
+    attention_note = (
+        "Inventory value unavailable — items on hand but unit costs not recorded."
+        if value_is_zero_with_stock else None
+    )
+    health_status = "Watch" if value_is_zero_with_stock else "Healthy"
     return {
         "title": "Spare Parts Summary",
+        "health_status": health_status,
+        "attention_note": attention_note,
         "metrics": [
             _metric("In-Stock Spare Parts", spare.get("current_in_stock_items")),
             _metric("In-Stock Value", raw_value,
@@ -437,20 +456,13 @@ def _build_spare_section(data: dict, period: str) -> dict:
                     display=_currency(spare.get("drawn_from_store_value"))),
             _metric("Non-Stock Purchase", spare.get("non_stock_value"),
                     display=_currency(spare.get("non_stock_value"))),
-            _metric("Services / Repair", spare.get("services_value"),
-                    display=_currency(spare.get("services_value"))),
-            _metric("Top Consumed Part", top_part,
-                    note=_currency(spare.get("top_consumed_part_value")) if top_part else None),
-            _metric("YoY Consumption", yoy, display=_percent(yoy),
-                    tone=_consumption_change_tone(yoy)),
         ],
         "summary": (
             f"{_display_value(in_stock_items)} in-stock items. "
             f"Drawn-from-store: {_currency(spare.get('drawn_from_store_value'))}. "
-            f"Non-stock: {_currency(spare.get('non_stock_value'))}. "
-            f"Services: {_currency(spare.get('services_value'))}."
+            f"Non-stock: {_currency(spare.get('non_stock_value'))}."
         ),
-        "footnote": spare.get("services_note") or "Services include repair and cleaning. Non-Stock = direct purchases not held in store.",
+        "footnote": spare.get("services_note") or "Non-Stock = direct purchases not held in store.",
     }
 
 

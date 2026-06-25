@@ -578,6 +578,16 @@ def spare_parts_import_gen_po():
     return jsonify({"ok": any_ok, "results": results}), (200 if any_ok else 400)
 
 
+@app.route("/api/spare-parts/delivery-performance")
+def spare_parts_delivery_performance():
+    stage, category, year, month, financial_view = _spare_filters()
+    import delivery_performance_service as dps
+    return _cached_json(
+        ("spare-delivery-perf", stage, category, year, month, financial_view),
+        lambda: dps.build_delivery_performance(stage, category, year, month, financial_view),
+    )
+
+
 @app.route("/api/spare-parts/procurement-reconciliation")
 def spare_parts_procurement_reconciliation():
     stage, category, year, month, financial_view = _spare_filters()

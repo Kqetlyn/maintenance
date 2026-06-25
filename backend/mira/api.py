@@ -34,6 +34,7 @@ from .providers import get_provider, get_provider_status, generate_structured_su
 from .reports import report_draft_service
 from .services import kpi_query_service as kpi
 from .services import presentation_service as presentation
+from .services import asset_report_service as asset_report
 
 mira_bp = Blueprint("mira", __name__, url_prefix="/api/mira")
 
@@ -44,6 +45,7 @@ MIRA_OVERVIEW_SUMMARY_TIMEOUT_SECONDS = 10
 MIRA_AI_SUMMARY_TIMEOUT_SECONDS = 8
 _SUMMARY_CACHE: dict[str, dict] = {}
 _SUMMARY_WARMING: set[str] = set()
+_PREDICTIVE_WORDING_CACHE: dict[str, dict] = {}
 _MIRA_DESCRIPTION_TAGS_PATH = Path(__file__).resolve().parents[2] / "data" / "mira_description_tags.json"
 
 print(f"[MIRA] Backend build {MIRA_BACKEND_VERSION} loaded at {MIRA_BACKEND_STARTED_AT}. Restart Flask after Python API/schema changes.")
@@ -1965,6 +1967,75 @@ def chat():
     return jsonify(guard._deep_redact(result))
 
 
+@mira_bp.route("/asset-report", methods=["POST"])
+def asset_report_endpoint():
+    """Asset breakdown + repair-cost report (deterministic calc + optional LLM wording).
+
+    POST body:
+        {
+            "machine":                  "Combi Oven",
+            "stage":                    "stage1",          # optional
+            "period":                   "past 1 year",     # optional (default ytd)
+            "include_cost":             true,
+            "include_excluded_rows":    false,
+            "format":                   "management_summary"
+        }
+    """
+    body = request.get_json(silent=True) or {}
+    base_filters = _read_filters()
+    if isinstance(body.get("filters"), dict):
+        body_filters = {}
+        _copy_filter_aliases(body["filters"], body_filters)
+        base_filters = {**base_filters, **body_filters}
+
+    machine = str(body.get("machine") or "").strip()
+    stage = str(body.get("stage") or body.get("selectedStage") or base_filters.get("stage") or "").strip() or None
+    period_text = str(body.get("period") or body.get("period_text") or "ytd").strip()
+    include_cost = bool(body.get("include_cost") or body.get("includeCost"))
+    include_excluded = bool(body.get("include_excluded_rows") or body.get("includeExcludedRows"))
+    fmt = str(body.get("format") or "standard").strip()
+
+    if not machine:
+        return jsonify({"ok": False, "error": "machine parameter is required."}), 400
+
+    params = {
+        "machine": machine,
+        "stage": stage,
+        "period_text": period_text,
+        "include_cost": include_cost,
+        "include_excluded_rows": include_excluded,
+        "format": fmt,
+        "group_by": "unit",
+    }
+
+    # Resolve machine family key from display name
+    for key, fam in asset_report._MACHINE_FAMILIES.items():
+        if fam["display"].lower() == machine.lower() or any(
+            alias in machine.lower() for alias in fam["aliases"]
+        ):
+            params["machine_family_key"] = key
+            params["machine"] = fam["display"]
+            break
+
+    if "machine_family_key" not in params:
+        return jsonify({
+            "ok": False,
+            "error": f"Machine '{machine}' is not recognised. Supported machines: "
+                     + ", ".join(fam["display"] for fam in asset_report._MACHINE_FAMILIES.values()),
+        }), 400
+
+    try:
+        report = asset_report.build_asset_report(params, base_filters)
+        report["answer"] = asset_report.generate_asset_report_wording(report)
+        report["ok"] = True
+        report["period_used"] = f"Period used: {report.get('period_label', period_text)}"
+        report["read_only"] = True
+        report["provider_mode_label"] = "Asset Report (deterministic)"
+        return jsonify(guard._deep_redact(report))
+    except Exception as exc:
+        return jsonify({"ok": False, "error": f"Asset report generation failed: {exc}"}), 500
+
+
 @mira_bp.route("/data-quality", methods=["GET", "POST"])
 def data_quality():
     filters = _read_filters()
@@ -2229,6 +2300,132 @@ def predictive_insights():
                         "draft_label": config.DRAFT_LABEL})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc), "filters": filters}), 500
+
+
+def _predictive_wording_fallback(structured: dict) -> dict:
+    machine = str(structured.get("machine") or "This machine").strip()
+    issue = str(structured.get("selectedIssue") or "the selected issue").strip()
+    mr_count = structured.get("mrCount")
+    total = structured.get("totalMachineMr")
+    pct = str(structured.get("percentage") or "").strip()
+    latest = str(structured.get("latestOccurrence") or "").strip()
+    keywords = structured.get("relatedKeywords") if isinstance(structured.get("relatedKeywords"), list) else []
+    cause = str(structured.get("likelyCause") or "").strip()
+    stock = str(structured.get("stockDecision") or "").strip()
+
+    bits = [f"{machine} has repeated {issue} records"]
+    if mr_count not in (None, "") and total not in (None, ""):
+        bits.append(f"seen in {mr_count} of {total} MR records")
+    elif mr_count not in (None, ""):
+        bits.append(f"seen in {mr_count} MR records")
+    if pct:
+        bits.append(f"({pct})")
+    if latest:
+        bits.append(f"latest case {latest}")
+    if keywords:
+        bits.append("keywords: " + ", ".join(str(k) for k in keywords[:5]))
+
+    parts = structured.get("sparePartsToPrepare") if isinstance(structured.get("sparePartsToPrepare"), list) else []
+    part_text = ", ".join(str(p) for p in parts[:5])
+    action = cause or f"Inspect the machine area related to {issue}."
+    if part_text:
+        action += f" Prepare: {part_text}."
+    if stock:
+        action += f" {stock}"
+
+    return {
+        "faultPatternSummary": ". ".join(bit for bit in bits if bit).strip() + ".",
+        "suggestedAction": action.strip(),
+        "technicianNote": "Technician/Engineer verification required before action.",
+    }
+
+
+def _clean_predictive_wording(parsed: dict, fallback: dict) -> dict:
+    cleaned = {}
+    for key in ("faultPatternSummary", "suggestedAction", "technicianNote"):
+        value = parsed.get(key) if isinstance(parsed, dict) else None
+        value = str(value or "").strip()
+        cleaned[key] = value[:600] if value else fallback[key]
+    return cleaned
+
+
+@mira_bp.route("/predictive-wording", methods=["POST"])
+def predictive_wording():
+    """Optional Ollama wording for already-calculated forecast modal data."""
+    body = request.get_json(silent=True) or {}
+    structured = body.get("structured") if isinstance(body.get("structured"), dict) else {}
+    cache_key = str(body.get("cacheKey") or json.dumps(structured, sort_keys=True, default=str))[:900]
+    if cache_key in _PREDICTIVE_WORDING_CACHE:
+        return jsonify(_PREDICTIVE_WORDING_CACHE[cache_key])
+
+    fallback = _predictive_wording_fallback(structured)
+    response = {
+        "ok": True,
+        "provider": "rule_based",
+        "fallback": True,
+        "wording": fallback,
+    }
+
+    if config.PROVIDER_MODE not in ("auto", "ollama"):
+        _PREDICTIVE_WORDING_CACHE[cache_key] = response
+        return jsonify(response)
+
+    try:
+        from .providers import OllamaMiraProvider, generate_with_ollama
+        provider = OllamaMiraProvider()
+        model = provider.resolve_model()
+        if not model:
+            _PREDICTIVE_WORDING_CACHE[cache_key] = response
+            return jsonify(response)
+
+        allowed = {
+            "machine": structured.get("machine"),
+            "selectedIssue": structured.get("selectedIssue"),
+            "mrCount": structured.get("mrCount"),
+            "totalMachineMr": structured.get("totalMachineMr"),
+            "percentage": structured.get("percentage"),
+            "latestOccurrence": structured.get("latestOccurrence"),
+            "medianInterval": structured.get("medianInterval"),
+            "relatedKeywords": (structured.get("relatedKeywords") or [])[:8] if isinstance(structured.get("relatedKeywords"), list) else [],
+            "likelyCause": structured.get("likelyCause"),
+            "sparePartsToPrepare": (structured.get("sparePartsToPrepare") or [])[:5] if isinstance(structured.get("sparePartsToPrepare"), list) else [],
+            "stockDecision": structured.get("stockDecision"),
+        }
+        system_prompt = (
+            "You are rewriting a maintenance dashboard recommendation. Do not invent new facts, "
+            "parts, costs, dates, or stock status. Only rewrite the structured data provided into "
+            "clear maintenance wording. Keep the response short and return valid JSON only."
+        )
+        user_prompt = (
+            "STRUCTURED_DATA_JSON:\n"
+            + json.dumps(allowed, ensure_ascii=False, default=str, indent=2)
+            + "\n\nReturn exactly this JSON schema with short strings only:\n"
+            + json.dumps({
+                "faultPatternSummary": "",
+                "suggestedAction": "",
+                "technicianNote": "",
+            }, ensure_ascii=False)
+        )
+        raw = generate_with_ollama(
+            system_prompt,
+            user_prompt,
+            model=model,
+            timeout=6,
+            format_json=True,
+        )
+        parsed = json.loads(raw)
+        response = {
+            "ok": True,
+            "provider": "ollama",
+            "model": model,
+            "fallback": False,
+            "wording": _clean_predictive_wording(parsed, fallback),
+        }
+    except Exception as exc:
+        current_app.logger.debug("predictive-wording: Ollama fallback (%s)", exc)
+
+    _PREDICTIVE_WORDING_CACHE[cache_key] = response
+    return jsonify(response)
 
 
 @mira_bp.route("/verdict/run", methods=["POST"])

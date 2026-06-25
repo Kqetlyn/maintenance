@@ -49,7 +49,7 @@
         view: "overview",
         payload: null,
         taskIndex: new Map(),
-        queryStage: "all",
+        queryStage: "Stage 2",
         queryScope: "all",
         queryYear: String(new Date().getFullYear()),
         queryMonth: String(new Date().getMonth() + 1),
@@ -679,7 +679,6 @@
         const backlog = monthTasks.filter(isBacklogTask).length;
         const deferred = monthTasks.filter(isDeferredTask).length;
         const late = monthTasks.filter((t) => t.isLateCompleted).length;
-        const noPic = monthTasks.filter((t) => !String(t.contractorOrPIC || "").trim()).length;
 
         const weekStart = startOfWeek(new Date());
         const weekEnd = addDays(weekStart, 6);
@@ -694,7 +693,7 @@
         setText("pm-ov-backlog", fmt(backlog));
         setText("pm-ov-deferred", fmt(deferred));
         setText("pm-ov-due-week", fmt(dueWeek));
-        setText("pm-ov-no-pic", fmt(noPic));
+
         setText("pm-ov-late", fmt(late));
     }
 

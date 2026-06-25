@@ -197,6 +197,42 @@ html.downtime-embed .dashboard-content {
     cursor: not-allowed;
 }
 
+/* Weekly Report button group */
+.wr-btn-group {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.wr-period-select {
+    height: 32px;
+    font-size: 0.75rem;
+    padding: 0 8px;
+    border-radius: 8px;
+    min-width: 110px;
+}
+
+.wr-btn {
+    padding: 5px 11px;
+    border-radius: 8px;
+    background: #4f46e5;
+    color: #fff;
+    border-color: #4f46e5;
+    font-weight: 700;
+    font-size: 0.75rem;
+    white-space: nowrap;
+}
+
+.wr-btn:hover {
+    background: #4338ca;
+    border-color: #4338ca;
+}
+
+.wr-btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
 .import-status {
     margin: -12px 0 18px;
     color: var(--text-muted);
@@ -550,15 +586,6 @@ html.downtime-embed .dashboard-content {
     margin-bottom: 14px;
 }
 
-.gemba-walk-section {
-    margin-top: 16px;
-}
-
-.gemba-kpi-grid {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
-    gap: 10px;
-    margin-bottom: 14px;
-}
 
 .mr-source-badge {
     display: inline-block;
@@ -571,10 +598,6 @@ html.downtime-embed .dashboard-content {
     white-space: nowrap;
 }
 
-.mr-source-badge.mr-source-gemba {
-    background: #ede9fe;
-    color: #6d28d9;
-}
 
 .mr-tracking-kpi {
     min-height: 128px;
@@ -2701,6 +2724,16 @@ canvas {
     font-size: 0.84rem;
 }
 
+.machine-group-data-quality-note {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+    grid-column: 1 / -1;
+    line-height: 1.4;
+    margin: 0;
+    padding: 2px 2px 0;
+}
+
 .filter-inline {
     align-items: center;
     display: flex;
@@ -3730,10 +3763,6 @@ tr:hover td {
         grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .gemba-kpi-grid {
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-    }
-
     .cmc-kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
     .topic-card-grid {
@@ -3791,7 +3820,6 @@ tr:hover td {
     .impact-kpi-grid,
     .mr-movement-kpi-grid,
     .mr-tracking-kpi-grid,
-    .gemba-kpi-grid,
     .machine-explorer-kpi-grid,
     .mr-tracking-chart-grid,
     .critical-mr-grid,
@@ -5019,15 +5047,14 @@ tr:hover td {
 }
 
 /* Section B — Critical S1 vs S2 MTTR comparison */
-.kdi-crit-cmp-chart-header {
+.kdi-crit-cmp-head-right {
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 8px;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 6px;
+    flex-shrink: 0;
 }
 .kdi-crit-cmp-toggle-btn {
-    flex-shrink: 0;
-    margin-top: 2px;
     padding: 3px 10px;
     font-size: 0.7rem;
     font-weight: 600;
@@ -5039,7 +5066,7 @@ tr:hover td {
     white-space: nowrap;
 }
 .kdi-crit-cmp-toggle-btn:hover { background: var(--hover-bg, #f1f5f9); }
-.kdi-crit-cmp-chart-collapsed { display: none; }
+.kdi-crit-cmp-section-collapsed { display: none; }
 
 .kdi-crit-cmp-head {
     margin-top: 18px;

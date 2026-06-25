@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS work_orders (
     severity             TEXT,
     status               TEXT,
     description          TEXT,
+    translated_description TEXT,
     job_type             TEXT,
     trade                TEXT,
     actual_start         TEXT,
@@ -116,6 +117,8 @@ CREATE TABLE IF NOT EXISTS work_orders (
     source_file          TEXT,
     data_validity_status TEXT,
     review_reason        TEXT,
+    started_by           TEXT,
+    created_by           TEXT,
     updated_at           TEXT,
     UNIQUE(mr_number, wo_number)
 );
@@ -250,6 +253,17 @@ def init_db() -> str:
                 conn.execute("ALTER TABLE spare_parts ADD COLUMN extra_json TEXT")
             except Exception:
                 pass  # column already exists — safe to ignore
+            # Phase 5c: add translated_description to work_orders.
+            try:
+                conn.execute("ALTER TABLE work_orders ADD COLUMN translated_description TEXT")
+            except Exception:
+                pass  # column already exists — safe to ignore
+            # Phase 5d: add started_by / created_by to work_orders.
+            for _col in ("started_by", "created_by"):
+                try:
+                    conn.execute(f"ALTER TABLE work_orders ADD COLUMN {_col} TEXT")
+                except Exception:
+                    pass  # column already exists — safe to ignore
     return str(DB_PATH)
 
 
@@ -602,6 +616,7 @@ def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
             str(rec.get("service_level") or "").strip() or None,
             str(rec.get("status") or "").strip() or None,
             str(rec.get("description_original") or rec.get("description") or "").strip() or None,
+            str(rec.get("translated_description") or "").strip() or None,
             str(rec.get("maintenance_job_type") or rec.get("job_type") or "").strip() or None,
             str(rec.get("system") or rec.get("job_trade") or rec.get("trade") or "").strip() or None,
             rec.get("maintenance_start_time") or rec.get("actual_start_time"),
@@ -610,6 +625,8 @@ def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
             source_file,
             data_validity_status,
             review_reason,
+            str(rec.get("started_by") or "").strip() or None,
+            str(rec.get("created_by") or "").strip() or None,
             now,
         ))
 
@@ -620,28 +637,33 @@ def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
         INSERT INTO work_orders
             (mr_number, wo_number, asset_id, asset_name, functional_location,
              stage, category, machine_group, severity, status, description,
+             translated_description,
              job_type, trade, actual_start, actual_end, created_date,
-             source_file, data_validity_status, review_reason, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             source_file, data_validity_status, review_reason,
+             started_by, created_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(mr_number, wo_number) DO UPDATE SET
-            asset_id             = excluded.asset_id,
-            asset_name           = excluded.asset_name,
-            functional_location  = excluded.functional_location,
-            stage                = excluded.stage,
-            category             = excluded.category,
-            machine_group        = excluded.machine_group,
-            severity             = excluded.severity,
-            status               = excluded.status,
-            description          = excluded.description,
-            job_type             = excluded.job_type,
-            trade                = excluded.trade,
-            actual_start         = excluded.actual_start,
-            actual_end           = excluded.actual_end,
-            created_date         = excluded.created_date,
-            source_file          = excluded.source_file,
-            data_validity_status = excluded.data_validity_status,
-            review_reason        = excluded.review_reason,
-            updated_at           = excluded.updated_at
+            asset_id               = excluded.asset_id,
+            asset_name             = excluded.asset_name,
+            functional_location    = excluded.functional_location,
+            stage                  = excluded.stage,
+            category               = excluded.category,
+            machine_group          = excluded.machine_group,
+            severity               = excluded.severity,
+            status                 = excluded.status,
+            description            = excluded.description,
+            translated_description = excluded.translated_description,
+            job_type               = excluded.job_type,
+            trade                  = excluded.trade,
+            actual_start           = excluded.actual_start,
+            actual_end             = excluded.actual_end,
+            created_date           = excluded.created_date,
+            source_file            = excluded.source_file,
+            data_validity_status   = excluded.data_validity_status,
+            review_reason          = excluded.review_reason,
+            started_by             = excluded.started_by,
+            created_by             = excluded.created_by,
+            updated_at             = excluded.updated_at
     """
 
     with get_connection() as conn:
@@ -697,9 +719,11 @@ def load_work_orders_from_sql(stage: str | None = None) -> list[dict]:
         SELECT
             wo.mr_number, wo.wo_number, wo.asset_id, wo.asset_name,
             wo.functional_location, wo.stage, wo.category, wo.machine_group,
-            wo.severity, wo.status, wo.description, wo.job_type, wo.trade,
+            wo.severity, wo.status, wo.description, wo.translated_description,
+            wo.job_type, wo.trade,
             wo.actual_start, wo.actual_end, wo.created_date,
             wo.source_file, wo.data_validity_status, wo.review_reason,
+            wo.started_by, wo.created_by,
             wo.updated_at,
             am.criticality  AS am_criticality,
             am.is_critical  AS am_is_critical,

@@ -2349,6 +2349,64 @@ def _apply_kpi_analysis_context(result: dict, selected_kpis: list[str], selected
     return result
 
 
+def _answer_asset_report(question: str, base_filters: dict | None) -> dict:
+    """Route an asset breakdown / repair-cost query to the deterministic report service."""
+    from ...services import asset_report_service as ars
+
+    params = ars.extract_asset_report_params(question or "", base_filters)
+    if params is None:
+        return None  # not an asset report query after all
+
+    # Check for missing critical parameters and ask a follow-up
+    follow_up_q = ars.get_missing_params_question(params)
+    if follow_up_q:
+        status = get_provider_status()
+        return {
+            "ok": True,
+            "intent": "asset_report_clarification",
+            "response_type": "asset_report_clarification",
+            "answer": follow_up_q,
+            "period_used": "Clarification needed",
+            "insight": ["Please provide the missing details so I can calculate the exact breakdown."],
+            "recommended_follow_up": [follow_up_q],
+            "provider_mode_label": "Asset Report",
+            "read_only": True,
+            "mode": "chat",
+            "provider_status": status.get("status"),
+            "llm_active": False,
+        }
+
+    filters = ctx.normalize_filters(base_filters or {})
+    try:
+        report = ars.build_asset_report(params, filters)
+        report["answer"] = ars.generate_asset_report_wording(report)
+        report["ok"] = True
+        report["intent"] = "asset_report_query"
+        report["period_used"] = f"Period used: {report.get('period_label', params.get('period_text', ''))}"
+        report["read_only"] = True
+        report["provider_mode_label"] = "Asset Report (deterministic)"
+        report["llm_active"] = False
+        report["mode"] = "chat"
+        report["provider_status"] = get_provider_status().get("status")
+        return report
+    except Exception as exc:
+        status = get_provider_status()
+        return {
+            "ok": False,
+            "intent": "asset_report_query",
+            "response_type": "asset_report",
+            "answer": f"Asset report generation encountered an error: {exc}. Please check that data has been imported.",
+            "period_used": "Error",
+            "insight": [],
+            "recommended_follow_up": ["Ensure MR/WO data is imported and try again."],
+            "provider_mode_label": "Asset Report (error)",
+            "read_only": True,
+            "mode": "chat",
+            "provider_status": status.get("status"),
+            "llm_active": False,
+        }
+
+
 def answer(
     question: str,
     base_filters: dict | None,
@@ -2365,6 +2423,13 @@ def answer(
     if _is_read_only_request(question):
         result = _read_only_response(question or "", base_filters)
         return _apply_kpi_analysis_context(result, selected_kpis, selected_kpi_labels)
+
+    # ── Asset breakdown / repair-cost report query ───────────────────────────
+    from ...services import asset_report_service as ars
+    if ars.is_asset_report_query(question or ""):
+        result = _answer_asset_report(question or "", base_filters)
+        if result is not None:
+            return result
 
     # ── Stage 1: Intent routing ──────────────────────────────────────────────
     # Try qwen2.5:7b first; fall back to keyword classifier.

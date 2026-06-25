@@ -26,6 +26,9 @@
         "Which PM tasks are overdue?",
         "Summarise spare parts consumption",
         "Give me a one-line report summary",
+        "Stage 1 Combi Oven breakdowns past 1 year by unit",
+        "Which Combi Oven unit had the most issues?",
+        "Combi Oven breakdown summary with estimated repair cost",
     ];
     const KPI_REGISTRY = [
         { id: "pm_due_today", category: "PM Schedule", label: "PM due today", prompt: "Analyse PM due today." },
@@ -416,6 +419,11 @@
     }
 
     function buildAssistantMessage(payload) {
+        // Route asset breakdown/cost reports to dedicated renderer
+        if (payload && payload.response_type === "asset_report") {
+            return buildAssetReportMessage(payload);
+        }
+
         const row = el("div", "mira-msg-row mira-msg-row-bot");
         const avatar = el("div", "mira-msg-avatar");
         avatar.innerHTML = mascotSvg(26);
@@ -478,6 +486,464 @@
         row.append(avatar, bubble);
         return row;
     }
+
+    // ── Asset Report rich renderer ──────────────────────────────────────────
+
+    function buildAssetReportMessage(payload) {
+        const row = el("div", "mira-msg-row mira-msg-row-bot");
+        const avatar = el("div", "mira-msg-avatar");
+        avatar.innerHTML = mascotSvg(26);
+        const bubble = el("div", "mira-msg-bubble mira-msg-bubble-bot mira-ar-bubble");
+
+        // ── Header badges ──────────────────────────────────────────────────
+        const head = el("div", "mira-msg-head");
+        const meta = el("div", "mira-msg-meta");
+        meta.append(badge(payload.period_used || ("Period: " + (payload.period_label || "")), "soft"));
+        if (payload.stage_label && payload.stage_label !== "All Stages") {
+            meta.append(badge(payload.stage_label, "neutral"));
+        }
+        meta.append(badge("Asset Report", "good"));
+        head.append(meta);
+        bubble.append(head);
+
+        // ── Title ──────────────────────────────────────────────────────────
+        const titleEl = el("div", "mira-ar-title", payload.title || "Asset Breakdown Summary");
+        bubble.append(titleEl);
+
+        // ── MIRA summary wording ───────────────────────────────────────────
+        bubble.append(el("p", "mira-msg-text mira-ar-summary", payload.answer || ""));
+
+        // ── Key stats row ──────────────────────────────────────────────────
+        const statsRow = el("div", "mira-ar-stats");
+        statsRow.append(
+            arStat("Actual Breakdown MR", payload.total_counted ?? "--"),
+            arStat("Excluded Rows", payload.total_excluded ?? "--"),
+            arStat("Highest MR Unit",
+                payload.highest_mr_unit
+                    ? payload.highest_mr_unit.replace("Combi Oven No.", "#")
+                    : "--"),
+        );
+        if (payload.include_cost && payload.total_estimated_cost != null) {
+            statsRow.append(
+                arStat("Est. Repair Cost (PO-based)",
+                    payload.total_estimated_cost > 0
+                        ? "THB " + Number(payload.total_estimated_cost).toLocaleString(undefined, { maximumFractionDigits: 0 })
+                        : "No PO match")
+            );
+        }
+        bubble.append(statsRow);
+
+        // ── Unit table ─────────────────────────────────────────────────────
+        const units = payload.units_table || [];
+        if (units.length) {
+            const tWrap = el("div", "mira-ar-section");
+            tWrap.append(sectionTitle("Breakdown by Unit"));
+            const table = el("table", "mira-ar-table");
+            const thead = el("thead");
+            const headerRow = el("tr");
+            const headers = ["Unit", "MR Count", "Main Issues"];
+            if (payload.include_cost) headers.push("Est. Cost");
+            headers.forEach((h) => headerRow.append(el("th", null, h)));
+            thead.append(headerRow);
+            table.append(thead);
+
+            const tbody = el("tbody");
+            units.forEach((unit) => {
+                const tr = el("tr");
+                tr.append(
+                    el("td", "mira-ar-td-unit", unit.unit),
+                    el("td", "mira-ar-td-count", String(unit.mr_count ?? "--")),
+                    (() => {
+                        const td = el("td", "mira-ar-td-issues");
+                        const issues = unit.main_issues || [];
+                        if (issues.length) {
+                            issues.forEach((iss) => {
+                                const chip = el("span", "mira-ar-issue-chip", iss);
+                                td.append(chip);
+                            });
+                        } else {
+                            td.textContent = "—";
+                        }
+                        return td;
+                    })(),
+                );
+                if (payload.include_cost) {
+                    tr.append(el("td", "mira-ar-td-cost",
+                        unit.estimated_cost_formatted || (unit.estimated_cost > 0
+                            ? "THB " + Number(unit.estimated_cost).toLocaleString(undefined, { maximumFractionDigits: 0 })
+                            : "No PO match")));
+                }
+                tbody.append(tr);
+            });
+            table.append(tbody);
+            tWrap.append(table);
+            bubble.append(tWrap);
+        }
+
+        // ── Top issue patterns ─────────────────────────────────────────────
+        const patterns = payload.top_issue_patterns || [];
+        if (patterns.length) {
+            const patWrap = el("div", "mira-ar-section");
+            patWrap.append(sectionTitle("Common Issue Patterns"));
+            const patList = el("div", "mira-ar-pattern-list");
+            patterns.forEach((p) => {
+                const chip = el("span", "mira-ar-pattern-chip");
+                chip.append(el("span", "mira-ar-pattern-name", p.issue));
+                chip.append(el("span", "mira-ar-pattern-count", String(p.count)));
+                patList.append(chip);
+            });
+            patWrap.append(patList);
+            bubble.append(patWrap);
+        }
+
+        // ── Data notes / warnings ──────────────────────────────────────────
+        const notes = (payload.data_notes || []).concat(payload.data_warnings || []).filter(Boolean);
+        if (notes.length) {
+            bubble.append(listSection("Notes & Warnings", notes, "warning"));
+        }
+        if (payload.cost_basis_note && payload.include_cost) {
+            const noteEl = el("p", "mira-ar-cost-note", payload.cost_basis_note);
+            bubble.append(noteEl);
+        }
+
+        // ── Action buttons ─────────────────────────────────────────────────
+        const actions = el("div", "mira-ar-actions");
+
+        // Copy summary
+        const copyBtn = el("button", "mira-ar-btn", "Copy Summary");
+        copyBtn.type = "button";
+        copyBtn.addEventListener("click", () => {
+            const text = buildAssetReportText(payload);
+            navigator.clipboard.writeText(text).then(() => {
+                copyBtn.textContent = "Copied!";
+                setTimeout(() => { copyBtn.textContent = "Copy Summary"; }, 2000);
+            }).catch(() => {
+                copyBtn.textContent = "Copy failed";
+                setTimeout(() => { copyBtn.textContent = "Copy Summary"; }, 2000);
+            });
+        });
+        actions.append(copyBtn);
+
+        // Email format
+        const emailBtn = el("button", "mira-ar-btn", "Email Format");
+        emailBtn.type = "button";
+        emailBtn.addEventListener("click", () => {
+            showEmailModal(payload);
+        });
+        actions.append(emailBtn);
+
+        // View evidence
+        const evidenceBtn = el("button", "mira-ar-btn mira-ar-btn-outline", "View Evidence");
+        evidenceBtn.type = "button";
+        const evidencePanel = buildEvidencePanel(payload);
+        evidencePanel.hidden = true;
+        evidenceBtn.addEventListener("click", () => {
+            evidencePanel.hidden = !evidencePanel.hidden;
+            evidenceBtn.textContent = evidencePanel.hidden ? "View Evidence" : "Hide Evidence";
+        });
+        actions.append(evidenceBtn);
+
+        // Show excluded rows
+        const exclBtn = el("button", "mira-ar-btn mira-ar-btn-outline", "Show Excluded Rows");
+        exclBtn.type = "button";
+        const exclPanel = buildExcludedRowsPanel(payload);
+        exclPanel.hidden = true;
+        exclBtn.addEventListener("click", () => {
+            exclPanel.hidden = !exclPanel.hidden;
+            exclBtn.textContent = exclPanel.hidden ? "Show Excluded Rows" : "Hide Excluded Rows";
+        });
+        actions.append(exclBtn);
+
+        // Export CSV
+        const exportBtn = el("button", "mira-ar-btn mira-ar-btn-outline", "Export CSV");
+        exportBtn.type = "button";
+        exportBtn.addEventListener("click", () => exportAssetReportCsv(payload));
+        actions.append(exportBtn);
+
+        bubble.append(actions);
+        bubble.append(evidencePanel);
+        bubble.append(exclPanel);
+
+        row.append(avatar, bubble);
+        return row;
+    }
+
+    function arStat(label, value) {
+        const box = el("div", "mira-ar-stat");
+        box.append(el("div", "mira-ar-stat-value", String(value)));
+        box.append(el("div", "mira-ar-stat-label", label));
+        return box;
+    }
+
+    function buildEvidencePanel(payload) {
+        const panel = el("div", "mira-ar-evidence-panel");
+        const ev = (payload.evidence || {});
+
+        // Counted MR rows
+        const counted = ev.counted_rows || [];
+        const cTitle = el("div", "mira-ar-ev-section-title",
+            `Counted Breakdown MR (${counted.length}${counted.length === 50 ? "+" : ""})`);
+        panel.append(cTitle);
+
+        if (counted.length) {
+            const table = el("table", "mira-ar-ev-table");
+            const tr = el("tr");
+            ["Date", "Unit", "MR#", "Asset", "Description", "Issue"].forEach((h) => {
+                tr.append(el("th", null, h));
+            });
+            const thead = el("thead");
+            thead.append(tr);
+            table.append(thead);
+            const tbody = el("tbody");
+            counted.forEach((r) => {
+                const row = el("tr");
+                row.append(
+                    el("td", null, r.date || "—"),
+                    el("td", null, (r.unit || "?").replace("Combi Oven No.", "#")),
+                    el("td", null, r.mr_number || "—"),
+                    el("td", null, (r.asset_name || "").substring(0, 24)),
+                    el("td", "mira-ar-ev-desc", (r.description || "").substring(0, 80)),
+                    el("td", null, (r.issue_cluster || "").replace("Other / Unclear", "Other")),
+                );
+                tbody.append(row);
+            });
+            table.append(tbody);
+            panel.append(table);
+        } else {
+            panel.append(el("p", "mira-ar-ev-empty", "No counted breakdown MR rows found."));
+        }
+
+        // PO cost rows
+        if (payload.include_cost) {
+            const poRows = (ev.po_rows_included || []);
+            const poTitle = el("div", "mira-ar-ev-section-title",
+                `PO Cost Rows Included (${poRows.length})`);
+            panel.append(poTitle);
+            if (poRows.length) {
+                const table = el("table", "mira-ar-ev-table");
+                const tr = el("tr");
+                ["PO#", "Item", "Unit", "Supplier", "Value (THB)"].forEach((h) => tr.append(el("th", null, h)));
+                const thead = el("thead"); thead.append(tr); table.append(thead);
+                const tbody = el("tbody");
+                poRows.forEach((r) => {
+                    const row = el("tr");
+                    row.append(
+                        el("td", null, r.po_number || "—"),
+                        el("td", null, (r.item_name || "").substring(0, 30)),
+                        el("td", null, (r.unit || "—").replace("Combi Oven No.", "#")),
+                        el("td", null, r.supplier || "—"),
+                        el("td", "mira-ar-ev-num",
+                            r.total_value != null
+                                ? Number(r.total_value).toLocaleString(undefined, { maximumFractionDigits: 0 })
+                                : "—"),
+                    );
+                    tbody.append(row);
+                });
+                table.append(tbody);
+                panel.append(table);
+            } else {
+                panel.append(el("p", "mira-ar-ev-empty", "No PO cost rows directly matched to units."));
+            }
+        }
+
+        return panel;
+    }
+
+    function buildExcludedRowsPanel(payload) {
+        const panel = el("div", "mira-ar-evidence-panel");
+        const ev = (payload.evidence || {});
+        const excl = ev.excluded_rows || [];
+
+        const title = el("div", "mira-ar-ev-section-title",
+            `Excluded Rows (${excl.length}${excl.length === 30 ? "+" : ""}) — not counted in breakdown MR`);
+        panel.append(title);
+
+        // Summary by reason
+        const excSummary = payload.exclusion_summary || [];
+        if (excSummary.length) {
+            const sumWrap = el("div", "mira-ar-excl-summary");
+            excSummary.forEach((item) => {
+                const chip = el("span", "mira-ar-excl-chip");
+                chip.append(el("span", null, item.reason));
+                chip.append(el("span", "mira-ar-excl-count", String(item.count)));
+                sumWrap.append(chip);
+            });
+            panel.append(sumWrap);
+        }
+
+        if (excl.length) {
+            const table = el("table", "mira-ar-ev-table");
+            const tr = el("tr");
+            ["Date", "MR#", "Asset", "Description", "Excluded Because"].forEach((h) => tr.append(el("th", null, h)));
+            const thead = el("thead"); thead.append(tr); table.append(thead);
+            const tbody = el("tbody");
+            excl.forEach((r) => {
+                const row = el("tr");
+                row.append(
+                    el("td", null, r.date || "—"),
+                    el("td", null, r.mr_number || "—"),
+                    el("td", null, (r.asset_name || "").substring(0, 24)),
+                    el("td", "mira-ar-ev-desc", (r.description || "").substring(0, 80)),
+                    el("td", "mira-ar-excl-reason", r.exclusion_reason || "—"),
+                );
+                tbody.append(row);
+            });
+            table.append(tbody);
+            panel.append(table);
+        } else {
+            panel.append(el("p", "mira-ar-ev-empty",
+                "No excluded rows found — all matched rows were counted as actual breakdowns."));
+        }
+
+        return panel;
+    }
+
+    function buildAssetReportText(payload) {
+        const lines = [];
+        lines.push(payload.title || "Asset Breakdown Summary");
+        lines.push("");
+        lines.push(payload.answer || "");
+        lines.push("");
+        lines.push(`Total actual breakdown MR: ${payload.total_counted ?? "--"}`);
+        lines.push(`Excluded rows: ${payload.total_excluded ?? "--"}`);
+        if (payload.highest_mr_unit) {
+            lines.push(`Highest MR unit: ${payload.highest_mr_unit} (${payload.highest_mr_count} MR)`);
+        }
+        if (payload.include_cost && payload.total_estimated_cost != null) {
+            lines.push(`Estimated PO-based repair / purchase cost: THB ${Number(payload.total_estimated_cost).toLocaleString(undefined, { maximumFractionDigits: 0 })}`);
+        }
+        lines.push("");
+        lines.push("Unit Breakdown:");
+        (payload.units_table || []).forEach((u) => {
+            let line = `  ${u.unit}: ${u.mr_count} MR — ${(u.main_issues || []).join(", ") || "no dominant pattern"}`;
+            if (payload.include_cost) line += ` | ${u.estimated_cost_formatted || "No PO match"}`;
+            lines.push(line);
+        });
+        lines.push("");
+        const patterns = payload.top_issue_patterns || [];
+        if (patterns.length) {
+            lines.push("Common issue patterns: " + patterns.map((p) => `${p.issue} (${p.count})`).join(", "));
+        }
+        lines.push("");
+        (payload.data_notes || []).forEach((n) => lines.push("Note: " + n));
+        if (payload.cost_basis_note && payload.include_cost) lines.push(payload.cost_basis_note);
+        return lines.join("\n");
+    }
+
+    function showEmailModal(payload) {
+        const text = buildEmailText(payload);
+        const overlay = el("div", "mira-ar-modal-overlay");
+        const modal = el("div", "mira-ar-modal");
+        const closeBtn = el("button", "mira-ar-modal-close", "×");
+        closeBtn.type = "button";
+        closeBtn.addEventListener("click", () => overlay.remove());
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) overlay.remove(); });
+
+        const title = el("div", "mira-ar-modal-title", "Email-Ready Summary");
+        const ta = el("textarea", "mira-ar-modal-textarea");
+        ta.readOnly = true;
+        ta.value = text;
+        ta.rows = 14;
+
+        const copyBtn = el("button", "mira-ar-btn mira-ar-modal-copy", "Copy to Clipboard");
+        copyBtn.type = "button";
+        copyBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(text).then(() => {
+                copyBtn.textContent = "Copied!";
+                setTimeout(() => { copyBtn.textContent = "Copy to Clipboard"; }, 2000);
+            });
+        });
+
+        modal.append(closeBtn, title, ta, copyBtn);
+        overlay.append(modal);
+        document.body.append(overlay);
+        ta.focus();
+        ta.select();
+    }
+
+    function buildEmailText(payload) {
+        const stage = payload.stage_label && payload.stage_label !== "All Stages"
+            ? payload.stage_label + " " : "";
+        const machine = payload.machine || "Equipment";
+        const period = payload.period_label || "";
+        const lines = [];
+        lines.push(`Subject: ${stage}${machine} Maintenance Breakdown — ${period}`);
+        lines.push("");
+        lines.push(`Dear Team,`);
+        lines.push("");
+        lines.push(`Please find below a breakdown summary for ${stage}${machine} covering ${period}.`);
+        lines.push("");
+        lines.push("SUMMARY");
+        lines.push("──────────────────────────────────────────");
+        lines.push(payload.answer || "");
+        lines.push("");
+        lines.push("UNIT BREAKDOWN");
+        lines.push("──────────────────────────────────────────");
+        lines.push(`${"Unit".padEnd(22)} ${"MR Count".padEnd(10)} ${"Main Issues"}`);
+        lines.push("─".repeat(70));
+        (payload.units_table || []).forEach((u) => {
+            const issues = (u.main_issues || []).join(", ") || "—";
+            let row = `${u.unit.padEnd(22)} ${String(u.mr_count).padEnd(10)} ${issues}`;
+            if (payload.include_cost) row += ` | ${u.estimated_cost_formatted || "No PO match"}`;
+            lines.push(row);
+        });
+        lines.push("");
+        const patterns = payload.top_issue_patterns || [];
+        if (patterns.length) {
+            lines.push("COMMON ISSUE PATTERNS");
+            lines.push(patterns.map((p) => `  • ${p.issue} (${p.count} MR)`).join("\n"));
+            lines.push("");
+        }
+        lines.push("NOTES");
+        lines.push("──────────────────────────────────────────");
+        (payload.data_notes || []).forEach((n) => lines.push(`• ${n}`));
+        if (payload.cost_basis_note && payload.include_cost) {
+            lines.push(`• ${payload.cost_basis_note}`);
+        }
+        lines.push(`• ${payload.total_excluded ?? 0} rows excluded (PM, facility, support work — not counted above)`);
+        lines.push("");
+        lines.push("This report is based on available MR/PO records and requires validation before use in formal management reporting.");
+        lines.push("");
+        lines.push(`Generated by MIRA — ${new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })}`);
+        return lines.join("\n");
+    }
+
+    function exportAssetReportCsv(payload) {
+        const rows = [];
+        rows.push(["Unit", "MR Count", "Main Issues", "Latest MR Date",
+            ...(payload.include_cost ? ["Est. Cost (THB)"] : [])]);
+        (payload.units_table || []).forEach((u) => {
+            rows.push([
+                u.unit,
+                u.mr_count,
+                (u.main_issues || []).join("; "),
+                u.latest_mr || "",
+                ...(payload.include_cost ? [u.estimated_cost != null ? Number(u.estimated_cost).toFixed(0) : ""] : []),
+            ]);
+        });
+        // Add excluded summary
+        rows.push([]);
+        rows.push(["Excluded Rows", "Count"]);
+        (payload.exclusion_summary || []).forEach((item) => {
+            rows.push([item.reason, item.count]);
+        });
+
+        const csv = rows.map((r) =>
+            r.map((cell) => '"' + String(cell ?? "").replace(/"/g, '""') + '"').join(",")
+        ).join("\r\n");
+
+        const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        const safeName = (payload.machine || "asset").replace(/\s+/g, "-").toLowerCase();
+        const safePeriod = (payload.period_label || "report").replace(/\s+/g, "-").toLowerCase();
+        a.download = `mira-${safeName}-${safePeriod}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    // ── End asset report renderer ───────────────────────────────────────────
 
     function buildAnswerDetails(payload) {
         const details = el("details", "mira-answer-details");

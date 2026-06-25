@@ -17,7 +17,7 @@
 
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/Maintenance/style.css?v=20260623-grgi-layout-1">
-    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260623-genpo-ev-1">
+    <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260623-dq-merged-1">
     <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260620-chat-router-1">
 
 </head>
@@ -108,11 +108,7 @@
                         <strong id="pm-ov-due-week">--</strong>
                         <span class="pm-kpi-sub">current week</span>
                     </article>
-                    <article class="summary-card pm-kpi pm-kpi-slate">
-                        <span class="summary-label">PM Without PIC</span>
-                        <strong id="pm-ov-no-pic">--</strong>
-                        <span class="pm-kpi-sub">needs an owner</span>
-                    </article>
+
                     <article class="summary-card pm-kpi pm-kpi-amber">
                         <span class="summary-label">Late Completed PM</span>
                         <strong id="pm-ov-late">--</strong>
@@ -447,52 +443,6 @@
 
         <section id="spare-parts-view" class="maintenance-view hidden">
             <div id="spare-mgmt-root" class="spare-mgmt-root"></div>
-
-            <section class="card-shell spare-import-card">
-                <div class="section-head">
-                    <div>
-                        <h2>Data Sources &amp; Imports</h2>
-                    </div>
-                    <div class="spare-currency-control">
-                        <label for="spare-currency-global">Currency</label>
-                        <select id="spare-currency-global">
-                            <option value="THB">THB</option>
-                            <option value="SGD">SGD</option>
-                        </select>
-                        <p class="spare-fx-note hidden" id="spare-fx-note">Indicative rate: 1 THB = 0.038 SGD.</p>
-                    </div>
-                </div>
-                <div id="spare-import-flags" class="spare-import-flags hidden"></div>
-                <div class="spare-import-grid">
-                    <form class="spare-import-form" id="spare-inventory-import-form">
-                        <div class="spare-import-head">
-                            <strong>Inventory</strong>
-                            <span>Template: Item list for spare parts / Dynamics inventory export</span>
-                        </div>
-                        <input id="spare-inventory-import-file" class="spare-import-file" type="file" accept=".csv,.xlsx,.xls">
-                        <button class="toggle-btn spare-import-btn" type="submit">Import Inventory</button>
-                        <div class="import-status hidden" id="spare-inventory-import-status"></div>
-                    </form>
-                    <form class="spare-import-form" id="spare-external-po-import-form">
-                        <div class="spare-import-head">
-                            <strong>External Parts</strong>
-                            <span>Template: Gen PO in D365 Rev.01 export</span>
-                        </div>
-                        <input id="spare-external-po-import-file" class="spare-import-file" type="file" accept=".csv,.xlsx,.xls">
-                        <button class="toggle-btn spare-import-btn" type="submit">Import Gen PO</button>
-                        <div class="import-status hidden" id="spare-external-po-import-status"></div>
-                    </form>
-                    <form class="spare-import-form" id="spare-project-transactions-import-form">
-                        <div class="spare-import-head">
-                            <strong>Spare Parts Consumption</strong>
-                            <span>Template: Project annual transactions export</span>
-                        </div>
-                        <input id="spare-project-transactions-import-file" class="spare-import-file" type="file" accept=".csv,.xlsx,.xls">
-                        <button class="toggle-btn spare-import-btn" type="submit">Import Consumption</button>
-                        <div class="import-status hidden" id="spare-project-transactions-import-status"></div>
-                    </form>
-                </div>
-            </section>
 
 
             <section class="card-shell asset-intel-card" id="asset-parts-intelligence-card">
@@ -1648,7 +1598,8 @@
             })
             .catch(err => console.error(err));
     </script>
-    <script src="/shared/mira/mira-overview.js?v=20260623-genpo-ev-1" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+    <script src="/shared/mira/mira-overview.js?v=20260625-ov-export-2" defer></script>
     <script src="/Maintenance/script.js?v=20260622-inv-value-1" defer></script>
     <script src="/Maintenance/spare-parts-mgmt.js?v=20260623-grgi-layout-1" defer></script>
     <script src="/Maintenance/pm-schedule.js?v=20260622-alert-banner-1" defer></script>

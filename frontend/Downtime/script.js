@@ -196,7 +196,6 @@ let mrMovementUserSelectedYear = false;
 let mrCarryoverFilter = "all";
 let mrCarryoverSort = "duration_desc";
 let mrTrackingEquipmentFilter = "all";
-let mrSourceFilter = "all";
 let mrTrackingSelectedYear = "";
 let mrTrackingSelectedMonth = "";
 let mrMachineFilter = "all";
@@ -337,14 +336,23 @@ function orderMrCountsByFinancialCalendar(monthlyCounts = []) {
 const MACHINE_EXPLORER_ALL_GROUP = "All Groups";
 const MACHINE_EXPLORER_GROUPS = [
     "All Groups",
-    "Critical",
-    "Non-Critical / Facility",
     "Production Equipment",
+    "Utilities",
     "Refrigeration",
-    "Utilities / Support",
-    "Facility / Building",
-    "Unknown / Review",
+    "Non-Critical / Facility",
 ];
+const MACHINE_EXPLORER_LEGACY_GROUP_MAP = {
+    "Utilities / Support": "Utilities",
+    "Facility / Building": "Non-Critical / Facility",
+    Critical: MACHINE_EXPLORER_ALL_GROUP,
+    "Unknown / Review": MACHINE_EXPLORER_ALL_GROUP,
+};
+
+function normalizeMachineExplorerGroupLabel(group) {
+    const value = String(group || "").trim();
+    if (!value) return MACHINE_EXPLORER_ALL_GROUP;
+    return MACHINE_EXPLORER_LEGACY_GROUP_MAP[value] || value;
+}
 
 // Condenser-to-evaporator network for the Refrigeration System drill-down.
 // Machine Group: Refrigeration | Subgroup: Condenser-Evaporator Network.
@@ -672,47 +680,6 @@ const MR_REMARKS_ALIASES = [
     "Comments",
     "comments",
 ];
-const GEMBA_KEYWORDS = ["gemba", "gamba"];
-
-const GEMBA_ISSUE_CATEGORY_RULES = [
-    { label: "Safety / Food Safety", keywords: ["unsafe", "guard", "emergency stop", "leakage risk", "obstruction", "access issue", "safety", "hazard", "fire", "ppe"] },
-    { label: "Hygiene / Foreign Body Prevention", keywords: ["hygiene", "cleanli", "5s", "foreign body", "foreign object", "housekeep", "contamina"] },
-    { label: "Utilities", keywords: ["compressed air", "boiler", "refrigerat", "electrical", "water", "wwtp", "generator", "mdb", "utilities", "utility", "transformer", "hvac", "chiller", "steam", "power"] },
-    { label: "Facility / Building", keywords: ["floor", "wall", "ceiling", "door", "drain", "lighting", "building", "pest", "structure", "window", "roof", "gutter", "sewer"] },
-    { label: "Production Equipment", keywords: ["machine", "equipment", "conveyor", "oven", "freezer", "packing", "slicer", "mixer", "pump", "motor", "belt", "line", "robot", "filler", "sealer", "blender", "kettle", "tunnel", "combi"] },
-];
-
-function detectMrSource(item) {
-    const text = [
-        item.remarks,
-        item.equipment,
-        item.row?.description_original,
-        item.row?.translated_description,
-        item.row?.maintenance_job_type,
-        item.row?.raw_functional_location,
-        item.row?.machine_equipment_name,
-    ].filter(Boolean).join(" ").toLowerCase();
-    if (GEMBA_KEYWORDS.some((kw) => text.includes(kw))) return "Gemba Walk";
-    return "Other / Unclassified";
-}
-
-function detectGembaIssueCategory(item) {
-    const text = [
-        item.remarks,
-        item.equipment,
-        item.row?.description_original,
-        item.row?.translated_description,
-        item.row?.raw_functional_location,
-    ].filter(Boolean).join(" ").toLowerCase();
-    for (const { label, keywords } of GEMBA_ISSUE_CATEGORY_RULES) {
-        if (keywords.some((kw) => text.includes(kw))) return label;
-    }
-    return "Other / Unclassified";
-}
-
-function isGembaItem(item) {
-    return item.mrSource === "Gemba Walk";
-}
 
 const SLA_CREATED_DATE_ALIASES = [
     "request_created_time",
@@ -1760,8 +1727,6 @@ function normalizeMrTrackingRows(rows = []) {
             missingSeverity: !cleanMrValue(severityRawField.value),
         });
         const item = rowMap.get(keyInfo.key);
-        item.mrSource = detectMrSource(item);
-        item.gembaIssueCategory = item.mrSource === "Gemba Walk" ? detectGembaIssueCategory(item) : "";
     });
     const items = [...rowMap.values()];
     return {
@@ -1853,17 +1818,11 @@ function populateMrTrackingControls(items, selectedYear, rows = []) {
         }
         monthSelect.value = String(mrTrackingSelectedMonth);
     }
-    const sourceSelect = document.getElementById("mr-tracking-source");
-    if (sourceSelect && sourceSelect.value !== mrSourceFilter) {
-        sourceSelect.value = mrSourceFilter;
-    }
 }
 
 function filterMrTrackingItems(items, { selectedYear = "all", selectedMonth = "all", applyYear = true, applyMonth = true } = {}) {
     return items.filter((item) => {
         if (mrTrackingEquipmentFilter !== "all" && item.equipmentKey !== mrTrackingEquipmentFilter) return false;
-        if (mrSourceFilter === "gemba" && item.mrSource !== "Gemba Walk") return false;
-        if (mrSourceFilter === "normal" && item.mrSource === "Gemba Walk") return false;
         const needsYearMatch = applyYear && selectedYear !== "all";
         const needsMonthMatch = applyMonth && selectedMonth !== "all";
         if ((needsYearMatch || needsMonthMatch) && !item.raised.date) return false;
@@ -1925,43 +1884,6 @@ function buildMrTrackingModel(rows = []) {
     const monthlyBySeverity = Object.fromEntries(
         SEVERITY_LEVELS.map((sev) => [sev, orderMrCountsByFinancialCalendar(getMonthlyMrCounts(trendItems.filter((item) => item.severity === sev), selectedYear))])
     );
-    const allGembaItems = normalized.items.filter(isGembaItem);
-    const gembaFiltered = filterMrTrackingItems(allGembaItems, { selectedYear, selectedMonth, applyYear: true, applyMonth: selectedMonth !== "all" });
-    const gembaOpen = gembaFiltered.filter(isMrOpenTracking);
-    const gembaCriticalHigh = gembaOpen.filter((item) => item.severity === "Critical" || item.severity === "High");
-    const gembaFinished = gembaFiltered.filter((item) => item.finished.date);
-    const gembaClosureRate = gembaFiltered.length ? Math.round((gembaFinished.length / gembaFiltered.length) * 100) : 0;
-    const now = new Date();
-    const gembaOverdue = gembaOpen.filter((item) => {
-        if (!item.raised.date) return false;
-        const ageDays = (now - item.raised.date) / (1000 * 60 * 60 * 24);
-        return ageDays > 14;
-    });
-    const gembaCategoryMap = gembaFiltered.reduce((map, item) => {
-        const cat = item.gembaIssueCategory || "Other / Unclassified";
-        map.set(cat, (map.get(cat) || 0) + 1);
-        return map;
-    }, new Map());
-    const gembaCategoryCounts = [...gembaCategoryMap.entries()].sort((a, b) => b[1] - a[1]).map(([label, count]) => ({ label, count }));
-    const gembaAgingBuckets = { "0–3 days": 0, "4–7 days": 0, "8–14 days": 0, ">14 days": 0 };
-    gembaOpen.forEach((item) => {
-        if (!item.raised.date) return;
-        const ageDays = (now - item.raised.date) / (1000 * 60 * 60 * 24);
-        if (ageDays <= 3) gembaAgingBuckets["0–3 days"] += 1;
-        else if (ageDays <= 7) gembaAgingBuckets["4–7 days"] += 1;
-        else if (ageDays <= 14) gembaAgingBuckets["8–14 days"] += 1;
-        else gembaAgingBuckets[">14 days"] += 1;
-    });
-    const gembaStats = {
-        total: gembaFiltered.length,
-        open: gembaOpen.length,
-        criticalHigh: gembaCriticalHigh.length,
-        overdue: gembaOverdue.length,
-        closureRate: gembaClosureRate,
-        categoryCounts: gembaCategoryCounts,
-        agingBuckets: gembaAgingBuckets,
-        hasData: allGembaItems.length > 0,
-    };
     return {
         ...normalized,
         selectedYear,
@@ -1979,7 +1901,6 @@ function buildMrTrackingModel(rows = []) {
         cumulativeCounts,
         machineCounts,
         monthlyBySeverity,
-        gembaStats,
     };
 }
 
@@ -1989,7 +1910,6 @@ function renderMrTrackingLoading(message = "Loading MR tracking.") {
     const body = document.getElementById("mr-outstanding-body");
     if (body) body.innerHTML = `<tr><td colspan="10" class="empty-cell">${escapeHtml(message)}</td></tr>`;
     ["mrParetoChart", "mrMonthlySeverityChart"].forEach((id) => renderEmptyChart(id, message));
-    document.getElementById("gemba-walk-section")?.classList.add("hidden");
 }
 
 function renderMrTrackingSection(rows = allWorkOrderRowsCache) {
@@ -2011,7 +1931,6 @@ function renderMrTrackingSection(rows = allWorkOrderRowsCache) {
     renderMrParetoChart(model);
     renderMrMonthlySeverityChart(model);
     renderMrOutstandingTable(model);
-    renderGembaWalkSection(model);
 }
 
 function renderMrTrackingSummary(model) {
@@ -2039,76 +1958,6 @@ function renderMrTrackingQuality(model) {
     node.classList.toggle("hidden", !parts.length);
 }
 
-function renderGembaWalkSection(model) {
-    const section = document.getElementById("gemba-walk-section");
-    if (!section) return;
-    const { gembaStats } = model;
-    const activeStage = getSelectedDowntimeStage();
-    // Gemba Walk is a Stage 2 activity. When Stage 1 is explicitly selected,
-    // hide the section even if records somehow slipped through.
-    if (activeStage === "Stage 1") {
-        section.classList.add("hidden");
-        return;
-    }
-    const stageLabel = activeStage === "Stage 2" ? "Stage 2 " : "";
-    const sectionTitle = document.getElementById("gemba-walk-section-title");
-    if (sectionTitle) sectionTitle.textContent = `${stageLabel}Gemba Walk Findings`;
-    if (!gembaStats.hasData) {
-        section.classList.add("hidden");
-        return;
-    }
-    section.classList.remove("hidden");
-    setText("gemba-total", fmtNumber(gembaStats.total));
-    setText("gemba-open", fmtNumber(gembaStats.open));
-    setText("gemba-critical-high", fmtNumber(gembaStats.criticalHigh));
-    setText("gemba-overdue", fmtNumber(gembaStats.overdue));
-    setText("gemba-closure-rate", `${gembaStats.closureRate}%`);
-    destroyChart("gembaCategoryChart");
-    const catCanvas = ensureCanvas("gembaCategoryChart");
-    if (catCanvas && gembaStats.categoryCounts.length) {
-        chartRefs.gembaCategoryChart = new Chart(catCanvas.getContext("2d"), {
-            type: "bar",
-            data: {
-                labels: gembaStats.categoryCounts.map((d) => d.label),
-                datasets: [{
-                    label: "Gemba Findings",
-                    data: gembaStats.categoryCounts.map((d) => d.count),
-                    backgroundColor: ["#6366f1", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#64748b"],
-                    borderRadius: 5,
-                }],
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                indexAxis: "y",
-                plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ` ${ctx.parsed.x} finding${ctx.parsed.x !== 1 ? "s" : ""}` } } },
-                scales: { x: { beginAtZero: true, ticks: { precision: 0 } }, y: { ticks: { font: { size: 11 } } } },
-            },
-        });
-    } else if (catCanvas) {
-        renderEmptyChart("gembaCategoryChart", "No Gemba Walk findings for this period.");
-    }
-    destroyChart("gembaAgingChart");
-    const agingCanvas = ensureCanvas("gembaAgingChart");
-    if (agingCanvas) {
-        const bucketKeys = Object.keys(gembaStats.agingBuckets);
-        const bucketValues = Object.values(gembaStats.agingBuckets);
-        const agingColors = ["#10b981", "#f59e0b", "#f97316", "#ef4444"];
-        chartRefs.gembaAgingChart = new Chart(agingCanvas.getContext("2d"), {
-            type: "bar",
-            data: {
-                labels: bucketKeys,
-                datasets: [{ label: "Open Findings", data: bucketValues, backgroundColor: agingColors, borderRadius: 5 }],
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false }, tooltip: { callbacks: { label: (ctx) => ` ${ctx.parsed.y} open` } } },
-                scales: { y: { beginAtZero: true, ticks: { precision: 0 } } },
-            },
-        });
-    }
-}
 
 function renderMrParetoChart(model) {
     const canvas = ensureCanvas("mrParetoChart");
@@ -2738,11 +2587,11 @@ function getCriticalMrItems(rows = []) {
 // Reuses getPerformanceMachineGroup() — same logic as Machine Explorer group cards.
 function getCmcScopeItems(rows = []) {
     const allItems = normalizeMrTrackingRows(rows).items;
-    if (cmcScope === "all") return allItems;
+    const selectedScope = normalizeMachineExplorerGroupLabel(cmcScope);
     if (cmcScope === "Critical") return allItems.filter((item) => isProductionCritical(item.row));
-    if (cmcScope === "Non-Critical / Facility") return allItems.filter((item) => !isProductionCritical(item.row));
+    if (cmcScope === "all" || selectedScope === MACHINE_EXPLORER_ALL_GROUP) return allItems;
     // All remaining scopes map to getPerformanceMachineGroup values
-    return allItems.filter((item) => getPerformanceMachineGroup(item.row) === cmcScope);
+    return allItems.filter((item) => normalizeMachineExplorerGroupLabel(getPerformanceMachineGroup(item.row)) === selectedScope);
 }
 
 // Returns scope-specific subtitle text for display.
@@ -2753,11 +2602,12 @@ function getCmcScopeSubtitle() {
         "Non-Critical / Facility": "Non-critical and facility assets.",
         "Production Equipment": "Production equipment assets only, including bratt pans, ovens, conveyors, fryers, and similar production line assets.",
         Refrigeration: "Refrigeration assets only, including condensers, evaporators, freezers, chillers, cold rooms, air blast units, ice makers, and refrigerant-related assets.",
+        Utilities: "Utilities assets, including water systems, boilers, pumps, tanks, MDB, and compressors.",
         "Utilities / Support": "Utilities and support assets, including water systems, boilers, pumps, tanks, MDB, and compressors.",
         "Facility / Building": "Facility and building assets, including doors, rooms, lighting, CCTV, air conditioning, and electrical systems.",
         "Unknown / Review": "Assets not yet classified into a specific group. Review these records for correct machine group assignment.",
     };
-    return map[cmcScope] || map.all;
+    return map[cmcScope] || map[normalizeMachineExplorerGroupLabel(cmcScope)] || map.all;
 }
 
 // Returns the short display label for the selected scope (used in chart titles and KPI labels).
@@ -2964,8 +2814,9 @@ async function loadCmcSpareTrendData() {
 // Filter transactions by current scope.
 function cmcFilterSpareByScope(transactions) {
     if (!transactions?.length) return [];
-    if (cmcScope === "all") return transactions;
-    if (cmcScope === "Refrigeration") {
+    const selectedScope = normalizeMachineExplorerGroupLabel(cmcScope);
+    if (cmcScope === "all" || selectedScope === MACHINE_EXPLORER_ALL_GROUP) return transactions;
+    if (selectedScope === "Refrigeration") {
         return transactions.filter((t) =>
             CMC_REFRIG_SPARE_CATEGORIES.has(t.item_category) ||
             CMC_REFRIG_SPARE_KEYWORDS.test(t.translated_description || t.original_description || "") ||
@@ -2975,11 +2826,10 @@ function cmcFilterSpareByScope(transactions) {
     // For other scopes try to match via equipment_type or asset link
     return transactions.filter((t) => {
         if (!t.equipment_type && !t.equipment_criticality) return false;
-        const scopeLower = cmcScope.toLowerCase();
         if (cmcScope === "Critical") return (t.equipment_criticality || "").toLowerCase().includes("critical");
-        if (cmcScope === "Production Equipment") return /production|bratt|oven|conveyor|fryer/i.test(t.equipment_type || "");
-        if (cmcScope === "Utilities / Support") return /utility|water|boiler|pump|compressor/i.test(t.equipment_type || "");
-        if (cmcScope === "Facility / Building") return /facility|building|electrical/i.test(t.equipment_type || "");
+        if (selectedScope === "Production Equipment") return /production|bratt|oven|conveyor|fryer/i.test(t.equipment_type || "");
+        if (selectedScope === "Utilities") return /utility|water|boiler|pump|compressor/i.test(t.equipment_type || "");
+        if (selectedScope === "Non-Critical / Facility") return /facility|building|electrical/i.test(t.equipment_type || "");
         return false;
     });
 }
@@ -2995,7 +2845,8 @@ async function renderCmcSpareTrend() {
     const linkNoteEl = document.getElementById("cmc-spare-link-note");
     if (!card) return;
 
-    const scopeLabel = cmcScope === "all" ? "All Assets" : cmcScope;
+    const selectedScope = normalizeMachineExplorerGroupLabel(cmcScope);
+    const scopeLabel = cmcScope === "all" || selectedScope === MACHINE_EXPLORER_ALL_GROUP ? "All Assets" : selectedScope;
     if (titleEl) titleEl.textContent = `${scopeLabel} — Spare Part Usage Trend`;
 
     if (!data || data.status === "missing") {
@@ -3015,10 +2866,12 @@ async function renderCmcSpareTrend() {
     // Scope-specific subtitle
     const subtitleMap = {
         Refrigeration: "Refrigerant/Chemical parts + refrigeration asset keywords. Includes R507, chillers, condensers, evaporators.",
+        Utilities: "Spare parts linked to utilities assets.",
+        "Non-Critical / Facility": "Spare parts linked to non-critical and facility assets.",
         Critical: "Spare parts linked to Critical assets via work order data.",
         all: "All spare parts from Project Actual Transactions 2026.",
     };
-    if (subtitleEl) subtitleEl.textContent = subtitleMap[cmcScope] || `Spare parts linked to ${scopeLabel} assets.`;
+    if (subtitleEl) subtitleEl.textContent = subtitleMap[cmcScope] || subtitleMap[selectedScope] || `Spare parts linked to ${scopeLabel} assets.`;
 
     // KPI pills
     const fmtCurr = (v) => `THB ${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
@@ -3904,6 +3757,11 @@ function getPreventiveCorrectiveNarrativeText(row = {}) {
         row?.notes,
         row?.problem,
         row?.details,
+        // Include MR/WO identifiers so PM-prefixed numbers (e.g. "PM-00001") are flagged
+        row?.work_order_id,
+        row?.maintenance_order_id,
+        row?.mr_number,
+        row?.mr_no,
     ].map(cleanMrValue).filter(Boolean).join(" | ");
 }
 
@@ -5906,7 +5764,7 @@ function getMachineExplorerFilterValue(id) {
 }
 
 function getMachineExplorerFilterState() {
-    const groupValue = getMachineExplorerFilterValue("machine-explorer-group") || machineExplorerSelectedGroup || MACHINE_EXPLORER_ALL_GROUP;
+    const groupValue = normalizeMachineExplorerGroupLabel(getMachineExplorerFilterValue("machine-explorer-group") || machineExplorerSelectedGroup || MACHINE_EXPLORER_ALL_GROUP);
     return {
         group: groupValue === "" ? MACHINE_EXPLORER_ALL_GROUP : groupValue,
         asset: getMachineExplorerFilterValue("machine-explorer-asset"),
@@ -5947,7 +5805,7 @@ function getMachineExplorerOptions(rows = []) {
 function populateMachineExplorerFilters(rows = []) {
     const groupSelect = document.getElementById("machine-explorer-group");
     if (groupSelect) {
-        const requested = machineExplorerSelectedGroup || groupSelect.value || MACHINE_EXPLORER_ALL_GROUP;
+        const requested = normalizeMachineExplorerGroupLabel(machineExplorerSelectedGroup || groupSelect.value || MACHINE_EXPLORER_ALL_GROUP);
         groupSelect.innerHTML = MACHINE_EXPLORER_GROUPS.map((group) => (
             `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`
         )).join("");
@@ -6014,13 +5872,21 @@ function rowIsCritical(row) {
 }
 
 function rowMatchesMachineExplorerGroup(row, group) {
-    // Group drill-down supports two lenses: Criticality buckets and operational Machine Groups.
+    // Group drill-down uses operational Machine Groups; criticality remains a row tag/filter.
     // Refrigeration is resolved inside getPerformanceMachineGroup() so it keeps priority over other group matches.
-    const selected = group || MACHINE_EXPLORER_ALL_GROUP;
+    const selected = normalizeMachineExplorerGroupLabel(group || MACHINE_EXPLORER_ALL_GROUP);
     if (selected === MACHINE_EXPLORER_ALL_GROUP) return true;
-    if (selected === "Critical") return rowIsCritical(row);
-    if (selected === "Non-Critical / Facility") return !rowIsCritical(row);
-    return getPerformanceMachineGroup(row) === selected;
+    const rowGroup = normalizeMachineExplorerGroupLabel(getPerformanceMachineGroup(row));
+    return rowGroup === selected;
+}
+
+function isUnknownMachineExplorerGroup(row) {
+    const rawGroup = String(row?.machine_group || row?.normalized_machine_group || "").trim();
+    const normalizedRaw = normalizeClassification(rawGroup);
+    return getPerformanceMachineGroup(row) === "Unknown / Review"
+        || normalizedRaw.includes("unknown")
+        || normalizedRaw.includes("unmapped")
+        || normalizedRaw.includes("review");
 }
 
 function rowMatchesMachineExplorerCriticality(row, value) {
@@ -6186,6 +6052,10 @@ function renderMachineExplorerGroupCards(rows = []) {
     const wrap = document.getElementById("machine-group-cards");
     if (!wrap) return;
     const cards = buildMachineExplorerGroupRows(rows);
+    const unknownRows = rows.filter(isUnknownMachineExplorerGroup);
+    const dataQualityPrefix = unknownRows.length
+        ? `${fmtNumber(unknownRows.length)} WO/MR records have unknown or unmapped machine group - review asset mapping. `
+        : "";
     wrap.innerHTML = cards.map((card) => `
         <button type="button" class="machine-group-card ${card.group === machineExplorerSelectedGroup ? "active" : ""}" data-machine-group="${escapeHtml(card.group)}">
             <span class="machine-group-card-title">${escapeHtml(card.group)}</span>
@@ -6199,10 +6069,14 @@ function renderMachineExplorerGroupCards(rows = []) {
                 <span><strong>${fmtNumber(card.invalid)}</strong> invalid</span>
             </span>
         </button>
-    `).join("");
+    `).join("") + `
+        <p class="machine-group-data-quality-note">
+            ${escapeHtml(dataQualityPrefix)}Unmapped/unknown assets are included in All Groups and flagged under Data Quality for review.
+        </p>
+    `;
     wrap.querySelectorAll("[data-machine-group]").forEach((button) => {
         button.addEventListener("click", () => {
-            machineExplorerSelectedGroup = button.dataset.machineGroup || MACHINE_EXPLORER_ALL_GROUP;
+            machineExplorerSelectedGroup = normalizeMachineExplorerGroupLabel(button.dataset.machineGroup || MACHINE_EXPLORER_ALL_GROUP);
             machineExplorerSelectedAssetId = "";
             machineExplorerRefrigSubgroup = "";
             machineExplorerRefrigCondenserGroupId = "";
@@ -8992,6 +8866,7 @@ function getFilteredMachineGroups() {
 }
 
 function getPerformanceMachineGroup(row) {
+    const rawMachineGroup = String(row?.machine_group || "").trim();
     const haystack = [
         row.machine_group,
         getMachineEquipmentName(row),
@@ -9002,12 +8877,15 @@ function getPerformanceMachineGroup(row) {
         row.location,
         row.asset_id,
     ].join(" ").toLowerCase().replace("producton", "production").replace("condencer", "condenser");
-    if (row.machine_group === "Refrigeration" || row.refrigeration_group_match) return "Refrigeration";
-    if (/building|facility|door|room|light|lamp|toilet|cctv|air condition|electrical/.test(haystack)) return "Facility / Building";
-    if (/utility|water|boiler|pump|tank|mdb|support|compressor/.test(haystack)) return "Utilities / Support";
+    if (rawMachineGroup === "Refrigeration" || row.refrigeration_group_match) return "Refrigeration";
+    if (rawMachineGroup === "Utilities / Support" || rawMachineGroup === "Utilities") return "Utilities";
+    if (rawMachineGroup === "Facility / Building" || rawMachineGroup === "Non-Critical / Facility") return "Non-Critical / Facility";
+    if (rawMachineGroup === "Unknown / Review") return "Unknown / Review";
+    if (/building|facility|door|room|light|lamp|toilet|cctv|air condition|electrical/.test(haystack)) return "Non-Critical / Facility";
+    if (/utility|water|boiler|pump|tank|mdb|support|compressor/.test(haystack)) return "Utilities";
     if (/production|bratt|oven|conveyor|fryer|x-ray|xray|check weight|vacuum|steambox|bowl cutter|sealer|low risk/.test(haystack)) return "Production Equipment";
     if (row.criticality === "Critical") return "Production Equipment";
-    if (/general|office|canteen/.test(haystack)) return "Facility / Building";
+    if (/general|office|canteen/.test(haystack)) return "Non-Critical / Facility";
     return "Unknown / Review";
 }
 
@@ -9043,13 +8921,23 @@ function buildMachineGroupPerformanceRows(rows = []) {
         if (assetId) bucket.assetCounts.set(assetId, (bucket.assetCounts.get(assetId) || 0) + 1);
         groups.set(group, bucket);
     });
-    const groupOrder = ["Production Equipment", "Refrigeration", "Utilities / Support", "Facility / Building", "Unknown / Review"];
+    const groupOrder = [
+        "Production Equipment",
+        "Utilities",
+        "Refrigeration",
+        "Non-Critical / Facility",
+        "Unknown / Review",
+    ];
+    const getGroupSortRank = (group) => {
+        const index = groupOrder.indexOf(group);
+        return index >= 0 ? index : groupOrder.length;
+    };
     return [...groups.values()].map((row) => ({
         ...row,
         closureRate: row.total ? (row.finished / row.total) * 100 : null,
         averageTtr: row.ttr.length ? row.ttr.reduce((sum, value) => sum + value, 0) / row.ttr.length : null,
         repeatedMrCount: [...row.assetCounts.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0),
-    })).sort((a, b) => groupOrder.indexOf(a.group) - groupOrder.indexOf(b.group));
+    })).sort((a, b) => getGroupSortRank(a.group) - getGroupSortRank(b.group) || a.group.localeCompare(b.group));
 }
 
 function renderPriorityBadges(priorityValues) {
@@ -9451,10 +9339,6 @@ function wireFilters() {
         mrCarryoverSort = event.target.value || "duration_desc";
         renderMrMovementSection(getCategoryScopedAllRows());
     });
-    document.getElementById("mr-tracking-source")?.addEventListener("change", (event) => {
-        mrSourceFilter = event.target.value || "all";
-        renderMrTrackingSection(getCategoryScopedAllRows());
-    });
     document.getElementById("mr-tracking-equipment")?.addEventListener("change", (event) => {
         mrTrackingEquipmentFilter = event.target.value || "all";
         renderMrTrackingSection(getCategoryScopedAllRows());
@@ -9636,7 +9520,7 @@ function wireFilters() {
         renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("machine-explorer-group")?.addEventListener("change", (event) => {
-        machineExplorerSelectedGroup = event.target.value || MACHINE_EXPLORER_ALL_GROUP;
+        machineExplorerSelectedGroup = normalizeMachineExplorerGroupLabel(event.target.value || MACHINE_EXPLORER_ALL_GROUP);
         machineExplorerSelectedAssetId = "";
         machineExplorerRefrigSubgroup = "";
         machineExplorerRefrigCondenserGroupId = "";
@@ -13693,12 +13577,12 @@ function kdiRenderCritCmpBothChart(chartId, s1Lines, s2Lines, monthLabels, fullL
     });
 }
 
-function kdiToggleCritCmpChart() {
-    const body = document.getElementById("kdi-crit-cmp-chart-body");
+function kdiToggleCritCmpSection() {
+    const body = document.getElementById("kdi-crit-cmp-section-body");
     const btn  = document.getElementById("kdi-crit-cmp-toggle-btn");
     if (!body || !btn) return;
-    const collapsed = body.classList.toggle("kdi-crit-cmp-chart-collapsed");
-    btn.textContent = collapsed ? "Show chart" : "Hide chart";
+    const collapsed = body.classList.toggle("kdi-crit-cmp-section-collapsed");
+    btn.textContent = collapsed ? "▶ Expand" : "▼ Collapse";
 }
 
 function kdiRenderCritCmpChart(model) {

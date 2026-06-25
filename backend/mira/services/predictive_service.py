@@ -607,6 +607,157 @@ def _specific_from_text(*values) -> Optional[str]:
     return None
 
 
+# ── Unit-level resolution (spec §2A) ────────────────────────────────────────────
+# The new unit of analysis is the INDIVIDUAL physical asset (e.g. "Bratt pan No.3"),
+# never a machine group.  Area-bucket MRs are resolved via qwen or keyword extraction;
+# if no unit can be determined the row routes to the Facility bucket and is NEVER ranked.
+
+_UNIT_NUM_SEARCH_RE = re.compile(
+    r'(?:no\.?\s*|#\s*|ที่\s*)(\d+)',
+    re.IGNORECASE | re.UNICODE,
+)
+
+
+def _keyword_extract_unit_from_text(text: str) -> Optional[str]:
+    """Extract specific machine type + unit number from free text (keyword fallback).
+
+    Returns "MachineName No.N" when both a known machine type AND a unit number are
+    found in the text.  Returns None when the text gives no unit number — grouping
+    unnamed machines would mix unrelated units, so we route them to Facility.
+    """
+    t = " " + text.lower() + " "
+    for label, keywords in _SPECIFIC_MACHINE_RULES:
+        for kw in keywords:
+            k = kw.lower()
+            if k.strip() == "ro":
+                if not re.search(r"\bro\b", t):
+                    continue
+            elif k not in t:
+                continue
+            # Found machine type; require a unit number for specificity.
+            m = (
+                re.search(rf'(?:{re.escape(k)})\s*(?:no\.?\s*|#\s*|ที่\s*)?(\d+)', t)
+                or _UNIT_NUM_SEARCH_RE.search(t)
+            )
+            if m:
+                return f"{label} No.{m.group(1)}"
+            return None  # machine type found but no unit number → not specific
+    return None
+
+
+def _qwen_extract_unit(description: str, index: dict) -> Optional[str]:
+    """Spec §4 prompt: ask qwen2.5 to extract the specific unit name from a MR description.
+
+    Returns the canonical unit name (e.g. "Bratt Pan No.4") or None if qwen is offline,
+    returns null/low-confidence, or the machine is not in the allow-list.
+    Falls back to keyword extraction internally before returning None.
+    """
+    if not description.strip():
+        return None
+    key = "unit2:" + _desc_hash(description)
+    cached = _mg_inference_cache.get(key)
+    if cached is not None:
+        return cached.get("unit_name")
+
+    # Build allow-list from Asset_Master display names (specific, non-area units)
+    allowed_machines = list(dict.fromkeys(
+        display_name
+        for aid, (specific, mg, cat, display_name, is_area) in index.get("id_to_specific", {}).items()
+        if not is_area and display_name and not _is_catch_all(display_name)
+    ))[:40]
+
+    result: Optional[str] = None
+    try:
+        from .. import config
+        if getattr(config, "LOCAL_LLM_ENABLED", False):
+            from ..providers.ollama_provider import generate_with_ollama
+            system_prompt = (
+                "You map ONE maintenance request to a machine UNIT and a symptom. "
+                "Reply with ONLY a JSON object, no prose."
+            )
+            allowed_str = json.dumps(allowed_machines)
+            user_prompt = (
+                f"ALLOWED_MACHINES: {allowed_str}\n\n"
+                'ALLOWED_CLUSTERS: ["Steam/Valve Leak","Door/Window","Sensor/Electrical",'
+                '"Noise/Vibration","Heating/Temp","Lighting","Plumbing/Sink","Facility/Building","Other"]\n\n'
+                "Rules:\n"
+                "- machine MUST map to ALLOWED_MACHINES, else null.\n"
+                "- ALWAYS extract unit_number if the text gives one.\n"
+                '- door/light/sink/toilet/ceiling with no production machine -> machine=null, cluster="Facility/Building".\n'
+                "- cluster MUST be in ALLOWED_CLUSTERS.\n\n"
+                f'Description: "{description[:300]}"\n'
+                'Return: {"machine":...,"unit_number":...,"cluster":...,"confidence":0-1}'
+            )
+            raw = generate_with_ollama(system_prompt, user_prompt, timeout=5)
+            if raw:
+                m = re.search(r'\{[\s\S]*\}', raw.strip())
+                if m:
+                    parsed = json.loads(m.group())
+                    machine = str(parsed.get("machine") or "").strip()
+                    unit_num = parsed.get("unit_number")
+                    confidence = float(parsed.get("confidence") or 0)
+                    if confidence >= 0.6 and machine:
+                        al_lower = {nm.lower(): nm for nm in allowed_machines}
+                        canonical = al_lower.get(machine.lower())
+                        if not canonical:
+                            for al, canon in al_lower.items():
+                                if machine.lower() in al:
+                                    canonical = canon
+                                    break
+                        if canonical:
+                            if unit_num is not None and str(unit_num) not in canonical:
+                                canonical = re.sub(r'\s+No\.\d+$', '', canonical) + f" No.{unit_num}"
+                            result = canonical
+    except Exception:
+        pass
+
+    _mg_inference_cache[key] = {"unit_name": result}
+    return result
+
+
+def resolve_to_unit(row: dict) -> tuple[Optional[str], str, Optional[str]]:
+    """Resolve a MR/WO row to a specific physical unit.
+
+    Returns (unit_name, asset_id, display_category).
+    unit_name is None → route to Facility/Building (never ranked).
+
+    Priority:
+      1. Direct Asset ID match that is NOT an area bucket
+         → unit_name = Asset_Master.Asset Name  (High)
+      2. Area-bucket Asset ID (ENWA-*, Production Low/Medium/High Risk)
+         → qwen extracts unit + unit_number from Description
+         → keyword fallback
+         → None if still no specific unit
+      3. No Asset_Master hit → keyword extraction or None
+    """
+    index = _group_index()
+    aid = _row_asset_id(row).upper()
+
+    if aid:
+        entry = index.get("id_to_specific", {}).get(aid)
+        if entry:
+            specific, mg, cat, display_name, is_area = entry
+            disp_cat = index["cat_display"].get(cat, "Facility / Building")
+            if not is_area and display_name and not _is_catch_all(display_name):
+                return display_name, aid, disp_cat
+            # Area bucket: extract unit from description
+            desc_text = _row_issue_text(row) or _row_description(row)
+            unit = (_qwen_extract_unit(desc_text, index)
+                    or _keyword_extract_unit_from_text(_resolve_text(row)))
+            if unit:
+                return unit, aid, disp_cat
+            return None, aid, "Facility / Building"
+
+    # No direct Asset_Master hit
+    text = _resolve_text(row)
+    unit = _keyword_extract_unit_from_text(text)
+    if unit:
+        mg, disp_cat, _ = resolve_machine_group(row)
+        if mg != UNKNOWN_GROUP and disp_cat:
+            return unit, aid, disp_cat
+    return None, aid, "Facility / Building"
+
+
 def _specific_from_master_entry(entry: dict, fallback_group: str) -> str:
     specific = _specific_from_text(
         entry.get("display_name"),
@@ -758,17 +909,23 @@ def resolve_specific_machine_group(row: dict) -> tuple[str, str, Optional[str], 
 
 
 def _recurrence_band(median_days: Optional[float], interval_count: int, record_count: int) -> tuple[str, Optional[str]]:
+    """Fallback band used when no last-occurrence date is available.
+
+    Labels mirror _likely_recurrence so the frontend sees a consistent set.
+    """
     if record_count < 3 or interval_count < 2 or median_days is None:
-        return "Not enough history", "Fewer than 3 valid records"
+        return "Not enough history", None
     if median_days <= 3:
-        return "Very soon: 1-3 days", "very-soon"
+        return "Likely anytime now", "now"
+    if median_days <= 7:
+        return "Likely within 1 week", "week"
     if median_days <= 14:
-        return "Soon: within 1-2 weeks", "soon"
-    if median_days <= 28:
-        return "Likely this month: 2-4 weeks", "month"
+        return "Likely within 2 weeks", "2weeks"
+    if median_days <= 30:
+        return "Likely within 1 month", "month"
     if median_days <= 90:
-        return "Occasional: 1-3 months", "occasional"
-    return "Low recurrence: more than 3 months", "low"
+        return "Likely within 1–3 months", "months"
+    return "Monitor only", "monitor"
 
 
 # ── MTBF at machine-type level (computed from raw rows) ─────────────────────────
@@ -810,7 +967,7 @@ def _compute_mtbf_detail(rows: list[dict]) -> tuple[Optional[float], int, float]
     gaps = []
     for i in range(1, len(events)):
         gap_sec = (events[i][0] - events[i - 1][1]).total_seconds()
-        if gap_sec > 0:
+        if gap_sec >= 900:  # drop <15-min same-batch duplicates per spec §5
             gaps.append(gap_sec / 86400.0)
     if not gaps:
         return None, 0, coverage
@@ -828,19 +985,19 @@ def _compute_mtbf_days(rows: list[dict]) -> Optional[float]:
 
 def _compute_cluster_recurrence(
     cluster_rows: list[dict],
-) -> tuple[Optional[float], Optional[float], int, int]:
+) -> tuple[Optional[float], Optional[float], int, int, list[float]]:
     """Compute recurrence interval within a specific issue cluster.
 
     Uses raised/actual dates of each record (not start→end gaps) because
     cluster rows are individual MR occurrences of the same issue, not
     durations of a single event.
 
-    Returns (median_days, avg_days, n_intervals, n_records).
+    Returns (median_days, avg_days, n_intervals, n_records, gap_list).
     n_records < 3 → caller should show "Insufficient history".
     """
     n_records = len(cluster_rows)
     if n_records < 2:
-        return None, None, 0, n_records
+        return None, None, 0, n_records, []
     dates: list[date] = []
     for r in cluster_rows:
         d = _row_latest_date(r)
@@ -855,19 +1012,19 @@ def _compute_cluster_recurrence(
             dates.append(d)
     dates.sort()
     if len(dates) < 2:
-        return None, None, 0, n_records
+        return None, None, 0, n_records, []
     gaps = [
-        (dates[i] - dates[i - 1]).days
+        float((dates[i] - dates[i - 1]).days)
         for i in range(1, len(dates))
         if (dates[i] - dates[i - 1]).days > 0
     ]
     if not gaps:
-        return None, None, 0, n_records
+        return None, None, 0, n_records, []
     g = sorted(gaps)
     mid = len(g) // 2
     median = float(g[mid] if len(g) % 2 else (g[mid - 1] + g[mid]) / 2.0)
     avg = sum(gaps) / len(gaps)
-    return round(median, 1), round(avg, 1), len(gaps), n_records
+    return round(median, 1), round(avg, 1), len(gaps), n_records, gaps
 
 
 # Reliability gate: a specific MTBF value + next-likely date are only trustworthy
@@ -885,16 +1042,15 @@ def _likely_recurrence(last_date: date, mtbf_days: float, today: date) -> tuple[
     """Returns (None, timing_band_label) — no dates exposed to frontend.
 
     Computes estimated_next = last_date + median_gap then maps the delta to a
-    rough future-facing timing band only. Never returns exact dates or "overdue".
+    forward-facing timing band only.  Never says "overdue", "active", or "passed".
+    Negative delta (window already elapsed) collapses to "Likely anytime now".
     """
     if not last_date or not mtbf_days:
         return None, "Not enough history"
     estimated_next = last_date + timedelta(days=mtbf_days)
-    delta = (estimated_next - today).days
-    if delta <= 0:
-        return None, "Recurring pattern active"
+    delta = max(0, (estimated_next - today).days)   # clamp negatives to 0
     if delta <= 3:
-        return None, "Likely within days"
+        return None, "Likely anytime now"
     if delta <= 7:
         return None, "Likely within 1 week"
     if delta <= 14:
@@ -903,7 +1059,7 @@ def _likely_recurrence(last_date: date, mtbf_days: float, today: date) -> tuple[
         return None, "Likely within 1 month"
     if delta <= 90:
         return None, "Likely within 1–3 months"
-    return None, "Longer-term recurrence"
+    return None, "Monitor only"
 
 
 def _clean_issue_phrase(description: str, max_words: int = 7) -> str:
@@ -994,6 +1150,32 @@ def _trend_arrow(current: int, prior: int) -> str:
     if current < prior * 0.9:
         return "down"
     return "flat"
+
+
+def _median_of(values: list) -> float:
+    """Return median of a non-empty list."""
+    s = sorted(float(v) for v in values)
+    n = len(s)
+    return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def _row_service_level(row: dict) -> Optional[int]:
+    """Return numeric service level (1–4) from a MR/WO row, or None."""
+    raw = str(row.get("service_level") or row.get("severity") or row.get("priority") or "").strip()
+    m = re.search(r"\d", raw)
+    return int(m.group()) if m else None
+
+
+def _severity_weight(sl: Optional[int]) -> float:
+    """SL 1 (highest urgency) → weight 4.0, SL 4 (lowest) → 1.0 (spec §2D)."""
+    return {1: 4.0, 2: 3.0, 3: 2.0, 4: 1.0}.get(sl, 2.0)
+
+
+def _row_is_critical(row: dict) -> bool:
+    val = row.get("am_is_critical") or row.get("is_critical")
+    if val is not None:
+        return bool(val)
+    return "critical" in str(row.get("am_criticality") or row.get("criticality") or "").lower()
 
 
 _NO_CONFIRMED_SPARE = "No confirmed spare part found. Manual review required."
@@ -1232,6 +1414,553 @@ def _find_inventory_match(item_code: str | None, label: str | None, inventory_lo
     return None
 
 
+_STAGE1_SPARES_CATALOGUE_PATH = Path(__file__).resolve().parents[3] / "data" / "Spare Parts- Assets_Stage 1.xlsx"
+_STAGE1_SPARES_CATALOGUE_CACHE: dict[str, object] = {"sig": None, "rows": []}
+_SPARE_PREP_CACHE: dict[tuple, dict] = {}
+_OTHER_COMMON_FAULTS_CACHE: dict[tuple, list[dict]] = {}
+
+_CATALOGUE_MACHINE_ALIASES: dict[str, list[str]] = {
+    "bratt pan": ["bratt pans", "bratt pan"],
+    "combi oven": ["combi ovens", "combi oven"],
+    "steam box": ["steam boxes", "steam box", "steambox"],
+    "air blast freezer": ["air blast freezers", "air blast freezer"],
+    "air blast chiller": ["air blast chillers", "air blast chiller"],
+    "spiral freezer": ["spiral freezers", "spiral freezer"],
+    "x ray": ["x ray", "x-ray"],
+    "checkweigher": ["checkweighers", "checkweigher"],
+    "conveyor": ["conveyors", "conveyor"],
+}
+
+_ISSUE_SPARE_HINTS: list[tuple[str, list[str], list[str]]] = [
+    ("Plumbing/pipe/valve issue", ["plumbing", "pipe", "water", "leak", "steam", "valve"], ["valve", "gasket", "sealant", "steam hose", "hose", "pipe", "fitting", "union", "flange"]),
+    ("Steam/valve leakage", ["steam", "valve", "leak"], ["steam hose", "valve", "gasket", "sealant", "fitting", "union", "flange"]),
+    ("Door/gasket issue", ["door", "gasket", "window", "seal"], ["door gasket", "gasket", "seal", "trolley gasket", "hinge", "roller"]),
+    ("Heating/temperature issue", ["heat", "heating", "temperature", "temp", "thermal"], ["heating", "heater", "temperature controller", "relay", "contactor", "control pcb", "thermostat", "sensor"]),
+    ("Belt/conveyor issue", ["belt", "conveyor", "roller", "drive"], ["belt", "roller", "drive shaft", "revolving shaft", "inverter", "bearing", "motor"]),
+    ("Sensor/electrical issue", ["sensor", "electric", "electrical", "power", "trip", "relay"], ["sensor", "relay", "plc", "control pcb", "timer", "tower light", "contactor", "breaker"]),
+    ("Refrigerant/cooling issue", ["refrigerant", "cool", "freezer", "chiller", "compressor"], ["refrigerant", "compressor oil", "fan motor", "compressor", "expansion valve", "condenser", "evaporator"]),
+    ("Mechanical holder/pot wear", ["mechanical", "holder", "pot", "hinge", "handle", "bearing", "shaft", "bracket", "wear"], ["holder", "hinge", "handle", "bearing", "shaft", "bracket", "seal", "gasket"]),
+    ("Drainage/water filling issue", ["drain", "drainage", "filling", "overflow", "water level", "blocked", "inlet", "outlet"], ["drain", "inlet", "outlet", "valve", "hose", "pipe", "fitting", "gasket", "seal"]),
+]
+
+_SPARE_TOKEN_STOPWORDS = {
+    "and", "for", "with", "the", "set", "assy", "assembly", "machine", "part",
+    "spare", "no", "type", "size", "pcs", "pc", "unit", "material",
+}
+
+_COMMON_FAULT_SIGNATURES: list[tuple[str, list[str], str]] = [
+    ("Plumbing / Pipe / Water / Leak", ["pipe", "water", "leak", "faucet", "tap", "drain", "hose", "plumbing", "fitting", "coupling", "union", "gasket", "sealant"], "Inspect pipe holder, water inlet, valve, hose, gasket, and coupling."),
+    ("Steam / Valve Leakage", ["steam", "valve", "pressure", "leakage", "leak", "solenoid", "steam hose", "gasket", "fitting", "coupling"], "Inspect valve, steam hose, gasket, and fittings."),
+    ("Heating / Temperature Issue", ["heat", "heating", "temperature", "temp", "hot", "not hot", "burner", "heater", "thermostat", "heating element"], "Check heating control, thermostat, relay, and electrical connection."),
+    ("Sensor / Electrical Fault", ["sensor", "electrical", "electric", "alarm", "trip", "plc", "relay", "switch", "control", "error", "timer", "tower light", "cable", "breaker"], "Check sensor, relay, control wiring, PLC/error signal, and electrical protection."),
+    ("Mechanical / Pot / Holder Wear", ["holder", "pot", "hinge", "handle", "mechanical", "broken", "wear", "loose", "bearing", "shaft", "bracket"], "Inspect holder, hinge, handle, shaft, bracket, and mechanical wear points."),
+    ("Drainage / Water Filling", ["drain", "drainage", "filling", "overflow", "water level", "blocked", "inlet", "outlet"], "Check drain path, inlet/outlet, fill level, and blockage points."),
+    ("Door / Seal / Gasket", ["door", "seal", "gasket", "rubber", "closing", "latch", "hinge", "silicone gasket"], "Inspect door alignment, latch, hinge, rubber seal, and gasket condition."),
+    ("Belt / Conveyor", ["belt", "conveyor", "roller", "shaft", "bearing", "motor", "inverter", "chain", "sprocket"], "Check belt, roller, shaft, bearing, motor, inverter, chain, and sprocket."),
+]
+
+_COMMON_FAULT_ALIASES = {
+    "plumbing pipe issue": "Plumbing / Pipe / Water / Leak",
+    "water filling drainage": "Drainage / Water Filling",
+    "steam valve leakage": "Steam / Valve Leakage",
+    "valve solenoid fault": "Steam / Valve Leakage",
+    "heating temperature fault": "Heating / Temperature Issue",
+    "sensor electrical fault": "Sensor / Electrical Fault",
+    "door window issue": "Door / Seal / Gasket",
+    "abnormal noise vibration": "Mechanical / Pot / Holder Wear",
+    "bearing motor wear": "Mechanical / Pot / Holder Wear",
+    "mechanical breakdown": "Mechanical / Pot / Holder Wear",
+    "pump drive failure": "Mechanical / Pot / Holder Wear",
+}
+
+
+def _catalogue_col(df, wanted: str):
+    wanted_norm = re.sub(r"[^a-z0-9]+", "", wanted.lower())
+    for col in df.columns:
+        col_norm = re.sub(r"[^a-z0-9]+", "", str(col).lower())
+        if col_norm == wanted_norm:
+            return col
+    for col in df.columns:
+        col_norm = re.sub(r"[^a-z0-9]+", "", str(col).lower())
+        if wanted_norm in col_norm or col_norm in wanted_norm:
+            return col
+    return None
+
+
+def _split_catalogue_parts(value) -> list[str]:
+    text = str(value or "").replace("\r", "\n")
+    text = re.sub(r"[\u2022\xb7]", "\n", text)
+    chunks = re.split(r"\n+|;+", text)
+    if len(chunks) <= 1 and text.count(",") >= 2:
+        chunks = text.split(",")
+    parts: list[str] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        item = re.sub(r"^\s*[-*\d.)]+\s*", "", str(chunk or "")).strip(" \t,;:-")
+        item = _clean_part_label(item, max_len=90)
+        key = _norm_key(item)
+        if item and key and key not in seen:
+            seen.add(key)
+            parts.append(item)
+    return parts
+
+
+def _load_stage1_spares_catalogue() -> list[dict]:
+    path = _STAGE1_SPARES_CATALOGUE_PATH
+    try:
+        sig = (path.stat().st_mtime, path.stat().st_size)
+    except Exception:
+        return []
+    if _STAGE1_SPARES_CATALOGUE_CACHE.get("sig") == sig:
+        return list(_STAGE1_SPARES_CATALOGUE_CACHE.get("rows") or [])
+
+    rows: list[dict] = []
+    try:
+        import pandas as pd
+        xl = pd.ExcelFile(path)
+        sheet = "Stage 1 - Spares by Machine Gro"
+        if sheet not in xl.sheet_names:
+            sheet = next((s for s in xl.sheet_names if "spares" in s.lower() and "machine" in s.lower()), xl.sheet_names[0])
+        df = pd.read_excel(path, sheet_name=sheet)
+        c_group = _catalogue_col(df, "Machine Group")
+        c_parts = _catalogue_col(df, "Relevant Spare Parts")
+        c_issues = _catalogue_col(df, "General Common Issues")
+        if not (c_group and c_parts):
+            raw_df = pd.read_excel(path, sheet_name=sheet, header=None)
+            header_idx = None
+            for idx, raw_row in raw_df.iterrows():
+                values = [str(v or "").strip() for v in raw_row.tolist()]
+                normed = [re.sub(r"[^a-z0-9]+", "", v.lower()) for v in values]
+                if "machinegroup" in normed and "relevantspareparts" in normed:
+                    header_idx = idx
+                    break
+            if header_idx is not None:
+                headers = [str(v or "").strip() for v in raw_df.iloc[header_idx].tolist()]
+                df = raw_df.iloc[header_idx + 1:].copy()
+                df.columns = headers
+                c_group = _catalogue_col(df, "Machine Group")
+                c_parts = _catalogue_col(df, "Relevant Spare Parts")
+                c_issues = _catalogue_col(df, "General Common Issues")
+        if c_group and c_parts:
+            for _, raw in df.iterrows():
+                group = str(raw.get(c_group) or "").strip()
+                parts = _split_catalogue_parts(raw.get(c_parts))
+                if not group or not parts:
+                    continue
+                rows.append({
+                    "machine_group": group,
+                    "machine_key": _norm_key(group),
+                    "parts": parts,
+                    "common_issues": str(raw.get(c_issues) or "").strip() if c_issues else "",
+                })
+    except Exception as exc:
+        print(f"[predictive] Stage 1 spare-parts catalogue failed: {exc}")
+        rows = []
+
+    _STAGE1_SPARES_CATALOGUE_CACHE["sig"] = sig
+    _STAGE1_SPARES_CATALOGUE_CACHE["rows"] = rows
+    _SPARE_PREP_CACHE.clear()
+    return list(rows)
+
+
+def _catalogue_group_candidates(machine_group: str, main_system: str | None = None) -> list[str]:
+    raw = _norm_key(machine_group)
+    base = re.sub(r"\b(no|number|unit)\s*\d+\b", " ", raw)
+    base = re.sub(r"\b\d+\b", " ", base)
+    base = re.sub(r"\s+", " ", base).strip()
+    candidates = [raw, base]
+    for key, aliases in _CATALOGUE_MACHINE_ALIASES.items():
+        if key in raw or key in base:
+            candidates.extend(_norm_key(a) for a in aliases)
+    if main_system:
+        candidates.append(_norm_key(main_system))
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in candidates:
+        item = item.strip()
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _find_catalogue_machine_row(machine_group: str, main_system: str | None = None) -> dict | None:
+    rows = _load_stage1_spares_catalogue()
+    if not rows:
+        return None
+    candidates = _catalogue_group_candidates(machine_group, main_system)
+    for cand in candidates:
+        for row in rows:
+            if cand and cand == row.get("machine_key"):
+                return row
+    for cand in candidates:
+        for row in rows:
+            key = str(row.get("machine_key") or "")
+            if cand and key and (cand in key or key in cand):
+                return row
+    return None
+
+
+def _part_tokens(label: str) -> set[str]:
+    return {
+        tok for tok in re.findall(r"[a-z0-9]+", _norm_key(label))
+        if len(tok) >= 3 and tok not in _SPARE_TOKEN_STOPWORDS
+    }
+
+
+def _extract_catalogue_item_code(label: str) -> str | None:
+    text = str(label or "").strip()
+    match = re.match(r"^([A-Z0-9][A-Z0-9._/-]{3,})\s+[-:]\s+(.+)$", text, flags=re.I)
+    return match.group(1).strip().upper() if match else None
+
+
+def _po_description(row: dict) -> str:
+    return str(row.get("part_description") or row.get("part_name") or row.get("description") or "").strip()
+
+
+def _po_date(row: dict) -> Optional[date]:
+    raw = row.get("po_date") or row.get("date_gen_po") or row.get("date")
+    parsed = _parse_dt(raw)
+    return parsed.date() if parsed else None
+
+
+def _po_matches_catalogue_part(part_label: str, item_code: str | None, po_row: dict) -> bool:
+    code = str(item_code or "").strip().upper()
+    po_code = str(po_row.get("item_code") or po_row.get("code") or "").strip().upper()
+    if code and po_code and code == po_code:
+        return True
+    desc_norm = _norm_key(_po_description(po_row))
+    part_norm = _norm_key(part_label)
+    if not desc_norm or not part_norm:
+        return False
+    if len(part_norm) >= 8 and (part_norm in desc_norm or desc_norm in part_norm):
+        return True
+    ptoks = _part_tokens(part_label)
+    dtoks = _part_tokens(desc_norm)
+    if len(ptoks) >= 2:
+        return len(ptoks & dtoks) >= max(2, min(len(ptoks), 3))
+    return bool(ptoks and ptoks <= dtoks)
+
+
+def _issue_spare_reason(part_label: str, dominant_issue: str, symptom_terms: list[str], common_issues: str, po_matches: list[dict]) -> str | None:
+    issue_blob = _norm_key(" ".join([dominant_issue or "", " ".join(symptom_terms or [])]))
+    part_blob = _norm_key(part_label)
+    common_blob = _norm_key(common_issues)
+    po_blob = _norm_key(" ".join(_po_description(row) for row in po_matches[:5]))
+
+    for reason, issue_terms, part_terms in _ISSUE_SPARE_HINTS:
+        issue_hit = any(_norm_key(term) in issue_blob for term in issue_terms)
+        part_hit = any(_norm_key(term) in part_blob for term in part_terms)
+        po_hit = any(_norm_key(term) in po_blob for term in part_terms)
+        if issue_hit and (part_hit or po_hit):
+            return reason
+    if issue_blob and common_blob:
+        issue_tokens = _part_tokens(issue_blob)
+        common_tokens = _part_tokens(common_blob)
+        if issue_tokens and len(issue_tokens & common_tokens) >= 1:
+            return "Stage 1 common issue match"
+    if _part_aligns_with_issue({"description": part_label, "classification": "Stage 1 catalogue"}, dominant_issue):
+        return "Issue signature matched spare-part description"
+    return None
+
+
+def _stock_decision(inv: dict | None, po_matches: list[dict]) -> tuple[object, str, str]:
+    qty = None
+    if inv:
+        qty = inv.get("current_quantity")
+        try:
+            if qty is not None and float(qty) > 0:
+                return qty, "In stock", "Prepare in store"
+        except Exception:
+            pass
+        if po_matches:
+            return qty, "Purchase required / reorder", "Purchase required / reorder"
+            return qty, "No purchase history found — verify manually", "Verify manually"
+    if po_matches:
+        return qty, "Stock not confirmed — check store", "Check store; purchase if unavailable"
+    return qty, "No purchase history found — verify manually", "Verify manually"
+
+
+def _build_catalogue_spare_prepare(
+    machine_group: str,
+    dominant_issue: str,
+    parts_context: dict,
+    inventory_lookup: dict,
+    main_system: str | None = None,
+    symptom_terms: list[str] | None = None,
+) -> dict:
+    all_purchase_rows = (parts_context or {}).get("allPurchaseParts") or (parts_context or {}).get("purchaseParts") or []
+    cache_key = (
+        _norm_key(machine_group),
+        _norm_key(main_system),
+        _norm_key(dominant_issue),
+        tuple(sorted(_norm_key(term) for term in (symptom_terms or []))),
+        len(all_purchase_rows),
+        len((inventory_lookup or {}).get("records") or []),
+        _STAGE1_SPARES_CATALOGUE_CACHE.get("sig"),
+    )
+    cached = _SPARE_PREP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    catalogue_row = _find_catalogue_machine_row(machine_group, main_system)
+    if not catalogue_row:
+        result = {
+            "available": False,
+            "parts": [],
+            "suggested_inline": _NO_CONFIRMED_SPARE,
+            "overall_stock_status": "Unknown",
+            "history_part_count": 0,
+            "basis": "No Stage 1 spare-parts catalogue match for this machine group. Manual review required.",
+            "catalogue_machine_group": None,
+        }
+        _SPARE_PREP_CACHE[cache_key] = result
+        return result
+
+    recommendations: list[dict] = []
+    fallback: list[dict] = []
+    common_issues = str(catalogue_row.get("common_issues") or "")
+    for part_label in catalogue_row.get("parts") or []:
+        item_code = _extract_catalogue_item_code(part_label)
+        po_matches = [row for row in all_purchase_rows if _po_matches_catalogue_part(part_label, item_code, row)]
+        reason = _issue_spare_reason(part_label, dominant_issue, symptom_terms or [], common_issues, po_matches)
+        inv = _find_inventory_match(item_code, part_label, inventory_lookup)
+        on_hand_qty, stock_status, purchase_recommendation = _stock_decision(inv, po_matches)
+        dated = sorted(
+            [(d, row) for row in po_matches if (d := _po_date(row))],
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+        latest_po = dated[0][1] if dated else (po_matches[0] if po_matches else {})
+        this_year = date.today().year
+        ytd_rows = [row for row in po_matches if (_po_date(row) and _po_date(row).year == this_year)]
+        try:
+            ytd_qty = sum(float(row.get("quantity") or 0) for row in ytd_rows)
+        except Exception:
+            ytd_qty = 0.0
+        try:
+            latest_price = latest_po.get("value")
+            if latest_price is not None:
+                latest_price = float(latest_price)
+        except Exception:
+            latest_price = None
+        rec = {
+            "item_code": item_code or (latest_po.get("item_code") if latest_po else None),
+            "label": part_label,
+            "name": part_label,
+            "match_reason": reason or f"Stage 1 catalogue match for {catalogue_row.get('machine_group')}",
+            "gen_po_validation_status": "Found in purchase history / YTD" if ytd_rows else "Found in historical purchase records" if po_matches else "No Gen PO purchase history found",
+            "last_purchased_date": dated[0][0].isoformat() if dated else None,
+            "last_purchase_date": dated[0][0].isoformat() if dated else None,
+            "ytd_po_count": len(ytd_rows),
+            "total_ytd_qty_purchased": round(ytd_qty, 3),
+            "latest_vendor": latest_po.get("vendor") if latest_po else "",
+            "latest_price": latest_price,
+            "lead_time_days": latest_po.get("lead_time_days") if latest_po else None,
+            "on_hand_qty": on_hand_qty,
+            "current_quantity": on_hand_qty,
+            "stock_status": stock_status,
+            "purchase_recommendation": purchase_recommendation,
+            "source": f"Stage 1 spare-parts catalogue: {catalogue_row.get('machine_group')}",
+            "catalogue_machine_group": catalogue_row.get("machine_group"),
+            "purchase_rows": len(po_matches),
+            "po_evidence": po_matches[:3],
+            "evidence_tags": [
+                "Stage 1 catalogue",
+                "Gen PO validated" if po_matches else "No Gen PO match",
+                "Inventory matched" if inv else "Inventory not confirmed",
+            ],
+        }
+        if reason:
+            recommendations.append(rec)
+        else:
+            fallback.append(rec)
+
+    if not recommendations:
+        recommendations = fallback[:5]
+    else:
+        recommendations = recommendations[:5]
+
+    stock_states = {part.get("stock_status") for part in recommendations}
+    overall_stock_status = (
+        "In stock" if "In stock" in stock_states
+        else "Purchase required / reorder" if "Purchase required / reorder" in stock_states
+        else "Stock not confirmed — check store" if "Stock not confirmed — check store" in stock_states
+        else "Unknown"
+    )
+    inline = " | ".join(
+        f"{part['label']} ({part['stock_status']})" for part in recommendations[:3]
+    ) or _NO_CONFIRMED_SPARE
+    result = {
+        "available": bool(recommendations),
+        "parts": recommendations,
+        "suggested_inline": inline,
+        "overall_stock_status": overall_stock_status,
+        "history_part_count": sum(1 for part in recommendations if part.get("purchase_rows")),
+        "basis": (
+            f"Stage 1 catalogue is the approved spare-part source "
+            f"({catalogue_row.get('machine_group')}); Gen PO validates purchase history only."
+        ),
+        "catalogue_machine_group": catalogue_row.get("machine_group"),
+    }
+    _SPARE_PREP_CACHE[cache_key] = result
+    return result
+
+
+def _common_fault_key(label: str | None) -> str:
+    return _norm_key(label).replace("/", " ")
+
+
+def _classify_common_fault_signature(text: str) -> tuple[str, list[str], str]:
+    blob = _norm_key(text)
+    best: tuple[str, list[str], str, int] | None = None
+    for label, keywords, check in _COMMON_FAULT_SIGNATURES:
+        hits = []
+        for kw in keywords:
+            norm_kw = _norm_key(kw)
+            if norm_kw and norm_kw in blob:
+                hits.append(kw)
+        if hits and (best is None or len(hits) > best[3]):
+            best = (label, hits, check, len(hits))
+    if best:
+        return best[0], best[1], best[2]
+
+    classified = classify_specific_issue(text)
+    alias = _COMMON_FAULT_ALIASES.get(_common_fault_key(classified))
+    if alias:
+        for label, keywords, check in _COMMON_FAULT_SIGNATURES:
+            if label == alias:
+                return label, keywords[:4], check
+    return "Unclassified", [], "Review MR notes and inspect the affected machine area."
+
+
+def _catalogue_group_label_for_unit(unit_name: str, category_name: str | None = None) -> str:
+    row = _find_catalogue_machine_row(unit_name, category_name)
+    return str((row or {}).get("machine_group") or unit_name or "").strip()
+
+
+def _part_stock_action(parts: list[dict]) -> str:
+    if not parts:
+        return "Verify manually"
+    if any("purchase required" in str(p.get("stock_status") or p.get("purchase_recommendation") or "").lower()
+           or "reorder" in str(p.get("stock_status") or p.get("purchase_recommendation") or "").lower()
+           for p in parts):
+        return "Reorder / purchase required"
+    if any("check store" in str(p.get("stock_status") or p.get("purchase_recommendation") or "").lower()
+           or "not confirmed" in str(p.get("stock_status") or p.get("purchase_recommendation") or "").lower()
+           for p in parts):
+        return "Stock not confirmed — check store"
+    if any("in stock" in str(p.get("stock_status") or "").lower() for p in parts):
+        return "In stock"
+    return "Verify manually"
+
+
+def _build_other_common_faults(
+    unit_name: str,
+    exact_rows: list[dict],
+    selected_issue: str,
+    unit_groups: dict[str, list],
+    parts_context: dict,
+    inventory_lookup: dict,
+    category_name: str,
+    max_faults: int = 5,
+) -> list[dict]:
+    catalogue_group = _catalogue_group_label_for_unit(unit_name, category_name)
+    selected_label, _, _ = _classify_common_fault_signature(selected_issue or "")
+    selected_key = _common_fault_key(selected_label if selected_label != "Unclassified" else selected_issue)
+
+    def _count_faults(rows: list[dict]) -> Counter:
+        counter: Counter[str] = Counter()
+        for row in rows:
+            label, _, _ = _classify_common_fault_signature(_row_issue_text(row) or _row_description(row))
+            if label != "Unclassified" and _common_fault_key(label) != selected_key:
+                counter[label] += 1
+        return counter
+
+    exact_counter = _count_faults(exact_rows)
+    use_fallback = sum(exact_counter.values()) < 2 or len(exact_counter) == 0
+    support_rows = list(exact_rows)
+    basis = "Based on this machine's MR history"
+    if use_fallback:
+        for other_unit, rows in (unit_groups or {}).items():
+            if other_unit == unit_name:
+                continue
+            if _catalogue_group_label_for_unit(other_unit, category_name) == catalogue_group:
+                support_rows.extend(rows or [])
+        if len(support_rows) > len(exact_rows):
+            basis = f"Based on similar {catalogue_group} records"
+
+    cache_key = (
+        _norm_key(unit_name),
+        _norm_key(catalogue_group),
+        _norm_key(selected_issue),
+        len(exact_rows),
+        len(support_rows),
+        len((parts_context or {}).get("allPurchaseParts") or []),
+        len((inventory_lookup or {}).get("records") or []),
+        _STAGE1_SPARES_CATALOGUE_CACHE.get("sig"),
+    )
+    cached = _OTHER_COMMON_FAULTS_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    grouped: dict[str, list[tuple[dict, list[str], str]]] = defaultdict(list)
+    for row in support_rows:
+        label, hits, check = _classify_common_fault_signature(_row_issue_text(row) or _row_description(row))
+        if label == "Unclassified" or _common_fault_key(label) == selected_key:
+            continue
+        grouped[label].append((row, hits, check))
+
+    denominator = len(support_rows) or len(exact_rows) or 1
+    result: list[dict] = []
+    for label, pairs in sorted(
+        grouped.items(),
+        key=lambda item: (-len(item[1]), max((_row_latest_date(pair[0]) or date.min for pair in item[1]))),
+    )[:max_faults]:
+        rows = [pair[0] for pair in pairs]
+        latest_row = max(rows, key=lambda row: (_row_latest_date(row) or date.min))
+        latest_date = _row_latest_date(latest_row)
+        keywords = list(dict.fromkeys(kw for _, hits, _ in pairs for kw in hits))[:8]
+        check = pairs[0][2] if pairs else "Review MR notes and inspect the affected machine area."
+        spare = _build_catalogue_spare_prepare(
+            unit_name,
+            label,
+            parts_context,
+            inventory_lookup,
+            main_system=category_name,
+            symptom_terms=keywords,
+        )
+        parts = (spare.get("parts") or [])[:5]
+        desc = _row_description(latest_row) or str(latest_row.get("translated_description") or "")
+        result.append({
+            "issue_signature": label,
+            "mr_count": len(rows),
+            "pct_of_machine_mr": round((len(rows) / denominator) * 100, 1),
+            "last_occurrence": latest_date.isoformat() if latest_date else None,
+            "recent_example_mr_id": _row_mr_id(latest_row),
+            "recent_example_wo_id": _row_wo_id(latest_row),
+            "latest_description": _clean_issue_phrase(desc, max_words=16),
+            "suggested_check": check,
+            "spare_parts_to_prepare": parts,
+            "stock_status": spare.get("overall_stock_status") or _part_stock_action(parts),
+            "purchase_recommendation": _part_stock_action(parts),
+            "basis": basis,
+            "catalogue_machine_group": catalogue_group,
+            "examples": [
+                {
+                    "mr_id": _row_mr_id(row),
+                    "wo_id": _row_wo_id(row),
+                    "date": (_row_latest_date(row).isoformat() if _row_latest_date(row) else None),
+                    "description": _clean_issue_phrase(_row_description(row), max_words=16),
+                }
+                for row in sorted(rows, key=lambda r: (_row_latest_date(r) or date.min), reverse=True)[:5]
+            ],
+        })
+
+    _OTHER_COMMON_FAULTS_CACHE[cache_key] = result
+    return result
+
+
 # ── Gen PO → machine-group detection ─────────────────────────────────────────
 
 def _detect_machine_group_from_po_row(po_row: dict) -> tuple[str | None, str, list[str]]:
@@ -1280,10 +2009,65 @@ def _compute_machine_spare(
     dominant_issue: str,
     parts_context: dict,
     inventory_lookup: dict,
+    median_gap_days: Optional[float] = None,
+    main_system: str | None = None,
+    symptom_terms: list[str] | None = None,
 ) -> dict:
     """Verified spare recommendations for one machine group and issue cluster."""
     usage_rows = (parts_context or {}).get("sparePartsUsed") or []
     purchase_rows = (parts_context or {}).get("purchaseParts") or []
+
+    catalogue = _build_catalogue_spare_prepare(
+        machine_group,
+        dominant_issue,
+        parts_context,
+        inventory_lookup,
+        main_system=main_system,
+        symptom_terms=symptom_terms or [],
+    )
+    recommended = catalogue.get("parts") or []
+
+    def _catalogue_part_to_lead(p: dict) -> dict:
+        return {
+            "name": p.get("label") or p.get("name"),
+            "code": p.get("item_code"),
+            "on_hand": p.get("on_hand_qty"),
+            "evidence": p.get("gen_po_validation_status"),
+            "lead_time_days": p.get("lead_time_days"),
+            "unit_price": p.get("latest_price"),
+            "vendor": p.get("latest_vendor") or "",
+            "reorder": p.get("stock_status") == "Purchase required / reorder",
+            "stock_status": p.get("stock_status") or "Unknown",
+            "source": p.get("source"),
+            "evidence_tags": p.get("evidence_tags") or [],
+        }
+
+    def _catalogue_part_to_kit(p: dict) -> dict:
+        return {
+            "name": p.get("label") or p.get("name"),
+            "code": p.get("item_code"),
+            "on_hand": p.get("on_hand_qty"),
+            "reorder": p.get("stock_status") == "Purchase required / reorder",
+            "stock_status": p.get("stock_status") or "Unknown",
+        }
+
+    if catalogue is not None:
+        return {
+            "available": bool(recommended),
+            "parts": recommended,
+            "spare_parts_to_prepare": recommended,
+            "spare_lead": _catalogue_part_to_lead(recommended[0]) if recommended else None,
+            "spare_kit": [_catalogue_part_to_kit(p) for p in recommended[1:]],
+            "suggested_inline": catalogue.get("suggested_inline") or _NO_CONFIRMED_SPARE,
+            "overall_stock_status": catalogue.get("overall_stock_status") or "Unknown",
+            "history_part_count": catalogue.get("history_part_count", 0),
+            "basis": catalogue.get("basis") or _NO_CONFIRMED_SPARE,
+            "catalogue_machine_group": catalogue.get("catalogue_machine_group"),
+            "linked_wo_count": len({_row_wo_id(r) for r in group_rows if _row_wo_id(r)}),
+            "linked_transaction_count": len(usage_rows),
+            "machine_group": machine_group,
+        }
+
     candidates: dict[str, dict] = {}
 
     def _candidate_key(item_code: str | None, label: str | None) -> str:
@@ -1371,6 +2155,7 @@ def _compute_machine_spare(
             "stage": raw_stage or "Gen PO",
             "date": po_date,
             "confidence": mg_conf,
+            "lead_time_days": row.get("lead_time_days"),
         })
         try:
             value = row.get("value")
@@ -1465,6 +2250,36 @@ def _compute_machine_spare(
             _deduped.append(_cand)
     recommended = _deduped
 
+    # ── Per-part lead time (median of PO evidence, winsorize >180d) + reorder flag ─
+    for part in recommended:
+        po_ev = part.get("po_evidence") or []
+        raw_lt = [
+            min(float(e["lead_time_days"]), 180.0)
+            for e in po_ev
+            if e.get("lead_time_days") is not None
+        ]
+        part_lead_time = round(_median_of(raw_lt)) if raw_lt else None
+        part["lead_time_days"] = part_lead_time
+
+        reorder = False
+        on_hand = part.get("current_quantity")
+        if (
+            part_lead_time is not None
+            and median_gap_days is not None
+            and median_gap_days > 0
+            and on_hand is not None
+        ):
+            try:
+                stock = float(on_hand)
+                expected_before_restock = part_lead_time / median_gap_days
+                usage_qty = float(part.get("usage_quantity") or 1)
+                usage_ct = max(1, part.get("usage_rows") or 1)
+                qty_per_repair = usage_qty / usage_ct
+                reorder = stock - (expected_before_restock * qty_per_repair) < 0
+            except Exception:
+                pass
+        part["reorder_flag"] = reorder
+
     # ── Evidence tags and PO traceability per part ────────────────────────────
     for part in recommended:
         tags: list[str] = []
@@ -1515,9 +2330,41 @@ def _compute_machine_spare(
         f"{onhand_matches} on-hand match(es), "
         f"{history_part_count} recommended part(s) with matching history."
     )
+    # Build spec §3 lead / kit structure
+    def _part_to_lead(p: dict) -> dict:
+        total_wos = len({_row_wo_id(r) for r in group_rows if _row_wo_id(r)}) or 1
+        u_rows = p.get("usage_rows") or 0
+        evidence_str = f"{u_rows} of {total_wos} WOs" if u_rows else (
+            f"{p.get('purchase_rows') or 0} PO record(s)"
+        )
+        return {
+            "name": p.get("label"),
+            "code": p.get("item_code"),
+            "on_hand": p.get("current_quantity"),
+            "evidence": evidence_str,
+            "lead_time_days": p.get("lead_time_days"),
+            "unit_price": p.get("estimated_value"),
+            "vendor": p.get("po_vendor") or "",
+            "reorder": p.get("reorder_flag", False),
+            "stock_status": p.get("stock_status") or "Unknown",
+            "source": p.get("source"),
+            "evidence_tags": p.get("evidence_tags") or [],
+        }
+
+    def _part_to_kit(p: dict) -> dict:
+        return {
+            "name": p.get("label"),
+            "code": p.get("item_code"),
+            "on_hand": p.get("current_quantity"),
+            "reorder": p.get("reorder_flag", False),
+            "stock_status": p.get("stock_status") or "Unknown",
+        }
+
     return {
         "available": True,
         "parts": recommended,
+        "spare_lead": _part_to_lead(recommended[0]) if recommended else None,
+        "spare_kit": [_part_to_kit(p) for p in recommended[1:]],
         "suggested_inline": inline,
         "overall_stock_status": overall_stock_status,
         "history_part_count": history_part_count,
@@ -1722,7 +2569,7 @@ def _build_top_machines(
 
         # Cluster-specific recurrence interval drives the Recurrence Gauge column.
         # Uses only records in the dominant issue cluster; average is supporting evidence.
-        c_median, c_avg, c_n_intervals, _ = _compute_cluster_recurrence(cluster_rows)
+        c_median, c_avg, c_n_intervals, _, c_gaps = _compute_cluster_recurrence(cluster_rows)
         c_reliable = (
             dominant_count >= 3
             and c_n_intervals >= 2
@@ -1736,9 +2583,48 @@ def _build_top_machines(
             _, timing_label = _likely_recurrence(ref_date, c_median, today)
             likely_label = timing_label  # today-relative band overrides interval-only band
 
-        parts_context = group_parts_context_getter(machine_group)
-        spare = _compute_machine_spare(machine_group, rows, dominant_issue, parts_context, inventory_lookup)
+        # ── next_due_days + overdue + gap-based trend (spec §2C) ─────────────
+        if c_median is not None and days_since < 999:
+            raw_next = round(c_median - days_since)
+            next_due_days: Optional[int] = max(0, raw_next)
+            overdue = raw_next < 0
+        else:
+            next_due_days = None
+            overdue = False
+
+        if len(c_gaps) >= 4:
+            n_third = max(1, len(c_gaps) // 3)
+            older_med = _median_of(c_gaps[:-n_third])
+            recent_med = _median_of(c_gaps[-n_third:])
+            interval_trend = (
+                "degrading" if recent_med < older_med * 0.85
+                else "stabilizing" if recent_med > older_med * 1.15
+                else "stable"
+            )
+        else:
+            interval_trend = "stable"
+
+        # ── Severity weighting + criticality multiplier (spec §2D) ───────────
+        sl_values = [_row_service_level(r) for r in rows]
+        sl_values = [v for v in sl_values if v is not None]
+        dominant_sl: Optional[int] = Counter(sl_values).most_common(1)[0][0] if sl_values else None
+        avg_weight = _median_of([_severity_weight(v) for v in sl_values]) if sl_values else 2.0
+        critical_count = sum(1 for r in rows if _row_is_critical(r))
+        is_critical = critical_count > len(rows) / 2
+        criticality_mult = 1.5 if is_critical else 1.0
+
         symptom_terms = _extract_issue_tokens(cluster_rows, dominant_issue)
+        parts_context = group_parts_context_getter(machine_group)
+        spare = _compute_machine_spare(
+            machine_group,
+            rows,
+            dominant_issue,
+            parts_context,
+            inventory_lookup,
+            c_median,
+            main_system=main_system,
+            symptom_terms=symptom_terms,
+        )
         main_observed_issue = _build_main_observed_issue(dominant_issue, symptom_terms)
         likely_cause_candidate = _build_likely_cause_candidate(dominant_issue, spare.get("parts") or [])
         evidence_summary = _format_issue_evidence(
@@ -1749,16 +2635,31 @@ def _build_top_machines(
             open_count=open_cluster_count,
             dominant_issue=dominant_issue,
         )
-        matching_spare_history = spare.get("history_part_count") or 0
-        confidence = (
-            "High" if dominant_count >= 3 and recent_cluster_count >= 2 and matching_spare_history >= 1
-            else "Medium" if dominant_count >= 2
-            else "Low"
-        )
-        if issue_confidence == "Low" and confidence == "Medium":
+        # ── Confidence: spec §2C thresholds ──────────────────────────────────
+        consumption_count = len(parts_context.get("sparePartsUsed") or []) if parts_context else 0
+        if c_n_intervals >= 6 and consumption_count >= 3:
+            confidence = "High"
+            confidence_reason = (
+                f"{len(rows)} MRs, {c_n_intervals} clean intervals, "
+                f"{consumption_count} consumption records."
+            )
+        elif c_n_intervals >= 3:
+            confidence = "Medium"
+            confidence_reason = (
+                f"{len(rows)} MRs, {c_n_intervals} clean intervals "
+                f"(need ≥3 consumption records for High)."
+            )
+        else:
             confidence = "Low"
+            confidence_reason = (
+                f"Not enough history — {c_n_intervals} clean interval(s) "
+                f"(need ≥3 for Medium, ≥6+consumption for High)."
+            )
+        if issue_confidence == "Low" and confidence != "Low":
+            confidence = "Low"
+            confidence_reason = "Weak issue cluster; " + confidence_reason
 
-        risk_score = recurrence * r_factor
+        risk_score = recurrence * r_factor * avg_weight * criticality_mult
 
         # Escalation: dominant specific issue repeated ≥ 3 times (candidate only).
         escalation = None
@@ -1842,6 +2743,7 @@ def _build_top_machines(
             "specific_machine_group": machine_group,
             "main_system": main_system,
             "is_area_level": is_area_level,
+            "is_critical": is_critical,
             "asset_count": asset_count,
             "related_assets": related_assets,
             "group_match_confidence": group_match_conf,
@@ -1865,15 +2767,10 @@ def _build_top_machines(
             "evidence_summary": evidence_summary,
             "likely_cause_candidate": likely_cause_candidate,
             "suggested_spare_parts": spare.get("parts", []),
+            "spare_parts_to_prepare": spare.get("spare_parts_to_prepare") or spare.get("parts", []),
             "stock_status": spare.get("overall_stock_status") or "Unknown",
             "confidence": confidence,
-            "confidence_reason": (
-                "Repeated recent symptom cluster with matching spare history."
-                if confidence == "High"
-                else "Repeated symptom cluster detected, but spare history is limited."
-                if confidence == "Medium"
-                else "Weak or unclear symptom cluster; manual review required."
-            ),
+            "confidence_reason": confidence_reason,
             "symptom_keywords": symptom_terms,
             "note_snippets": note_snippets[:3],
             "issue_breakdown": [
@@ -1882,7 +2779,7 @@ def _build_top_machines(
             ],
             "issue_evidence": issue_evidence,
             "last_occurrence": last_date.isoformat() if last_date else None,
-            "days_since_last": days_since,
+            "days_since_last": days_since if days_since < 999 else None,
             "dominant_count": dominant_count,
             "cluster_last_occurrence": latest_cluster_date.isoformat() if latest_cluster_date else None,
             "mtbf_days": round(mtbf_days, 1) if (reliable and mtbf_days) else None,
@@ -1895,8 +2792,23 @@ def _build_top_machines(
             "recurrence_band": recurrence_band_key,
             "likely_recurrence_date": likely_date_str,
             "likely_recurrence_label": likely_label,
+            # ── Spec §3 output blocks ─────────────────────────────────────────
+            "timing": {
+                "next_due_days": next_due_days,
+                "median_gap_days": c_median,
+                "days_since_last": days_since if days_since < 999 else None,
+                "trend": interval_trend,
+                "overdue": overdue,
+            },
+            "severity": {
+                "weighted_score": round(risk_score, 2),
+                "dominant_service_level": dominant_sl,
+            },
+            # ─────────────────────────────────────────────────────────────────
             "suggested_spare": spare.get("suggested_inline"),
             "spare_parts": spare.get("parts", []),
+            "spare_lead": spare.get("spare_lead"),
+            "spare_kit": spare.get("spare_kit", []),
             "spare_available": spare.get("available", False),
             "spare_linked_wo_count": spare.get("linked_wo_count", 0),
             "spare_linked_transaction_count": spare.get("linked_transaction_count", 0),
@@ -1998,6 +2910,297 @@ def _compute_data_confidence(period_rows: list[dict]) -> dict:
     }
 
 
+# ── Top-5 INDIVIDUAL UNITS per category (spec §2D / §3) ─────────────────────────
+# This replaces _build_top_machines().  The unit of analysis is one physical asset
+# (e.g. "Bratt pan No.3").  No area-level rows.  No machine_group column.
+
+def _build_top_units(
+    category_name: str,
+    unit_groups: dict[str, list],          # unit_name → [row, ...]
+    unit_asset_ids: dict[str, str],        # unit_name → canonical asset_id
+    prior_by_unit: dict[str, int],
+    inventory_lookup: dict,
+    unit_parts_context_getter,
+    today: date,
+    top_n: int = 5,
+) -> list[dict]:
+    scored: list[dict] = []
+
+    for unit_name, rows in unit_groups.items():
+        if len(rows) < _MIN_MACHINE_MRS:
+            continue
+
+        asset_id = unit_asset_ids.get(unit_name) or ""
+        recurrence = len(rows)
+
+        valid_dates = [d for d in (_row_latest_date(r) for r in rows) if d]
+        last_date = max(valid_dates) if valid_dates else None
+        days_since = (today - last_date).days if last_date else 999
+        r_factor = _recency_factor(days_since)
+
+        # ── Issue cluster classification ──────────────────────────────────────
+        issue_rows = [
+            (row, classify_specific_issue(_row_issue_text(row) or _row_description(row)))
+            for row in rows
+        ]
+        issue_counter = Counter(iss for _, iss in issue_rows)
+        recent_issue_rows = sorted(
+            issue_rows, key=lambda p: (_row_latest_date(p[0]) or date.min), reverse=True
+        )
+        named_scores = []
+        for issue, count in issue_counter.items():
+            if issue == "Unclassified":
+                continue
+            cluster = [r for r, ri in issue_rows if ri == issue]
+            latest_cd = max((_row_latest_date(r) for r in cluster if _row_latest_date(r)), default=None)
+            days_cd = (today - latest_cd).days if latest_cd else 999
+            recent_ct = sum(1 for r, ri in recent_issue_rows[:4] if ri == issue)
+            open_ct = sum(1 for r in cluster if _row_status_bucket(r) == "open")
+            score = count * 5 + recent_ct * 4 + open_ct * 2 + max(0.0, (30 - days_cd) / 10.0)
+            named_scores.append((score, issue, count, recent_ct, open_ct, cluster, latest_cd))
+
+        issue_reason = ""
+        if named_scores:
+            named_scores.sort(key=lambda x: (-x[0], -x[2], str(x[1])))
+            _, dominant_issue, dominant_count, recent_cluster_ct, open_cluster_ct, cluster_rows, latest_cluster_date = named_scores[0]
+            issue_confidence = "High" if dominant_count >= 3 and recent_cluster_ct >= 2 else "Medium" if dominant_count >= 2 else "Low"
+            if dominant_count < 3 and recent_cluster_ct < 2:
+                issue_reason = "Recent wording is clustered but trend is still weak."
+        else:
+            recent_row = max(rows, key=lambda r: (_row_latest_date(r) or date.min))
+            dominant_issue = _clean_issue_phrase(_row_issue_text(recent_row) or _row_description(recent_row))
+            dominant_count = 1; recent_cluster_ct = 1; open_cluster_ct = 0
+            cluster_rows = [recent_row]; latest_cluster_date = _row_latest_date(recent_row)
+            issue_confidence = "Low"
+            issue_reason = "Generated from the latest description — no repeated cluster strong enough."
+
+        dominant_fault = Counter(
+            classify_fault(_row_issue_text(r) or _row_description(r)) for r in rows
+        ).most_common(1)[0][0]
+
+        # ── Proof string: auditable, not templated (spec §2B) ─────────────────
+        cluster_unit_count = dominant_count
+        issue_pct = round(cluster_unit_count / recurrence * 100)
+        proof = (
+            f"{_keyword_specific_short(dominant_issue)} wording in "
+            f"{issue_pct}% of {recurrence} MRs"
+        )
+
+        # ── MTBF ─────────────────────────────────────────────────────────────
+        mtbf_days, n_intervals, coverage = _compute_mtbf_detail(rows)
+        reliable = (
+            mtbf_days is not None and mtbf_days >= 1.0
+            and _mtbf_is_reliable(n_intervals, coverage)
+        )
+        mtbf_label = f"~{round(mtbf_days, 1)}d" if reliable else "Insufficient data"
+
+        # ── Cluster recurrence + timing (spec §2C) ────────────────────────────
+        c_median, c_avg, c_n_intervals, _, c_gaps = _compute_cluster_recurrence(cluster_rows)
+        c_reliable = dominant_count >= 3 and c_n_intervals >= 2 and c_median is not None and c_median >= 1.0
+
+        likely_label, recurrence_band_key = _recurrence_band(c_median, c_n_intervals, dominant_count)
+        if c_reliable:
+            ref_date = latest_cluster_date or last_date
+            _, timing_label = _likely_recurrence(ref_date, c_median, today)
+            likely_label = timing_label
+
+        if c_median is not None and days_since < 999:
+            raw_next = round(c_median - days_since)
+            next_due_days: Optional[int] = max(0, raw_next)
+            overdue = raw_next < 0
+        else:
+            next_due_days = None
+            overdue = False
+
+        if len(c_gaps) >= 4:
+            n_third = max(1, len(c_gaps) // 3)
+            older_med = _median_of(c_gaps[:-n_third])
+            recent_med = _median_of(c_gaps[-n_third:])
+            interval_trend = (
+                "degrading" if recent_med < older_med * 0.85
+                else "stabilizing" if recent_med > older_med * 1.15
+                else "stable"
+            )
+        else:
+            interval_trend = "stable"
+
+        # ── Severity + criticality (spec §2D) ────────────────────────────────
+        sl_values = [v for v in (_row_service_level(r) for r in rows) if v is not None]
+        dominant_sl: Optional[int] = Counter(sl_values).most_common(1)[0][0] if sl_values else None
+        avg_weight = _median_of([_severity_weight(v) for v in sl_values]) if sl_values else 2.0
+        critical_ct = sum(1 for r in rows if _row_is_critical(r))
+        is_critical = critical_ct > len(rows) / 2
+        criticality_mult = 1.5 if is_critical else 1.0
+
+        symptom_terms = _extract_issue_tokens(cluster_rows, dominant_issue)
+
+        # ── Spare recommendation (spec §2E) ─────────────────────────────────
+        # Cluster WO IDs → consumption for those WOs only
+        cluster_wo_ids = {_row_wo_id(r) for r in cluster_rows if _row_wo_id(r)}
+        parts_context = unit_parts_context_getter(unit_name, cluster_wo_ids)
+        spare = _compute_machine_spare(
+            unit_name,
+            rows,
+            dominant_issue,
+            parts_context,
+            inventory_lookup,
+            c_median,
+            main_system=category_name,
+            symptom_terms=symptom_terms,
+        )
+
+        # ── Confidence (spec §2C) ─────────────────────────────────────────────
+        consumption_count = len(parts_context.get("sparePartsUsed") or []) if parts_context else 0
+        if c_n_intervals >= 6 and consumption_count >= 3:
+            confidence = "High"
+            confidence_reason = f"{recurrence} MRs, {c_n_intervals} clean intervals, {consumption_count} consumption records."
+        elif c_n_intervals >= 3:
+            confidence = "Medium"
+            confidence_reason = f"{recurrence} MRs, {c_n_intervals} clean intervals (need ≥3 consumption records for High)."
+        else:
+            confidence = "Low"
+            confidence_reason = f"Not enough history — {c_n_intervals} clean interval(s) (need ≥3 for Medium)."
+        if issue_confidence == "Low" and confidence != "Low":
+            confidence = "Low"
+            confidence_reason = "Weak issue cluster; " + confidence_reason
+
+        risk_score = recurrence * r_factor * avg_weight * criticality_mult
+
+        # ── Escalation ────────────────────────────────────────────────────────
+        escalation = None
+        if dominant_count >= 3 and issue_confidence != "Low":
+            escalation = {
+                "triggered": True,
+                "trigger": dominant_issue,
+                "trigger_count": dominant_count,
+                "reason": f"'{dominant_issue}' repeated {dominant_count}× for {unit_name}",
+                "mr_ids": list(dict.fromkeys(_row_mr_id(r) for r in rows if _row_mr_id(r)))[:12],
+                "wo_ids": list(dict.fromkeys(_row_wo_id(r) for r in rows if _row_wo_id(r)))[:8],
+            }
+
+        trend = _trend_arrow(recurrence, prior_by_unit.get(unit_name, 0))
+        main_observed_issue = _build_main_observed_issue(dominant_issue, symptom_terms)
+        likely_cause_candidate = _build_likely_cause_candidate(dominant_issue, spare.get("parts") or [])
+        evidence_summary = _format_issue_evidence(
+            dominant_count, latest_cluster_date, symptom_terms, mtbf_label, open_cluster_ct, dominant_issue
+        )
+
+        # ── Recent evidence for drill-down ────────────────────────────────────
+        issue_evidence: list[dict] = []
+        for r, iss in recent_issue_rows:
+            desc = _row_description(r)
+            if not desc:
+                continue
+            ev_date = _row_latest_date(r)
+            translated = str(r.get("translated_description") or "").strip()
+            issue_evidence.append({
+                "mr_id": _row_mr_id(r),
+                "wo_id": _row_wo_id(r),
+                "date": ev_date.isoformat() if ev_date else None,
+                "issue": iss if iss != "Unclassified" else None,
+                "description": _clean_issue_phrase(desc, max_words=16),
+                "translated_description": _clean_issue_phrase(translated, max_words=16) if translated else None,
+                "status": str(r.get("status") or "").strip() or None,
+            })
+            if len(issue_evidence) >= 6:
+                break
+
+        other_common_faults = _build_other_common_faults(
+            unit_name,
+            rows,
+            dominant_issue,
+            unit_groups,
+            parts_context,
+            inventory_lookup,
+            category_name,
+        )
+
+        scored.append({
+            # ── Spec §3 identity ──────────────────────────────────────────────
+            "unit": unit_name,
+            "asset_id": asset_id,
+            "category": category_name,
+            "is_critical": is_critical,
+            "mr_count": recurrence,
+            # ── Issue ─────────────────────────────────────────────────────────
+            "issue": {"cluster": dominant_issue, "proof": proof},
+            "recurring_issue": dominant_issue,
+            "recurring_issue_confidence": issue_confidence,
+            "recurring_issue_reason": issue_reason,
+            "recurring_issue_fault_family": dominant_fault,
+            "main_observed_issue": main_observed_issue,
+            "evidence_summary": evidence_summary,
+            "likely_cause_candidate": likely_cause_candidate,
+            "issue_breakdown": [
+                {"issue": iss, "count": cnt}
+                for iss, cnt in issue_counter.most_common(5) if iss != "Unclassified"
+            ],
+            "issue_evidence": issue_evidence,
+            "other_common_faults": other_common_faults,
+            # ── Timing (spec §3) ──────────────────────────────────────────────
+            "timing": {
+                "next_due_days": next_due_days,
+                "median_gap_days": c_median,
+                "days_since_last": days_since if days_since < 999 else None,
+                "trend": interval_trend,
+                "overdue": overdue,
+            },
+            # ── Severity (spec §3) ────────────────────────────────────────────
+            "severity": {
+                "weighted_score": round(risk_score, 2),
+                "dominant_service_level": dominant_sl,
+            },
+            # ── Spare (spec §3) ───────────────────────────────────────────────
+            "spare_parts": spare.get("parts", []),
+            "spare_parts_to_prepare": spare.get("spare_parts_to_prepare") or spare.get("parts", []),
+            "spare_lead": spare.get("spare_lead"),
+            "spare_kit": spare.get("spare_kit", []),
+            "spare_available": spare.get("available", False),
+            "suggested_spare_parts": spare.get("parts", []),
+            "suggested_spare": spare.get("suggested_inline"),
+            "stock_status": spare.get("overall_stock_status") or "Unknown",
+            "spare_recommendation_basis": spare.get("basis") or _NO_CONFIRMED_SPARE,
+            "spare_linked_wo_count": spare.get("linked_wo_count", 0),
+            "spare_linked_transaction_count": spare.get("linked_transaction_count", 0),
+            # ── Confidence (spec §2C / §3) ────────────────────────────────────
+            "confidence": confidence,
+            "confidence_reason": confidence_reason,
+            # ── Internals ─────────────────────────────────────────────────────
+            "last_occurrence": last_date.isoformat() if last_date else None,
+            "days_since_last": days_since if days_since < 999 else None,
+            "dominant_count": dominant_count,
+            "cluster_last_occurrence": latest_cluster_date.isoformat() if latest_cluster_date else None,
+            "mtbf_days": round(mtbf_days, 1) if (reliable and mtbf_days) else None,
+            "mtbf_label": mtbf_label,
+            "mtbf_reliable": reliable,
+            "recurrence_interval_days": c_median,
+            "recurrence_interval_avg_days": c_avg,
+            "recurrence_interval_n": c_n_intervals,
+            "recurrence_gauge": likely_label,
+            "recurrence_band": recurrence_band_key,
+            "likely_recurrence_label": likely_label,
+            "symptom_keywords": symptom_terms,
+            "escalation": escalation,
+            "trend": trend,
+            "prior_count": prior_by_unit.get(unit_name, 0),
+            "risk_score": round(risk_score, 2),
+        })
+
+    scored.sort(key=lambda x: -x["risk_score"])
+    return [dict(m, rank=i + 1) for i, m in enumerate(scored[:top_n])]
+
+
+def _keyword_specific_short(issue_label: str) -> str:
+    """Return a short auditable string for the proof field."""
+    short = (
+        issue_label
+        .removesuffix(" Fault").removesuffix(" Issue")
+        .removesuffix(" Problem").removesuffix(" Leakage")
+        .strip()
+    )
+    return short or issue_label
+
+
 # ── Main builder ─────────────────────────────────────────────────────────────────
 
 def build_predictive_insights(filters: dict) -> dict:
@@ -2011,10 +3214,17 @@ def build_predictive_insights(filters: dict) -> dict:
 
 
 def _build_predictive_insights_inner(f: dict) -> dict:
+    """Unit-level predictive pipeline (spec §2A–§2E).
+
+    Aggregation unit = individual physical asset (e.g. "Bratt pan No.3").
+    Area-bucket MRs are resolved via qwen / keyword extraction.
+    MRs that cannot be attributed to a specific unit go to the Facility bucket
+    and are NEVER ranked.  The output never contains "machine_group" or
+    "Area-level MR / machine not specified" rows.
+    """
     window = ctx.resolved_window(f)
     today = window["end_date"]
 
-    # ── MR rows from existing memoised builders ──────────────────────────────
     all_rows = kpi._filtered_work_order_rows(f)
     period_rows = kpi._selected_period_work_order_rows(f, all_rows)
 
@@ -2028,36 +3238,33 @@ def _build_predictive_insights_inner(f: dict) -> dict:
             "data_confidence": _compute_data_confidence([]),
         }
 
-    # ── Prior period for trend comparison ────────────────────────────────────
     prior_start, prior_end = _prior_period(window)
     prior_rows = [r for r in all_rows if _row_in_range(r, prior_start, prior_end)]
 
-    # ── Shared spare-parts context for evidence-based recommendations ────────
-    # Pre-build machine-group → spare-transaction lookup in one pass (O(N_txn)).
-    # This replaces per-group calls to build_asset_parts_intelligence_context which
-    # scanned 4600+ WO records for each of 20+ machine groups (10-28s each = ~420s
-    # total on cold start). Now the whole lookup takes < 2 seconds.
-    inventory_lookup = {"records": [], "by_code": {}}
-    _mg_spare_lookup: dict[str, list[dict]] = {}
-    _mg_po_lookup: dict[str, list[dict]] = {}
+    # ── Spare-parts context: WO-level consumption + Gen PO ───────────────────
+    # _wo_spare_lookup[work_order_id] = [consumption txn dicts]
+    # _po_spare_lookup[item_code_upper] = [po dicts] (for Gen PO evidence)
+    inventory_lookup: dict = {"records": [], "by_code": {}}
+    _wo_spare_lookup: dict[str, list[dict]] = {}    # WO ID → consumption
+    _po_spare_lookup: dict[str, list[dict]] = {}    # item_code_upper → PO rows
+    _po_spare_all: list[dict] = []                  # all spare Gen PO rows for description validation
     try:
         import spare_parts_service as sps
         spare_payload = sps.build_spare_parts_payload()
         inventory_lookup = _build_inventory_lookup(spare_payload)
 
-        # Usage / GI transactions → strongest evidence (actual consumption)
+        # Project transactions → WO-level consumption (spec §2E join)
         pt = sps.build_project_transactions_payload()
         for txn in (pt.get("transactions") or []):
-            txn_row = {
-                "asset_id": txn.get("asset_id"),
-                "description": txn.get("translated_description") or txn.get("original_description"),
-                "translated_description": txn.get("translated_description"),
-            }
-            mg, _main_system, _cat, _conf, _asset_name, _is_area = resolve_specific_machine_group(txn_row)
-            if mg and mg != UNKNOWN_GROUP:
-                _mg_spare_lookup.setdefault(mg, []).append({
+            wo_id = str(txn.get("work_order_id") or "").strip()
+            if wo_id:
+                _wo_spare_lookup.setdefault(wo_id, []).append({
                     "item_code": txn.get("transaction_id"),
-                    "part_name": txn.get("translated_description") or txn.get("original_description") or txn.get("name_raw") or "",
+                    "part_name": (
+                        txn.get("translated_description")
+                        or txn.get("original_description")
+                        or ""
+                    ),
                     "classification": txn.get("item_category") or "",
                     "quantity": float(txn.get("quantity_used") or 0),
                     "date": str(txn.get("project_date") or ""),
@@ -2065,14 +3272,11 @@ def _build_predictive_insights_inner(f: dict) -> dict:
                     "value": txn.get("unit_cost_estimate"),
                 })
 
-        # Gen PO Stage 1 / Stage 2 → supporting purchase-history evidence
+        # Gen PO → supporting purchase-history evidence keyed by item code
         try:
             po_records = (spare_payload.get("po_classification") or {}).get("records") or []
             for po_row in po_records:
                 if po_row.get("classification") not in {"Stock Spare Part", "Non-Stock Spare Part"}:
-                    continue
-                mg, mg_conf, mg_keywords = _detect_machine_group_from_po_row(po_row)
-                if not mg or mg in (UNKNOWN_GROUP, AREA_LEVEL_GROUP):
                     continue
                 raw_stage = str(po_row.get("source_stage") or "").strip()
                 stage_label = (
@@ -2080,7 +3284,8 @@ def _build_predictive_insights_inner(f: dict) -> dict:
                     else "Gen PO Stage 2" if "2" in raw_stage
                     else "Gen PO"
                 )
-                _mg_po_lookup.setdefault(mg, []).append({
+                code_key = str(po_row.get("code") or "").strip().upper()
+                entry = {
                     "item_code": po_row.get("code"),
                     "part_description": po_row.get("translated_description") or po_row.get("description") or "",
                     "part_name": po_row.get("translated_description") or po_row.get("description") or "",
@@ -2090,69 +3295,105 @@ def _build_predictive_insights_inner(f: dict) -> dict:
                     "po_no": po_row.get("po_number"),
                     "vendor": po_row.get("vendor_name") or po_row.get("supplier") or "",
                     "source_stage": stage_label,
-                    "machine_detection_confidence": mg_conf,
-                    "matched_keywords": mg_keywords,
-                    "is_direct_match": mg_conf == "High",
+                    "machine_detection_confidence": "Medium",
+                    "matched_keywords": [],
+                    "is_direct_match": False,
                     "value": po_row.get("unit_cost"),
-                })
+                    "lead_time_days": po_row.get("lead_time_days"),
+                    "pd_machine": po_row.get("pd_machine"),
+                    "translated_pd_machine": po_row.get("translated_pd_machine"),
+                }
+                _po_spare_all.append(entry)
+                if code_key:
+                    _po_spare_lookup.setdefault(code_key, []).append(entry)
         except Exception as po_exc:
-            print(f"[predictive] Gen PO machine-group lookup failed: {po_exc}")
+            print(f"[predictive] Gen PO lookup failed: {po_exc}")
 
     except Exception:
         inventory_lookup = {"records": [], "by_code": {}}
 
-    # ── Resolve every row to a real machine group + display category ─────────
-    # Generic-asset rows are inferred into the real group via description, then
-    # counted only under that group (no double-count). Unknown / Review is held
-    # aside and never enters a Top-5 or a section total.
-    by_cat_group: dict[str, dict[str, list[tuple]]] = defaultdict(lambda: defaultdict(list))
+    # ── Resolve every MR to a SPECIFIC UNIT (spec §2A) ───────────────────────
+    by_cat_unit: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
+    unit_asset_ids: dict[str, Counter] = {}        # unit_name → Counter of asset_ids
     resolved_count = 0
-    unknown_count = 0
+    facility_count = 0
+
     for row in period_rows:
-        mg, main_system, disp_cat, conf, asset_name, is_area = resolve_specific_machine_group(row)
-        if mg == UNKNOWN_GROUP or not disp_cat:
-            unknown_count += 1
+        unit_name, asset_id, disp_cat = resolve_to_unit(row)
+        if unit_name is None or disp_cat == "Facility / Building":
+            facility_count += 1
             continue
-        by_cat_group[disp_cat][mg].append((row, conf, main_system, asset_name, is_area))
+        by_cat_unit[disp_cat][unit_name].append(row)
+        if unit_name not in unit_asset_ids:
+            unit_asset_ids[unit_name] = Counter()
+        if asset_id:
+            unit_asset_ids[unit_name][asset_id] += 1
         resolved_count += 1
 
-    # ── Prior counts per machine group (across all categories) ───────────────
-    prior_by_group: Counter[str] = Counter()
+    # canonical asset_id per unit = most frequent
+    canonical_asset_id: dict[str, str] = {
+        unit: c.most_common(1)[0][0] if c else ""
+        for unit, c in unit_asset_ids.items()
+    }
+
+    # ── Prior counts per unit ─────────────────────────────────────────────────
+    prior_by_unit: Counter[str] = Counter()
     for r in prior_rows:
-        mg, _main_system, disp_cat, _conf, _asset_name, _is_area = resolve_specific_machine_group(r)
-        if mg != UNKNOWN_GROUP and disp_cat:
-            prior_by_group[mg] += 1
+        unit_name, _, _ = resolve_to_unit(r)
+        if unit_name:
+            prior_by_unit[unit_name] += 1
 
-    def group_parts_context_getter(machine_group: str) -> dict:
-        key = str(machine_group or "").strip()
-        if not key:
-            return {}
-        return {
-            "sparePartsUsed": _mg_spare_lookup.get(key, []),
-            "purchaseParts": _mg_po_lookup.get(key, []),
-        }
+    # ── Parts context: WO-level for usage, PO fallback for purchase history ───
+    def unit_parts_context_getter(unit_name: str, cluster_wo_ids: set) -> dict:
+        # Consumption: rows from the cluster's WO IDs (verified fix kit for this issue)
+        usage: list[dict] = []
+        for wo_id in cluster_wo_ids:
+            usage.extend(_wo_spare_lookup.get(wo_id, []))
+        # Fallback: all WOs for the unit if cluster lookup is empty
+        if not usage:
+            # Pull from the unit's own rows (all WOs, not just cluster)
+            pass  # caller already has the cluster_rows; kept empty to avoid false positives
 
-    # ── Build top-5 per display category; totals reconcile with resolved rows ─
+        # Gen PO evidence: items already matched to consumption codes
+        purchase: list[dict] = []
+        all_purchase: list[dict] = list(_po_spare_all)
+        seen_codes = {str(u.get("item_code") or "").strip().upper() for u in usage}
+        for code in seen_codes:
+            if code:
+                purchase.extend(_po_spare_lookup.get(code, []))
+        # Also add PO rows whose pd_machine matches the unit name
+        unit_lower = unit_name.lower()
+        for po_list in _po_spare_lookup.values():
+            for po in po_list:
+                pdm = str(po.get("translated_pd_machine") or po.get("pd_machine") or "").lower()
+                if pdm and unit_lower in pdm or (pdm and pdm in unit_lower):
+                    if po not in purchase:
+                        purchase.append(po)
+
+        return {"sparePartsUsed": usage, "purchaseParts": purchase, "allPurchaseParts": all_purchase}
+
+    # ── Build top-5 per category ──────────────────────────────────────────────
     categories: list[dict] = []
     for cat_name in _CATEGORY_ORDER:
-        mg_groups = by_cat_group.get(cat_name, {})
-        cat_total = sum(len(pairs) for pairs in mg_groups.values())
-        top_machines = _build_top_machines(
+        unit_groups = by_cat_unit.get(cat_name, {})
+        cat_total = sum(len(rows) for rows in unit_groups.values())
+        top_units = _build_top_units(
             cat_name,
-            mg_groups,
-            prior_by_group,
+            unit_groups,
+            canonical_asset_id,
+            prior_by_unit,
             inventory_lookup,
-            group_parts_context_getter,
+            unit_parts_context_getter,
             today,
         )
         categories.append({
             "name": cat_name,
             "total_mrs": cat_total,
-            "machine_group_count": len(mg_groups),
-            "top_machines": top_machines,
+            "unit_count": len(unit_groups),
+            "top_machines": top_units,   # key kept for frontend compat
         })
 
-    # ── Cross-category fault pattern (Card 2 summary) ────────────────────────
+    # ── Cross-category fault pattern ──────────────────────────────────────────
     all_fault_counts: Counter[str] = Counter()
     fault_by_row: dict[int, str] = {}
     for row in period_rows:
@@ -2164,22 +3405,22 @@ def _build_predictive_insights_inner(f: dict) -> dict:
     fault_pattern = None
     if all_fault_counts:
         top_fault, top_count = all_fault_counts.most_common(1)[0]
-        affected = []
-        for cat_name, mg_groups in by_cat_group.items():
-            for mg, pairs in mg_groups.items():
-                if any(fault_by_row.get(id(pair[0])) == top_fault for pair in pairs):
-                    affected.append(mg)
+        affected_units: list[str] = []
+        for cat_name, unit_rows_map in by_cat_unit.items():
+            for uname, urows in unit_rows_map.items():
+                if any(fault_by_row.get(id(r)) == top_fault for r in urows):
+                    affected_units.append(uname)
         fault_pattern = {
             "fault_family": top_fault,
             "count": top_count,
             "pct_of_total": round(top_count / len(period_rows) * 100, 1),
-            "affected_groups": affected[:5],
+            "affected_groups": affected_units[:5],
         }
 
-    confidence = _compute_data_confidence(period_rows)
-    confidence["resolved_to_group"] = resolved_count
-    confidence["unresolved_count"] = unknown_count
-    confidence["resolution_pct"] = round(resolved_count / len(period_rows) * 100, 1) if period_rows else 0.0
+    data_conf = _compute_data_confidence(period_rows)
+    data_conf["resolved_to_unit"] = resolved_count
+    data_conf["facility_count"] = facility_count
+    data_conf["resolution_pct"] = round(resolved_count / len(period_rows) * 100, 1) if period_rows else 0.0
 
     return {
         "period": window["label"],
@@ -2187,5 +3428,5 @@ def _build_predictive_insights_inner(f: dict) -> dict:
         "empty": False,
         "categories": categories,
         "fault_pattern": fault_pattern,
-        "data_confidence": confidence,
+        "data_confidence": data_conf,
     }

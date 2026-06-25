@@ -844,3 +844,399 @@
         grid-template-columns: 1fr;
     }
 }
+
+/* ── Asset Report Renderer ─────────────────────────────────────────────────── */
+
+.mira-ar-bubble {
+    max-width: 100%;
+}
+
+.mira-ar-title {
+    margin: 8px 0 10px;
+    font-size: 0.96rem;
+    font-weight: 900;
+    color: #18273a;
+    letter-spacing: -0.01em;
+    line-height: 1.3;
+}
+
+.mira-ar-summary {
+    margin-bottom: 12px;
+}
+
+/* Stats row */
+.mira-ar-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+    gap: 8px;
+    margin-bottom: 14px;
+}
+
+.mira-ar-stat {
+    padding: 10px 12px;
+    border: 1px solid #e0eaf5;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #f8fbff 0%, #f2f7fd 100%);
+    text-align: center;
+}
+
+.mira-ar-stat-value {
+    font-size: 1.12rem;
+    font-weight: 900;
+    color: #1a3050;
+    line-height: 1.2;
+}
+
+.mira-ar-stat-label {
+    margin-top: 3px;
+    font-size: 0.66rem;
+    font-weight: 700;
+    color: #708096;
+    letter-spacing: 0.04em;
+    line-height: 1.3;
+}
+
+/* Section wrapper */
+.mira-ar-section {
+    margin-top: 12px;
+}
+
+/* Unit table */
+.mira-ar-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+    margin-top: 8px;
+    border-radius: 10px;
+    overflow: hidden;
+}
+
+.mira-ar-table th {
+    padding: 7px 9px;
+    background: #1e3148;
+    color: rgba(255, 255, 255, 0.88);
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.06em;
+    text-align: left;
+    white-space: nowrap;
+}
+
+.mira-ar-table td {
+    padding: 7px 9px;
+    border-bottom: 1px solid #eef3f8;
+    color: #2d3f54;
+    vertical-align: top;
+    line-height: 1.35;
+}
+
+.mira-ar-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.mira-ar-table tbody tr:hover td {
+    background: #f6f9fd;
+}
+
+.mira-ar-td-unit {
+    font-weight: 800;
+    white-space: nowrap;
+}
+
+.mira-ar-td-count {
+    text-align: center;
+    font-weight: 900;
+    color: #1a3050;
+}
+
+.mira-ar-td-issues {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.mira-ar-td-cost {
+    white-space: nowrap;
+    font-weight: 700;
+    color: #0f766e;
+}
+
+/* Issue chips inside table */
+.mira-ar-issue-chip {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: #eef4fb;
+    border: 1px solid #cddaee;
+    color: #2d4a66;
+    font-size: 0.7rem;
+    font-weight: 700;
+    white-space: nowrap;
+    line-height: 1.3;
+}
+
+/* Pattern chips */
+.mira-ar-pattern-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 8px;
+}
+
+.mira-ar-pattern-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border: 1px solid #d6e4f5;
+    border-radius: 999px;
+    background: #f5f9ff;
+    font-size: 0.74rem;
+}
+
+.mira-ar-pattern-name {
+    color: #2d4a66;
+    font-weight: 700;
+}
+
+.mira-ar-pattern-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 999px;
+    background: #243448;
+    color: #fff;
+    font-size: 0.65rem;
+    font-weight: 900;
+}
+
+/* Cost note */
+.mira-ar-cost-note {
+    margin: 10px 0 0;
+    padding: 8px 10px;
+    border-radius: 9px;
+    background: #fffbf0;
+    border: 1px solid #f5d97a;
+    color: #7a5a0f;
+    font-size: 0.72rem;
+    line-height: 1.45;
+}
+
+/* Action buttons */
+.mira-ar-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+    margin-top: 14px;
+    padding-top: 12px;
+    border-top: 1px solid #eef3f8;
+}
+
+.mira-ar-btn {
+    padding: 7px 13px;
+    border: 0;
+    border-radius: 9px;
+    background: #243448;
+    color: #fff;
+    font-size: 0.74rem;
+    font-weight: 800;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+    white-space: nowrap;
+}
+
+.mira-ar-btn:hover {
+    background: #1a2635;
+    transform: translateY(-1px);
+}
+
+.mira-ar-btn-outline {
+    background: transparent;
+    border: 1px solid #cddaee;
+    color: #3d5570;
+}
+
+.mira-ar-btn-outline:hover {
+    background: #f4f7fb;
+    border-color: #b0c4dc;
+    color: #2d4060;
+    transform: translateY(-1px);
+}
+
+/* Evidence panels (expandable inside bubble) */
+.mira-ar-evidence-panel {
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid #e0eaf5;
+    border-radius: 12px;
+    background: #f8fbff;
+    overflow-x: auto;
+}
+
+.mira-ar-ev-section-title {
+    margin-bottom: 8px;
+    font-size: 0.72rem;
+    font-weight: 900;
+    color: #3d5570;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.mira-ar-ev-table {
+    width: 100%;
+    min-width: 480px;
+    border-collapse: collapse;
+    font-size: 0.72rem;
+}
+
+.mira-ar-ev-table th {
+    padding: 5px 7px;
+    background: #e6edf5;
+    color: #3d5570;
+    font-weight: 800;
+    text-align: left;
+    white-space: nowrap;
+    border-bottom: 1px solid #cddaee;
+}
+
+.mira-ar-ev-table td {
+    padding: 5px 7px;
+    border-bottom: 1px solid #eef3f8;
+    color: #2d3f54;
+    vertical-align: top;
+}
+
+.mira-ar-ev-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.mira-ar-ev-desc {
+    max-width: 200px;
+    word-break: break-word;
+    color: #4b5b6c;
+}
+
+.mira-ar-ev-num {
+    text-align: right;
+    font-weight: 700;
+}
+
+.mira-ar-ev-empty {
+    margin: 6px 0;
+    color: #94a3b8;
+    font-size: 0.78rem;
+}
+
+/* Excluded rows panel */
+.mira-ar-excl-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 10px;
+}
+
+.mira-ar-excl-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid #f5d2aa;
+    background: #fff8f0;
+    color: #7a4010;
+    font-size: 0.7rem;
+    font-weight: 700;
+}
+
+.mira-ar-excl-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 18px;
+    height: 16px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: #cb623d;
+    color: #fff;
+    font-size: 0.62rem;
+    font-weight: 900;
+}
+
+.mira-ar-excl-reason {
+    color: #a05b0f;
+    font-weight: 700;
+    font-size: 0.7rem;
+}
+
+/* Email modal */
+.mira-ar-modal-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 2000;
+    background: rgba(15, 23, 42, 0.45);
+    backdrop-filter: blur(3px);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+}
+
+.mira-ar-modal {
+    position: relative;
+    width: min(580px, 100%);
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: 24px;
+    border-radius: 20px;
+    background: #fff;
+    box-shadow: 0 32px 80px rgba(15, 23, 42, 0.25);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.mira-ar-modal-close {
+    position: absolute;
+    right: 16px;
+    top: 16px;
+    width: 34px;
+    height: 34px;
+    border: 1px solid #dbe4ef;
+    border-radius: 10px;
+    background: #fff;
+    color: #516173;
+    font-size: 1.1rem;
+    font-weight: 900;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
+.mira-ar-modal-title {
+    font-size: 1rem;
+    font-weight: 900;
+    color: #18273a;
+    padding-right: 40px;
+}
+
+.mira-ar-modal-textarea {
+    width: 100%;
+    padding: 12px;
+    border: 1px solid #cdd8e3;
+    border-radius: 10px;
+    font-size: 0.8rem;
+    line-height: 1.55;
+    color: #243448;
+    background: #f9fbfd;
+    resize: vertical;
+    font-family: "Courier New", monospace;
+}
+
+.mira-ar-modal-copy {
+    align-self: flex-start;
+}

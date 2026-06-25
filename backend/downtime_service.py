@@ -338,7 +338,7 @@ def _sql_row_to_enriched(row: dict) -> dict:
         # Description
         "description": description,
         "description_original": description,
-        "translated_description": description,
+        "translated_description": row.get("translated_description") or translate_maintenance_description(description),
         "remarks": description,
         # Job info
         "system": trade,
@@ -352,8 +352,8 @@ def _sql_row_to_enriched(row: dict) -> dict:
         "source": "Work Order",
         "source_path": str(row.get("source_file") or ""),
         "acknowledgement_status": ack_status,
-        "started_by": "",
-        "created_by": "",
+        "started_by": str(row.get("started_by") or ""),
+        "created_by": str(row.get("created_by") or ""),
     }
 
 

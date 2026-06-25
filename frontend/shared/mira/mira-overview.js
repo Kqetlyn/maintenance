@@ -25,6 +25,7 @@
     let latestWarnings = [];
     let warmRetries = 0;            // first-load: backend still warming caches
     let warmRetryTimer = null;
+    const predictiveWordingCache = {};
     // The warming placeholder returns in ~10ms, so polling is cheap. A truly cold
     // first build (all source workbooks) can take a few minutes, so keep calmly
     // retrying for up to ~4 minutes before showing the soft "taking longer" notice.
@@ -196,10 +197,28 @@
     function buildHeader() {
         const head = el("header", "mira-ov-header");
         const actions = el("div", "mira-ov-header-actions");
-        const regen = el("button", "mira-ov-btn mira-ov-btn-primary", "Regenerate Summary");
-        regen.type = "button";
-        regen.addEventListener("click", () => loadOverview({ force: true }));
-        actions.append(regen);
+
+        // Export Report button group
+        const expGroup = el("div", "mira-ov-export-group");
+        expGroup.append(el("span", "mira-ov-export-label", "Export Report"));
+
+        const pptBtn = el("button", "mira-ov-export-btn", "PPT");
+        pptBtn.id = "ov-export-ppt"; pptBtn.type = "button";
+        pptBtn.addEventListener("click", exportOverviewPPT);
+
+        const pdfBtn = el("button", "mira-ov-export-btn", "PDF");
+        pdfBtn.id = "ov-export-pdf"; pdfBtn.type = "button";
+        pdfBtn.addEventListener("click", exportOverviewPDF);
+
+        expGroup.append(pptBtn, pdfBtn);
+
+        // Refresh icon replaces Regenerate Summary
+        const refreshBtn = el("button", "mira-ov-refresh-icon-btn", "↻");
+        refreshBtn.type = "button";
+        refreshBtn.title = "Regenerate Summary";
+        refreshBtn.addEventListener("click", () => loadOverview({ force: true }));
+
+        actions.append(expGroup, refreshBtn);
         head.append(actions);
         return head;
     }
@@ -232,10 +251,9 @@
     function buildBody() {
         const body = el("div", "mira-ov-body");
         body.append(
-            buildStatusCard(),          // § 1
+            buildStatusCard(),          // § 1 — incl. Data Quality & Daily Action Alerts
             buildKpiRow(),              // § 2
-            buildPredictiveSection(),   // § 3 - Predictive Issue & Spare Parts Intelligence
-            buildDataQualityAlertsSection(), // § 3 - Data Quality & Daily Action Alerts
+            buildPredictiveSection(),   // § 3
             buildDataUsedCard(),        // § Bottom
         );
         return body;
@@ -261,21 +279,54 @@
         ];
         refs.summaryLine.forEach(l => compactSummary.append(l));
 
-        // Action table
-        const actionSection = el("div", "mira-ov-action-section");
-        actionSection.append(el("div", "mira-ov-mini-label", "Recommended Actions"));
-        refs.actionTable = el("div", "mira-ov-act-tbl");
-        refs.actionTable.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-md\"></div>";
-        actionSection.append(refs.actionTable);
+        // Data Quality & Daily Action Alerts — merged into status card
+        const dqAlertsSection = el("div", "mira-ov-action-section");
 
-        // Hidden compat refs (populated for other render paths; not visible)
+        const dqHead = el("div", "mira-ov-dq-section-head");
+        dqHead.append(el("div", "mira-ov-mini-label", "Data Quality & Daily Action Alerts"));
+        const dqHeadRight = el("div", "mira-ov-daily-status");
+        refs.verdictBadge = el("span", "mira-ov-status-badge", "Loading");
+        refs.verdictScope = el("span", "mira-ov-verdict-scope", "");
+        dqHeadRight.append(refs.verdictBadge, refs.verdictScope);
+        dqHead.append(dqHeadRight);
+        dqAlertsSection.append(dqHead);
+
+        const dqGrid = el("div", "mira-ov-daily-grid");
+
+        const dqCard = el("div", "mira-ov-daily-card");
+        dqCard.append(el("div", "mira-ov-sub-card-title", "Data Quality"));
+        refs.dataQualityChips = el("div", "mira-ov-dq-chip-grid");
+        refs.dataQualityChips.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-chips\"></div>";
+        dqCard.append(refs.dataQualityChips);
+        dqCard.append(el("p", "mira-ov-dq-note",
+            "These issues may affect machine-level trend, PM compliance, and predictive analysis accuracy."));
+        const dqActions = el("div", "mira-ov-daily-actions");
+        dqActions.append(buildNavButton("View Data Quality", "data_quality"));
+        dqCard.append(dqActions);
+
+        const alertsCard = el("div", "mira-ov-daily-card mira-ov-daily-alert-card");
+        alertsCard.append(el("div", "mira-ov-sub-card-title", "Daily Action Alerts"));
+        refs.verdictSummary = el("p", "mira-ov-muted", "");
+        alertsCard.append(refs.verdictSummary);
+        refs.dailyAlerts = el("div", "mira-ov-daily-alerts");
+        refs.dailyAlerts.id = "mira-ov-verdict-body";
+        refs.dailyAlerts.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-chips\"></div>";
+        alertsCard.append(refs.dailyAlerts);
+
+        dqGrid.append(dqCard, alertsCard);
+        dqAlertsSection.append(dqGrid);
+        dqAlertsSection.append(el("p", "mira-ov-disclaimer",
+            "AI-detected issues are for review only. Technician/Engineer verification is required before any action. MIRA does not assign severity."));
+
+        // Hidden compat refs — keep actionTable alive so renderActionTable() doesn't crash
         const hidden = el("div"); hidden.hidden = true;
+        refs.actionTable = el("div", "mira-ov-act-tbl");
         refs.exec = el("p", "mira-ov-exec-text");
         refs.highlights = el("ul", "mira-ov-list");
         refs.actionsToday = el("ul", "mira-ov-list");
-        hidden.append(refs.exec, refs.highlights, refs.actionsToday);
+        hidden.append(refs.actionTable, refs.exec, refs.highlights, refs.actionsToday);
 
-        card.append(top, refs.statusPeriod, refs.headlineKpis, compactSummary, actionSection, hidden);
+        card.append(top, refs.statusPeriod, refs.headlineKpis, compactSummary, dqAlertsSection, hidden);
         return card;
     }
 
@@ -358,7 +409,9 @@
             .forEach(([title, key, accent, icon]) => {
                 const card = el("section", `mira-ov-kpi-card mira-ov-accent-${accent}`);
                 const head = el("div", "mira-ov-kpi-head");
-                head.append(el("div", "mira-ov-kpi-title", title), el("span", "mira-ov-card-icon", icon));
+                const badge = el("span", "mira-ov-health-badge mira-ov-health-unknown");
+                badge.id = `mira-ov-health-${key}`;
+                head.append(el("div", "mira-ov-kpi-title", title), badge, el("span", "mira-ov-card-icon", icon));
                 card.append(head);
                 const body = el("div", "mira-ov-kpi-body"); body.id = `mira-ov-kpi-${key}`;
                 body.append(el("p", "mira-ov-muted", "Loading…"));
@@ -368,6 +421,10 @@
                 grid.append(card);
             });
         sec.append(grid);
+        const strip = el("div", "mira-ov-kpi-alert-strip");
+        strip.id = "mira-ov-kpi-alert-strip";
+        strip.hidden = true;
+        sec.append(strip);
         return sec;
     }
 
@@ -375,11 +432,14 @@
 
     function buildPredictiveSection() {
         const sec = el("section", "mira-ov-pred-section");
-        sec.append(el("div", "mira-ov-section-label", "Predictive Issue & Asset Parts Intelligence"));
+        sec.append(el("div", "mira-ov-section-label", "Recurring Machine Issue Forecast"));
         sec.append(el("p", "mira-ov-pred-subtitle",
-            "Evidence-based issue trends by machine group using repeated MR/WO symptoms, MTBF signals, and verified spare-parts history."));
+            "Evidence-based recurrence forecasts by specific machine, derived from repeated MR patterns, MTBF signals, and available spare-parts history."));
+        const kpiStrip = el("div", "mira-pred-kpi-strip");
+        kpiStrip.id = "mira-pred-kpi-strip";
+        sec.append(kpiStrip);
         sec.append(el("p", "mira-ov-disclaimer",
-            "AI-classified for review only. MIRA never assigns severity. Escalation flags are candidates only. Spare recommendations are based only on available spare parts and purchase history."));
+            "AI-classified for review only. MIRA does not assign severity. Forecasts are based on available MR, asset, spare-part, and purchase history."));
         const catsWrap = el("div", "mira-pred-cats-wrap");
         catsWrap.id = "mira-pred-cats-body";
         catsWrap.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-lg\" style=\"height:120px\"></div>";
@@ -475,6 +535,13 @@
         return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
     }
 
+    function _shortDate(value) {
+        if (!value) return "—";
+        var d = new Date(String(value).slice(0, 10));
+        if (isNaN(d.getTime())) return String(value).slice(0, 10);
+        return d.toLocaleDateString("en-GB", { month: "short", day: "numeric" });
+    }
+
     function _stockTone(status) {
         var text = String(status || "").toLowerCase();
         if (text.indexOf("in stock") >= 0) return "in";
@@ -511,27 +578,26 @@
     }
 
     function _buildSpareStatsPanel(m) {
-        var parts = m.suggested_spare_parts || m.spare_parts || [];
+        var parts = m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts || [];
         var wrap = el("div", "mira-pred-spare-panel");
+        wrap.append(el("div", "mira-pred-issue-others-title", "Spare Parts to Prepare"));
         wrap.append(_buildPredictiveDetailBlock("Recommendation Basis",
             m.spare_recommendation_basis || "Review available spare records only."));
         if (!parts.length) {
             wrap.append(el("p", "mira-pred-empty-note",
                 "No confirmed spare part found. Manual review required."));
+            wrap.append(el("p", "mira-pred-nextdue-basis", "Technician/Engineer verification required before action."));
             return wrap;
         }
         var ov = el("div", "mira-pred-spare-ov");
-        ov.textContent = parts.length + " confirmed spare part" + (parts.length !== 1 ? "s" : "") +
-            " · " + (m.spare_linked_transaction_count || 0) + " linked store transaction" +
-            ((m.spare_linked_transaction_count || 0) !== 1 ? "s" : "") +
-            " · " + (m.spare_linked_wo_count || 0) + " related WO" +
-            ((m.spare_linked_wo_count || 0) !== 1 ? "s" : "");
+        ov.textContent = parts.length + " catalogue spare part" + (parts.length !== 1 ? "s" : "") +
+            " to prepare · Gen PO validates history only · inventory confirms stock only";
         wrap.append(ov);
         var tbl = document.createElement("table");
         tbl.className = "mira-pred-spare-tbl";
         var thead = document.createElement("thead");
         var hrow = document.createElement("tr");
-        ["Suggested Spare Part", "Source", "Stock", "Qty / History", "Latest Activity", "Est. Value"].forEach(function(h) {
+        ["Spare Part", "Reason", "Gen PO Validation", "Last Purchased / YTD", "On-hand Qty", "Stock Status", "Action"].forEach(function(h) {
             hrow.appendChild(el("th", null, h));
         });
         thead.appendChild(hrow);
@@ -539,19 +605,19 @@
         var tbody = document.createElement("tbody");
         parts.forEach(function(p) {
             var tr = document.createElement("tr");
-            var qtyBits = [];
-            if (p.current_quantity != null) qtyBits.push("On hand " + _formatPredictiveQty(p.current_quantity));
-            if (p.usage_rows) qtyBits.push(p.usage_rows + " usage");
-            if (p.purchase_rows) qtyBits.push(p.purchase_rows + " PO");
-            var latestActivity = [p.last_used, p.last_purchase_date]
-                .filter(function(value) { return !!value; })
-                .sort()
-                .slice(-1)[0];
+            var partName = typeof p === "string" ? p : (p && (p.label || p.name || p.part_name || p.item_code) || "Spare part");
+            var itemCode = p && (p.item_code || p.code) || "";
+            var ytdBits = [];
+            var lastDate = p.last_purchased_date || p.last_purchase_date;
+            if (lastDate) ytdBits.push("Last " + _formatPredictiveDate(lastDate));
+            if (p.ytd_po_count != null) ytdBits.push((p.ytd_po_count || 0) + " YTD PO");
+            if (p.total_ytd_qty_purchased != null) ytdBits.push("Qty " + _formatPredictiveQty(p.total_ytd_qty_purchased));
 
             // Description cell — label + evidence tag chips
             var descCell = document.createElement("td");
             descCell.className = "mira-pred-spare-desc";
-            descCell.appendChild(document.createTextNode(p.label || p.item_code || "—"));
+            descCell.appendChild(document.createTextNode(partName));
+            if (itemCode) descCell.appendChild(el("div", "mira-pred-spare-po-detail", "Item: " + itemCode));
             var evTags = p.evidence_tags || [];
             if (evTags.length) {
                 var tagWrap = el("div", "mira-pred-ev-tags");
@@ -561,36 +627,241 @@
                 descCell.appendChild(tagWrap);
             }
 
-            // Source cell — source label + PO traceability sub-text
-            var sourceCell = document.createElement("td");
-            sourceCell.className = "mira-pred-spare-source";
-            sourceCell.appendChild(document.createTextNode(p.source || "—"));
-            var poDetails = [];
-            if (p.last_po_no) poDetails.push("PO: " + p.last_po_no);
-            if (p.po_vendor) poDetails.push(p.po_vendor);
-            if (p.po_stage) poDetails.push(p.po_stage);
-            if (p.machine_detection_confidence && p.machine_detection_confidence !== "High") {
-                poDetails.push(p.machine_detection_confidence + " confidence");
-            }
-            if (poDetails.length) {
-                sourceCell.appendChild(el("div", "mira-pred-spare-po-detail", poDetails.join(" · ")));
-            }
-
             var stockTd = document.createElement("td");
             stockTd.append(_buildStockBadge(p.stock_status));
             [
                 descCell,
-                sourceCell,
+                el("td", "mira-pred-spare-source", p.match_reason || "Stage 1 catalogue match"),
+                el("td", "mira-pred-spare-history", p.gen_po_validation_status || "No Gen PO purchase history found"),
+                el("td", "mira-pred-spare-history", ytdBits.join(" · ") || "—"),
+                el("td", null, p.on_hand_qty != null ? _formatPredictiveQty(p.on_hand_qty) : "—"),
                 stockTd,
-                el("td", "mira-pred-spare-history", qtyBits.join(" · ") || "—"),
-                el("td", null, _formatPredictiveDate(latestActivity)),
-                el("td", null, _formatPredictiveMoney(p.estimated_value)),
+                el("td", "mira-pred-spare-history", p.purchase_recommendation || "Verify manually"),
             ].forEach(function(td) { tr.appendChild(td); });
             tbody.appendChild(tr);
         });
         tbl.appendChild(tbody);
         wrap.append(tbl);
+        wrap.append(el("p", "mira-pred-nextdue-basis", "Technician/Engineer verification required before action."));
         return wrap;
+    }
+
+    function _partDisplayName(p) {
+        if (typeof p === "string") return p;
+        return p && (p.label || p.name || p.part_name || p.item_code || p.code) || "Spare part";
+    }
+
+    function _partItemCode(p) {
+        return p && typeof p === "object" ? (p.item_code || p.code || "") : "";
+    }
+
+    function _buildOtherCommonFaultsPanel(m) {
+        var faults = (m.other_common_faults || []).slice(0, 5);
+        if (!faults.length) return null;
+        var wrap = el("div", "mira-pred-other-faults");
+        wrap.append(el("div", "mira-pred-issue-others-title", "Other Common Faults & Spare Parts to Prepare"));
+        wrap.append(el("p", "mira-pred-nextdue-basis",
+            "Other common faults are based on this machine's MR history and are not necessarily the next predicted issue."));
+
+        faults.forEach(function(fault, idx) {
+            var card = el("div", "mira-pred-other-fault-card");
+            var head = el("div", "mira-pred-other-fault-head");
+            head.append(el("strong", null, (idx + 1) + ". " + (fault.issue_signature || "Common fault")));
+            var countBits = [];
+            countBits.push("MR count: " + (fault.mr_count || 0));
+            if (fault.pct_of_machine_mr != null) countBits.push(fault.pct_of_machine_mr + "%");
+            head.append(el("span", "mira-pred-other-fault-count", countBits.join(" · ")));
+            card.append(head);
+
+            var meta = [];
+            if (fault.last_occurrence) meta.push("Last seen: " + _formatPredictiveDate(fault.last_occurrence));
+            if (fault.recent_example_mr_id || fault.recent_example_wo_id) {
+                meta.push("Example: " + (fault.recent_example_mr_id || fault.recent_example_wo_id));
+            }
+            if (fault.basis) meta.push(fault.basis);
+            if (meta.length) card.append(el("div", "mira-pred-spare-po-detail", meta.join(" · ")));
+            if (fault.latest_description) card.append(el("p", "mira-pred-other-fault-desc", fault.latest_description));
+            if (fault.suggested_check) card.append(el("p", "mira-pred-other-fault-check", "Suggested check: " + fault.suggested_check));
+
+            var parts = fault.spare_parts_to_prepare || [];
+            if (parts.length) {
+                var partWrap = el("div", "mira-pred-other-fault-parts");
+                partWrap.append(el("div", "mira-pred-inline-label", "Spare Parts to Prepare"));
+                parts.slice(0, 3).forEach(function(part) {
+                    var row = el("div", "mira-pred-other-part-row");
+                    var label = _partDisplayName(part);
+                    var itemCode = _partItemCode(part);
+                    row.append(el("span", "mira-pred-other-part-name", itemCode ? label + " · " + itemCode : label));
+                    row.append(_buildStockBadge(part.stock_status || "Verify manually"));
+                    row.append(el("span", "mira-pred-other-part-action", part.purchase_recommendation || "Verify manually"));
+                    partWrap.append(row);
+                });
+                if (parts.length > 3) {
+                    var partDetails = document.createElement("details");
+                    partDetails.className = "mira-pred-other-details";
+                    partDetails.append(el("summary", null, "View all related parts"));
+                    parts.slice(3, 5).forEach(function(part) {
+                        partDetails.append(el("div", "mira-pred-other-detail-line",
+                            _partDisplayName(part) + " — " + (part.stock_status || "Verify manually")));
+                    });
+                    partWrap.append(partDetails);
+                }
+                card.append(partWrap);
+            } else {
+                card.append(el("p", "mira-pred-empty-note", "No catalogue spare-part match found for this fault. Verify manually."));
+            }
+
+            card.append(el("div", "mira-pred-other-stock-action",
+                "Stock action: " + (fault.purchase_recommendation || fault.stock_status || "Verify manually")));
+            var examples = fault.examples || [];
+            if (examples.length) {
+                var exDetails = document.createElement("details");
+                exDetails.className = "mira-pred-other-details";
+                exDetails.append(el("summary", null, "View examples"));
+                examples.slice(0, 5).forEach(function(ex) {
+                    var ref = ex.mr_id || ex.wo_id || "MR";
+                    var line = [ref, _formatPredictiveDate(ex.date), ex.description || ""].filter(Boolean).join(" — ");
+                    exDetails.append(el("div", "mira-pred-other-detail-line", line));
+                });
+                card.append(exDetails);
+            }
+            wrap.append(card);
+        });
+        wrap.append(el("p", "mira-pred-nextdue-basis", "Technician/Engineer verification required before action."));
+        return wrap;
+    }
+
+    function _forecastMachineName(m) {
+        return m.unit || m.specific_machine_group || m.machine_group || m.machine_type || "Machine";
+    }
+
+    function _forecastIssueLabel(m) {
+        return (m.issue && m.issue.cluster) || m.recurring_issue || "Recurring issue";
+    }
+
+    function _forecastStockDecisionText(m) {
+        var parts = m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts || [];
+        if (parts.some(function(p) {
+            return /purchase required|reorder/i.test(String((p && (p.stock_status || p.purchase_recommendation)) || ""));
+        })) return "Check on-hand quantity. Reorder if stock is zero or below minimum.";
+        if (parts.some(function(p) {
+            return /check store|not confirmed/i.test(String((p && (p.stock_status || p.purchase_recommendation)) || ""));
+        })) return "Check actual store availability before repair. Use Gen PO history only to support vendor or purchase review.";
+        if (parts.some(function(p) {
+            return /in stock/i.test(String((p && p.stock_status) || ""));
+        })) return "Prepare the in-stock parts in store before the next repair.";
+        return "Check on-hand inventory and verify manually before purchasing.";
+    }
+
+    function _buildPredictiveWordingInput(m) {
+        var domCnt = m.dominant_count || m.mr_count || 0;
+        var total = m.mr_count || domCnt || 0;
+        var pct = total ? Math.round((Number(domCnt || 0) / Number(total || 1)) * 100) + "%" : "";
+        var parts = (m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts || [])
+            .slice(0, 5)
+            .map(_partDisplayName)
+            .filter(Boolean);
+        return {
+            machine: _forecastMachineName(m),
+            selectedIssue: _forecastIssueLabel(m),
+            mrCount: domCnt,
+            totalMachineMr: total,
+            percentage: pct,
+            latestOccurrence: m.cluster_last_occurrence || m.last_occurrence || null,
+            medianInterval: m.recurrence_interval_days != null ? String(m.recurrence_interval_days) + " days" : null,
+            relatedKeywords: uniqueStrings(m.symptom_keywords || []).slice(0, 8),
+            likelyCause: m.likely_cause_candidate || "",
+            sparePartsToPrepare: parts,
+            stockDecision: _forecastStockDecisionText(m),
+        };
+    }
+
+    function _fallbackPredictiveWording(m) {
+        var data = _buildPredictiveWordingInput(m);
+        var bits = [data.machine + " has repeated " + data.selectedIssue + " records"];
+        if (data.mrCount && data.totalMachineMr) bits.push("appearing in " + data.mrCount + " of " + data.totalMachineMr + " MR records");
+        if (data.percentage) bits.push("(" + data.percentage + ")");
+        if (data.latestOccurrence) bits.push("latest case " + _formatPredictiveDate(data.latestOccurrence));
+        if (data.relatedKeywords.length) bits.push("keywords: " + data.relatedKeywords.slice(0, 5).join(", "));
+        var action = data.likelyCause || ("Inspect the machine area related to " + data.selectedIssue + ".");
+        if (data.sparePartsToPrepare.length) action += " Prepare: " + data.sparePartsToPrepare.join(", ") + ".";
+        action += " " + data.stockDecision;
+        return {
+            faultPatternSummary: bits.join(". ") + ".",
+            suggestedAction: action,
+            technicianNote: "Technician/Engineer verification required before action.",
+        };
+    }
+
+    function _buildWordingBlock(label, text) {
+        var block = el("div", "mira-pred-detail-block mira-pred-wording-block");
+        block.append(el("div", "mira-pred-detail-label", label));
+        block.append(el("div", "mira-pred-detail-value", text || "—"));
+        return block;
+    }
+
+    function _buildPredictiveWordingSection(m) {
+        var fallback = _fallbackPredictiveWording(m);
+        var section = _drawerSection("Fault Pattern Summary");
+        section.classList.add("mira-pred-wording-section");
+        var grid = el("div", "mira-pred-wording-grid");
+        var summary = _buildWordingBlock("Fault Pattern Summary", fallback.faultPatternSummary);
+        var action = _buildWordingBlock("Suggested Action", fallback.suggestedAction);
+        var note = _buildWordingBlock("Technician Note", fallback.technicianNote);
+        grid.append(summary, action, note);
+        section.append(grid);
+        section._wordingNodes = {
+            summary: summary.querySelector(".mira-pred-detail-value"),
+            action: action.querySelector(".mira-pred-detail-value"),
+            note: note.querySelector(".mira-pred-detail-value"),
+        };
+        return section;
+    }
+
+    function _predictiveWordingCacheKey(m) {
+        return [
+            filtersSignature(),
+            predictiveCategoryView || "",
+            _forecastMachineName(m),
+            _forecastIssueLabel(m),
+            m.asset_id || "",
+            m.rank || "",
+        ].join("|");
+    }
+
+    function _applyPredictiveWording(section, wording) {
+        if (!section || !section._wordingNodes || !wording) return;
+        section._wordingNodes.summary.textContent = wording.faultPatternSummary || section._wordingNodes.summary.textContent;
+        section._wordingNodes.action.textContent = wording.suggestedAction || section._wordingNodes.action.textContent;
+        section._wordingNodes.note.textContent = wording.technicianNote || "Technician/Engineer verification required before action.";
+    }
+
+    function _requestPredictiveWording(m, section) {
+        var key = _predictiveWordingCacheKey(m);
+        section.dataset.wordingKey = key;
+        if (predictiveWordingCache[key]) {
+            _applyPredictiveWording(section, predictiveWordingCache[key]);
+            return;
+        }
+        var request = fetchJsonWithTimeout(`${API}/predictive-wording`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            cache: "no-store",
+            body: JSON.stringify({
+                cacheKey: key,
+                structured: _buildPredictiveWordingInput(m),
+            }),
+        }, 8000);
+        request.promise
+            .then(function(json) {
+                var wording = json && json.wording;
+                if (!wording || section.dataset.wordingKey !== key) return;
+                predictiveWordingCache[key] = wording;
+                _applyPredictiveWording(section, wording);
+            })
+            .catch(function() {
+                debugLog("predictive-wording:fallback", { key: key });
+            });
     }
 
     function _buildIssuePanel(m) {
@@ -631,8 +902,7 @@
         var summaryGrid = el("div", "mira-pred-issue-summary-grid");
         summaryGrid.append(
             _buildPredictiveDetailBlock("Main Observed Issue", m.main_observed_issue || m.recurring_issue || "—"),
-            _buildPredictiveDetailBlock("Evidence", m.evidence_summary || "—"),
-            _buildPredictiveDetailBlock("Likely Cause Candidate", m.likely_cause_candidate || "—")
+            _buildPredictiveDetailBlock("Evidence", m.evidence_summary || "—")
         );
         var confBlock = el("div", "mira-pred-detail-block");
         confBlock.append(el("div", "mira-pred-detail-label", "Confidence"));
@@ -643,6 +913,11 @@
         confBlock.append(confWrap);
         summaryGrid.append(confBlock);
         wrap.append(summaryGrid);
+
+        var otherCommonFaults = _buildOtherCommonFaultsPanel(m);
+        if (otherCommonFaults) wrap.append(otherCommonFaults);
+
+        wrap.append(_buildPredictiveDetailBlock("Likely Cause Candidate", m.likely_cause_candidate || "—"));
 
         if (m.escalation && m.escalation.triggered) {
             var escNote = el("div", "mira-pred-escalation-callout");
@@ -718,179 +993,300 @@
         return wrap;
     }
 
+    // ── Alert strip state (accumulated from all three KPI cards) ─────────────
+    var _sectionAttentionNotes = {};
+
+    // ── Forecast Drawer ───────────────────────────────────────────────────────
+    var _forecastDrawerEl = null;
+    var _forecastDrawerBodyEl = null;
+    var _forecastDrawerTitleEl = null;
+
+    function _ensureForecastDrawer() {
+        if (_forecastDrawerEl) return;
+        var overlay = el("div", "mira-pred-drawer-overlay");
+        overlay.id = "mira-pred-drawer-overlay";
+        overlay.addEventListener("click", function(e) {
+            if (e.target === overlay) _closeForecastDrawer();
+        });
+        var drawer = el("div", "mira-pred-drawer");
+        var head = el("div", "mira-pred-drawer-head");
+        _forecastDrawerTitleEl = el("span", "mira-pred-drawer-title", "");
+        var closeBtn = el("button", "mira-pred-drawer-close", "×");
+        closeBtn.type = "button";
+        closeBtn.setAttribute("aria-label", "Close");
+        closeBtn.addEventListener("click", _closeForecastDrawer);
+        head.append(_forecastDrawerTitleEl, closeBtn);
+        _forecastDrawerBodyEl = el("div", "mira-pred-drawer-body");
+        drawer.append(head, _forecastDrawerBodyEl);
+        overlay.append(drawer);
+        document.body.appendChild(overlay);
+        _forecastDrawerEl = overlay;
+    }
+
+    function _openForecastDrawer(m, mode) {
+        _ensureForecastDrawer();
+        var machineName = m.unit || m.specific_machine_group || m.machine_group || "Machine";
+        var issueCluster = (m.issue && m.issue.cluster) || m.recurring_issue || "Forecast";
+        _forecastDrawerTitleEl.textContent = machineName + " — " + issueCluster;
+        _forecastDrawerBodyEl.innerHTML = "";
+        _forecastDrawerBodyEl.scrollTop = 0;
+        if (mode === "spare") {
+            _forecastDrawerBodyEl.append(_buildSpareStatsPanel(m));
+        } else {
+            _forecastDrawerBodyEl.append(_buildForecastDrawerContent(m));
+        }
+        _forecastDrawerEl.classList.add("mira-pred-drawer-open");
+    }
+
+    function _closeForecastDrawer() {
+        if (_forecastDrawerEl) _forecastDrawerEl.classList.remove("mira-pred-drawer-open");
+    }
+
+    function _drawerSection(title) {
+        var sec = el("div", "mira-pred-drawer-section");
+        sec.append(el("div", "mira-pred-drawer-section-title", title));
+        return sec;
+    }
+
+    function _drawerKV(k, v) {
+        var wrap = el("div", "mira-pred-drawer-kv");
+        wrap.append(el("div", "mira-pred-drawer-k", k));
+        wrap.append(el("div", "mira-pred-drawer-v", v != null ? String(v) : "—"));
+        return wrap;
+    }
+
+    function _buildForecastDrawerContent(m) {
+        var wrap = el("div", "mira-pred-drawer-content");
+        var timing = m.timing || {};
+
+        // 1. Forecast Summary
+        var secSum = _drawerSection("Forecast Summary");
+        var dueLabel = m.likely_recurrence_label || m.recurrence_gauge || "Not enough history";
+        secSum.append(_drawerKV("Next Likely Window", dueLabel));
+        var statusLabel = timing.trend === "degrading" ? "Gap shrinking — issue recurring more frequently"
+            : timing.trend === "stabilizing" ? "Gap widening — issue recurring less frequently"
+            : "Recurring issue pattern detected";
+        secSum.append(_drawerKV("Pattern Status", statusLabel));
+        var confKV = el("div", "mira-pred-drawer-kv");
+        confKV.append(el("div", "mira-pred-drawer-k", "Confidence"));
+        var confV = el("div", "mira-pred-drawer-v mira-pred-drawer-v-flex");
+        confV.append(_buildConfidenceBadge(m.confidence));
+        if (m.confidence_reason) confV.append(el("span", "mira-pred-drawer-conf-sub", m.confidence_reason));
+        confKV.append(confV);
+        secSum.append(confKV);
+        wrap.append(secSum);
+
+        // 2. Issue Signature
+        var issueCluster = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
+        var secIssue = _drawerSection("Issue Signature");
+        var pillWrap = el("div", "mira-pred-drawer-issue-pill-wrap");
+        pillWrap.append(el("span", "mira-pred-issue-pill " + _issuePillClass(issueCluster), issueCluster));
+        secIssue.append(pillWrap);
+        var proof = (m.issue && m.issue.proof) || "";
+        if (proof) secIssue.append(el("p", "mira-pred-drawer-proof", proof));
+        var symptomTerms = uniqueStrings(m.symptom_keywords || []).slice(0, 8);
+        if (symptomTerms.length) {
+            secIssue.append(el("div", "mira-pred-inline-label", "Related keywords"));
+            var chips = el("div", "mira-pred-chip-row");
+            symptomTerms.forEach(function(t) { chips.append(el("span", "mira-pred-issue-chip", t)); });
+            secIssue.append(chips);
+        }
+        wrap.append(secIssue);
+
+        // 3. Evidence Summary
+        var secEv = _drawerSection("Evidence Summary");
+        var evRows = [];
+        var clusterDate = m.cluster_last_occurrence || m.last_occurrence;
+        var domCnt = m.dominant_count || m.mr_count || 0;
+        if (domCnt) evRows.push(["Related MR", String(domCnt) + (m.mr_count && m.mr_count !== domCnt ? " (of " + m.mr_count + " total)" : "")]);
+        if (clusterDate) evRows.push(["Latest occurrence", _formatPredictiveDate(clusterDate)]);
+        if (timing.median_gap_days != null) evRows.push(["Median interval", "~" + timing.median_gap_days + "d"]);
+        if (m.recurrence_interval_avg_days != null) evRows.push(["Average interval", "~" + m.recurrence_interval_avg_days + "d"]);
+        if (m.mtbf_days != null) evRows.push(["MTBF (all issues)", "~" + m.mtbf_days + "d"]);
+        if (m.recurrence_interval_n != null) evRows.push(["Clean intervals", String(m.recurrence_interval_n)]);
+        var evTbl = document.createElement("table");
+        evTbl.className = "mira-pred-rec-tbl";
+        var evBody = document.createElement("tbody");
+        evRows.forEach(function(pair) {
+            var tr = document.createElement("tr");
+            tr.appendChild(el("td", "mira-pred-rec-lbl", pair[0]));
+            tr.appendChild(el("td", "mira-pred-rec-val", pair[1]));
+            evBody.appendChild(tr);
+        });
+        evTbl.appendChild(evBody);
+        secEv.append(evTbl);
+        wrap.append(secEv);
+
+        // 4. Optional wording layer (Ollama if available; rule-based fallback immediately)
+        var wordingSection = _buildPredictiveWordingSection(m);
+        wrap.append(wordingSection);
+        window.setTimeout(function() { _requestPredictiveWording(m, wordingSection); }, 0);
+
+        // 4. Likely Cause Candidate
+        if (m.likely_cause_candidate) {
+            var secCause = _drawerSection("Likely Cause Candidate");
+            secCause.append(el("p", "mira-pred-cause-copy", m.likely_cause_candidate));
+            secCause.append(el("p", "mira-pred-nextdue-basis", "Candidate only — review required before any action."));
+            wrap.append(secCause);
+        }
+
+        // 5. Spare-Part Signal
+        var secSpare = _drawerSection("Spare-Part Signal");
+        var spareStatusRow = el("div", "mira-pred-drawer-spare-status");
+        var stockStatus = m.stock_status || "Unknown";
+        spareStatusRow.append(_buildStockBadge(stockStatus));
+        if (m.spare_lead && m.spare_lead.item_label) {
+            spareStatusRow.append(el("span", "mira-pred-drawer-spare-name", m.spare_lead.item_label));
+        } else if (!m.spare_available) {
+            spareStatusRow.append(el("span", "mira-pred-detail-muted", "No spare-part support found in records."));
+        }
+        secSpare.append(spareStatusRow);
+        var spareKit = m.spare_kit || [];
+        if (spareKit.length) {
+            secSpare.append(el("div", "mira-pred-inline-label", "Spare family"));
+            var kitChips = el("div", "mira-pred-chip-row");
+            spareKit.slice(0, 5).forEach(function(s) { kitChips.append(el("span", "mira-pred-issue-chip", _partDisplayName(s))); });
+            secSpare.append(kitChips);
+        }
+        wrap.append(secSpare);
+
+        // 6. Recent Examples (max 3, "Show full MR history" for the rest)
+        var allEvidence = m.issue_evidence || [];
+        if (allEvidence.length) {
+            var secEx = _drawerSection("Recent Examples");
+            var exTbl = document.createElement("table");
+            exTbl.className = "mira-pred-issue-ev-tbl";
+            var exBody = document.createElement("tbody");
+            allEvidence.slice(0, 3).forEach(function(e) {
+                var tr = document.createElement("tr");
+                tr.appendChild(el("td", "mira-pred-issue-ev-ref", e.mr_id || e.wo_id || "—"));
+                tr.appendChild(el("td", "mira-pred-issue-ev-date", _formatPredictiveDate(e.date)));
+                var descCell = document.createElement("td");
+                descCell.className = "mira-pred-issue-ev-desc";
+                descCell.textContent = e.translated_description || e.description || "—";
+                tr.appendChild(descCell);
+                exBody.appendChild(tr);
+            });
+            exTbl.appendChild(exBody);
+            secEx.append(exTbl);
+            if (allEvidence.length > 3) {
+                var showAllBtn = el("button", "mira-pred-drawer-show-all", "Show full MR history (" + allEvidence.length + ")");
+                showAllBtn.type = "button";
+                showAllBtn.addEventListener("click", function() {
+                    var addBody = document.createElement("tbody");
+                    allEvidence.slice(3).forEach(function(e) {
+                        var tr = document.createElement("tr");
+                        tr.appendChild(el("td", "mira-pred-issue-ev-ref", e.mr_id || e.wo_id || "—"));
+                        tr.appendChild(el("td", "mira-pred-issue-ev-date", _formatPredictiveDate(e.date)));
+                        var d2 = document.createElement("td");
+                        d2.className = "mira-pred-issue-ev-desc";
+                        d2.textContent = e.translated_description || e.description || "—";
+                        tr.appendChild(d2);
+                        addBody.appendChild(tr);
+                    });
+                    exTbl.appendChild(addBody);
+                    showAllBtn.remove();
+                });
+                secEx.append(showAllBtn);
+            }
+            wrap.append(secEx);
+        }
+
+        wrap.append(el("p", "mira-pred-drawer-disclaimer",
+            "AI-classified for review only. MIRA does not assign severity. Forecasts are based on available MR, asset, spare-part, and purchase history."));
+        return wrap;
+    }
+
     function _buildMachineRow(m) {
         var rowWrap = el("div", "mira-pred-mg-rowwrap");
         var main = el("div", "mira-pred-mg-row");
 
+        // 1. Rank + trend
         var rankCell = el("div", "mira-pred-mg-rankcol");
         rankCell.append(el("span", "mira-pred-rank-pill", "#" + m.rank));
         var trendWrap = el("span", "mira-pred-machine-trend");
         trendWrap.innerHTML = _trendIcon(m.trend);
         rankCell.append(trendWrap);
 
+        // 2. Machine name
         var machineCell = el("div", "mira-pred-mg-machine");
-        var machineHead = el("div", "mira-pred-machine-head");
-
-        // Display name: prefer confirmed/inferred group over raw area-level label
-        var rawGroup = m.specific_machine_group || m.machine_group || m.machine_type || "—";
-        var inferredGroup = m.inferred_machine_group;
-        var infSrc = m.inference_source || "";
-        var showInferred = inferredGroup && infSrc !== "area_level" && inferredGroup !== rawGroup;
-
-        var nameEl = el("div", "mira-pred-machine-name");
-        if (showInferred) {
-            if (infSrc === "manual_override") {
-                nameEl.textContent = inferredGroup;
-            } else {
-                var likelySpan = el("span", "mira-pred-inferred-prefix", "Likely: ");
-                nameEl.append(likelySpan);
-                nameEl.append(document.createTextNode(inferredGroup));
-            }
-        } else {
-            nameEl.textContent = rawGroup;
-        }
-        machineHead.append(nameEl);
-
-        if (m.needs_manual_review) {
-            machineHead.append(el("span", "mira-pred-review-badge", "Review required"));
-        }
-        machineCell.append(machineHead);
-
-        var machineMetaBits = [];
-        if (m.main_system) machineMetaBits.push("System: " + m.main_system);
-        if (m.group_match_confidence) machineMetaBits.push(m.group_match_confidence + " mapping");
-        if (infSrc === "ollama_description") {
-            machineMetaBits.push("Ollama · " + (m.inference_confidence || "?").toLowerCase() + " conf.");
-        } else if (infSrc === "manual_override") {
-            machineMetaBits.push("Confirmed");
-        }
-        machineCell.append(el("div", "mira-pred-machine-meta", machineMetaBits.join(" · ") || "—"));
-
-        if (infSrc === "ollama_description" && (inferredGroup || m.inference_reason)) {
-            var infSub = el("div", "mira-pred-machine-infsub");
-            var subParts = ["Detected from MR description"];
-            if (m.original_asset_names && m.original_asset_names.length) {
-                subParts.push("Original asset: " + m.original_asset_names[0]);
-            }
-            infSub.textContent = subParts.join(" · ");
-            if (m.inference_reason) infSub.title = m.inference_reason;
-            machineCell.append(infSub);
+        var unitName = m.unit || m.specific_machine_group || m.machine_group || "—";
+        machineCell.append(el("div", "mira-pred-machine-name", unitName));
+        if (m.is_critical || m.asset_id) {
+            var subRow = el("div", "mira-pred-machine-sub");
+            if (m.is_critical) subRow.append(el("span", "mira-pred-critical-badge", "Critical"));
+            if (m.asset_id) subRow.append(el("span", "mira-pred-assetid", m.asset_id));
+            machineCell.append(subRow);
         }
 
+        // 3. Recurring Issue Forecast
+        var issueCluster = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
         var issueCell = el("div", "mira-pred-mg-issue");
-        issueCell.append(el("div", "mira-pred-main-issue", m.main_observed_issue || m.recurring_issue || "—"));
-        var issueMeta = el("div", "mira-pred-main-issue-meta");
-        if (m.recurring_issue) {
-            var issuePill = el("span", "mira-pred-issue-pill " + _issuePillClass(m.recurring_issue), m.recurring_issue);
-            var iconf = m.recurring_issue_confidence;
-            if (iconf && iconf !== "High") {
-                issuePill.append(el("span", "mira-pred-issue-conf mira-pred-issue-conf-" + iconf.toLowerCase(), iconf === "Low" ? " ?" : " ~"));
-                issuePill.title = (iconf === "Low" ? "Low confidence — " : "Medium confidence — ") +
-                    (m.recurring_issue_reason || "derived from clustered descriptions");
-            }
-            issueMeta.append(issuePill);
-        }
-        if (m.escalation && m.escalation.triggered) {
-            issueMeta.append(el("span", "mira-pred-escalation-flag", "Escalation candidate"));
-        }
-        issueCell.append(issueMeta);
+        issueCell.append(el("span", "mira-pred-issue-pill " + _issuePillClass(issueCluster), issueCluster));
+        var proof = (m.issue && m.issue.proof) || "";
+        if (proof) issueCell.append(el("div", "mira-pred-issue-proof", proof));
 
-        // MR Count column
-        var countCell = el("div", "mira-pred-mg-count");
-        var cnt = m.mr_count || m.dominant_count || 0;
-        countCell.append(el("div", "mira-pred-count-num", String(cnt)));
-        countCell.append(el("div", "mira-pred-count-lbl", "MR"));
-
-        var assetsCell = el("div", "mira-pred-mg-assets");
-        var relatedAssets = m.related_assets || [];
-        if (m.is_area_level) {
-            if (m.original_asset_names && m.original_asset_names.length) {
-                assetsCell.append(el("div", "mira-pred-detail-muted",
-                    "Original: " + m.original_asset_names.join(", ")));
-            } else {
-                assetsCell.append(el("div", "mira-pred-detail-muted", "Area-level MR / machine not specified"));
-            }
-        } else if (relatedAssets.length) {
-            relatedAssets.slice(0, 3).forEach(function(asset) {
-                assetsCell.append(el("span", "mira-pred-asset-chip",
-                    (asset.asset_name || "Asset") + (asset.mr_count ? " (" + asset.mr_count + ")" : "")));
-            });
-        } else if (m.asset_count) {
-            assetsCell.append(el("div", "mira-pred-detail-muted", m.asset_count + " related asset" + (m.asset_count === 1 ? "" : "s")));
-        } else {
-            assetsCell.append(el("div", "mira-pred-detail-muted", "No specific asset listed"));
+        // 4. Pattern Signal — "15 MR · Last Jun 17 · Gap ~37d"
+        var timing = m.timing || {};
+        var signalCell = el("div", "mira-pred-mg-signal");
+        var cnt = m.dominant_count || m.mr_count || 0;
+        var sigParts = [cnt + " MR"];
+        var lastDate = m.cluster_last_occurrence || m.last_occurrence;
+        if (lastDate) sigParts.push("Last " + _shortDate(lastDate));
+        if (timing.median_gap_days != null) sigParts.push("Gap ~" + timing.median_gap_days + "d");
+        signalCell.append(el("div", "mira-pred-signal-text", sigParts.join(" · ")));
+        if (timing.trend && timing.trend !== "stable") {
+            var trendNote = timing.trend === "degrading" ? "Gap shrinking" : "Gap widening";
+            signalCell.append(el("div", "mira-pred-signal-trend mira-pred-signal-trend-" + timing.trend, trendNote));
         }
 
-        // Recurrence Timing column — rough future-facing bands only, no exact dates.
+        // 5. Next Likely Window
         var nextDueCell = el("div", "mira-pred-mg-nextdue");
-        var dueLabel = m.recurrence_gauge || m.likely_recurrence_label || "Not enough history";
+        var dueLabel = m.likely_recurrence_label || m.recurrence_gauge || "Not enough history";
         var dueTone = "";
-        if (/recurring pattern active/i.test(dueLabel))       dueTone = " mira-pred-nextdue-active";
-        else if (/within days/i.test(dueLabel))               dueTone = " mira-pred-nextdue-soon";
-        else if (/within 1 week/i.test(dueLabel))             dueTone = " mira-pred-nextdue-soon";
-        else if (/within 2 weeks/i.test(dueLabel))            dueTone = " mira-pred-nextdue-month";
-        else if (/within 1 month/i.test(dueLabel))            dueTone = " mira-pred-nextdue-month";
-        else if (/not enough history|insufficient/i.test(dueLabel)) dueTone = " mira-pred-nextdue-unknown";
+        if (/anytime now/i.test(dueLabel))                            dueTone = " mira-pred-nextdue-now";
+        else if (/within 1 week/i.test(dueLabel))                    dueTone = " mira-pred-nextdue-soon";
+        else if (/within 2 weeks/i.test(dueLabel))                   dueTone = " mira-pred-nextdue-soon";
+        else if (/within 1 month/i.test(dueLabel))                   dueTone = " mira-pred-nextdue-month";
+        else if (/1.3 months/i.test(dueLabel))                       dueTone = " mira-pred-nextdue-months";
+        else if (/monitor|not enough|insufficient/i.test(dueLabel))  dueTone = " mira-pred-nextdue-unknown";
         nextDueCell.append(el("div", "mira-pred-nextdue-label" + dueTone, dueLabel));
-        nextDueCell.append(el("div", "mira-pred-nextdue-basis", "Based on repeated MR/WO pattern"));
 
+        // 6. Confidence + stock
         var confidenceCell = el("div", "mira-pred-mg-confidence");
         confidenceCell.append(_buildConfidenceBadge(m.confidence));
-        confidenceCell.append(el("div", "mira-pred-confidence-copy",
-            m.confidence_reason || "Review issue history and parts evidence."));
-        // Compact stock badge inline under confidence (saves a full column)
-        if (m.stock_status) {
-            var stockInline = el("div", "mira-pred-stock-inline");
-            stockInline.append(_buildStockBadge(m.stock_status));
-            confidenceCell.append(stockInline);
+        var confSub = m.confidence_reason || "";
+        if (confSub.length > 65) confSub = confSub.slice(0, 62) + "…";
+        confidenceCell.append(el("div", "mira-pred-confidence-copy", confSub));
+        if (m.stock_status && m.stock_status !== "Unknown") {
+            confidenceCell.append(_buildStockBadge(m.stock_status));
         }
 
-        var toggleWrap = el("div", "mira-pred-mg-toggle");
-        var panelsWrap = el("div", "mira-pred-panels-wrap");
-
-        var issueToggleBtn = el("button", "mira-pred-toggle-btn", "View Issues");
-        issueToggleBtn.type = "button";
-        var issuePanel = null;
-        var issueOpen = false;
-        issueToggleBtn.addEventListener("click", function() {
-            issueOpen = !issueOpen;
-            issueToggleBtn.textContent = issueOpen ? "Hide Issues" : "View Issues";
-            if (issueOpen && !issuePanel) {
-                issuePanel = _buildIssuePanel(m);
-                panelsWrap.append(issuePanel);
-            }
-            if (issuePanel) issuePanel.style.display = issueOpen ? "block" : "none";
-        });
-        toggleWrap.append(issueToggleBtn);
-
-        var spareToggleBtn = el("button", "mira-pred-toggle-btn mira-pred-toggle-btn-secondary", "View Spare Parts");
-        spareToggleBtn.type = "button";
-        var sparePanel = null;
-        var spareOpen = false;
-        spareToggleBtn.addEventListener("click", function() {
-            spareOpen = !spareOpen;
-            spareToggleBtn.textContent = spareOpen ? "Hide Spare Parts" : "View Spare Parts";
-            if (spareOpen && !sparePanel) {
-                sparePanel = _buildSpareStatsPanel(m);
-                panelsWrap.append(sparePanel);
-            }
-            if (sparePanel) sparePanel.style.display = spareOpen ? "block" : "none";
-        });
-        toggleWrap.append(spareToggleBtn);
-
-        if (m.escalation && m.escalation.triggered) {
-            toggleWrap.append(el("div", "mira-pred-toggle-note", "Escalation candidate only"));
+        // 7. Action buttons — open drawer (no inline expand)
+        var actionCell = el("div", "mira-pred-mg-toggle");
+        var viewBtn = el("button", "mira-pred-toggle-btn", "View Pattern");
+        viewBtn.type = "button";
+        viewBtn.addEventListener("click", function() { _openForecastDrawer(m, "pattern"); });
+        actionCell.append(viewBtn);
+        if (m.spare_available || (m.spare_parts_to_prepare && m.spare_parts_to_prepare.length) || (m.spare_parts && m.spare_parts.length)) {
+            var spareBtn = el("button", "mira-pred-toggle-btn mira-pred-toggle-btn-secondary", "Spare Parts");
+            spareBtn.type = "button";
+            spareBtn.addEventListener("click", function() { _openForecastDrawer(m, "spare"); });
+            actionCell.append(spareBtn);
+        }
+        if (m.is_critical) {
+            actionCell.append(el("div", "mira-pred-toggle-note", "Critical asset"));
         }
 
-        main.append(rankCell, machineCell, issueCell, countCell, assetsCell, nextDueCell, confidenceCell, toggleWrap);
-        rowWrap.append(main, panelsWrap);
+        main.append(rankCell, machineCell, issueCell, signalCell, nextDueCell, confidenceCell, actionCell);
+        rowWrap.append(main);
         return rowWrap;
     }
 
     function _buildCategorySection(cat, availableCats) {
         var sec = el("div", "mira-pred-cat-section");
         var hdr = el("div", "mira-pred-cat-header");
-        hdr.append(el("span", "mira-pred-cat-name", "Recurring Issue Intelligence by Specific Machine Group"));
+        hdr.append(el("span", "mira-pred-cat-name", "Top 5 Specific Machines — Recurring Issue Forecast"));
         var controls = el("div", "mira-pred-cat-controls");
         if (availableCats && availableCats.length > 1) {
             var field = el("label", "mira-pred-cat-select-field");
@@ -920,17 +1316,38 @@
         }
         var colHdr = el("div", "mira-pred-mg-colhdr");
         [["mira-pred-mg-rankcol", "Rank"],
-         ["mira-pred-mg-machine", "Specific Machine Group"],
-         ["mira-pred-mg-issue", "Main Observed Issue"],
-         ["mira-pred-mg-count", "MR Count"],
-         ["mira-pred-mg-assets", "Related Assets"],
-         ["mira-pred-mg-nextdue", "Recurrence Timing"],
+         ["mira-pred-mg-machine", "Machine"],
+         ["mira-pred-mg-issue", "Recurring Issue Forecast"],
+         ["mira-pred-mg-signal", "Pattern Signal"],
+         ["mira-pred-mg-nextdue", "Next Likely Window"],
          ["mira-pred-mg-confidence", "Confidence"],
-         ["mira-pred-mg-toggle", "Actions"]
+         ["mira-pred-mg-toggle", "Action"]
         ].forEach(function(pair) { colHdr.append(el("span", pair[0], pair[1])); });
         sec.append(colHdr);
         machines.forEach(function(m) { sec.append(_buildMachineRow(m)); });
         return sec;
+    }
+
+    function _renderPredKpiStrip(d) {
+        var strip = document.getElementById("mira-pred-kpi-strip");
+        if (!strip) return;
+        strip.innerHTML = "";
+        if (!d || d.empty || !d.categories) return;
+        var totalMR = d.total_mrs || 0;
+        var allMachines = [];
+        (d.categories || []).forEach(function(cat) {
+            (cat.top_machines || []).forEach(function(m) { allMachines.push(m); });
+        });
+        var withSpare = allMachines.filter(function(m) {
+            return m.spare_available || (m.spare_parts && m.spare_parts.length > 0);
+        }).length;
+        var bits = [
+            totalMR + " MR scanned",
+            allMachines.length + " recurring pattern" + (allMachines.length !== 1 ? "s" : ""),
+            allMachines.length + " machine" + (allMachines.length !== 1 ? "s" : "") + " flagged",
+            withSpare + " with spare support"
+        ];
+        strip.append(el("span", "mira-pred-kpi-text", bits.join(" · ")));
     }
 
     function _renderPredCategories(d) {
@@ -938,6 +1355,7 @@
         if (!host) return;
         host.innerHTML = "";
         predictiveLatestPayload = d;
+        _renderPredKpiStrip(d);
         if (d.empty || !d.categories || !d.categories.length) {
             host.innerHTML = "<p class=\"mira-ov-muted\">No data for this period.</p>";
             return;
@@ -1459,6 +1877,18 @@
         arr.forEach((t) => node.append(el("li", tone === "warn" ? "mira-ov-warn" : null, String(t))));
     }
 
+    function _updateAlertStrip() {
+        const strip = document.getElementById("mira-ov-kpi-alert-strip");
+        if (!strip) return;
+        const notes = Object.values(_sectionAttentionNotes).filter(Boolean);
+        if (!notes.length) { strip.hidden = true; strip.innerHTML = ""; return; }
+        strip.hidden = false;
+        strip.innerHTML = "";
+        const icon = el("span", "mira-ov-alert-strip-icon", "⚠");
+        const content = el("span", "mira-ov-alert-strip-content", notes.join("  ·  "));
+        strip.append(icon, content);
+    }
+
     function renderSection(id, section) {
         const host = document.getElementById(id);
         if (!host) return;
@@ -1467,11 +1897,18 @@
             host.append(el("p", "mira-ov-muted", "No data available for the selected period."));
             return;
         }
+        // Health badge
+        const key = id.replace("mira-ov-kpi-", "");
+        const badge = document.getElementById(`mira-ov-health-${key}`);
+        if (badge && section.health_status) {
+            badge.textContent = section.health_status;
+            badge.className = `mira-ov-health-badge mira-ov-health-${section.health_status.toLowerCase()}`;
+        }
+        // Limit to 4 metrics
         const grid = el("div", "mira-ov-chip-grid");
-        section.metrics.forEach((m) => {
+        (section.metrics || []).slice(0, 4).forEach((m) => {
             const chip = el("div", `mira-ov-kpi-chip mira-tone-${m.tone || "neutral"}`);
             chip.append(el("span", "mira-ov-chip-label", m.label), el("strong", "mira-ov-chip-value", m.value));
-            // Per-KPI notes move to a hover tooltip so the card stays clean and scannable.
             if (m.note) { chip.title = `${m.label}: ${m.value} — ${m.note}`; chip.classList.add("mira-ov-chip-has-note"); }
             grid.append(chip);
         });
@@ -1481,14 +1918,9 @@
             const warn = el("div", "mira-ov-pm-warning", "⚠ " + section.completion_warning);
             host.append(warn);
         }
-        // Long explanation text collapses into a "Notes" expander (kept, not removed).
-        if (section.summary || section.footnote) {
-            const det = el("details", "mira-ov-section-details");
-            det.append(el("summary", "mira-ov-details-summary", "Notes"));
-            if (section.summary) det.append(el("p", "mira-ov-section-summary", section.summary));
-            if (section.footnote) det.append(el("p", "mira-ov-footnote", section.footnote));
-            host.append(det);
-        }
+        // Feed shared alert strip
+        _sectionAttentionNotes[id] = section.attention_note || null;
+        _updateAlertStrip();
     }
 
     function renderPredictiveAnalysis(analysis) {
@@ -2063,6 +2495,406 @@
         const value = String(text || "").replace(/\s+/g, " ").trim();
         if (value.length <= maxLength) return value;
         return value.slice(0, maxLength - 1).replace(/\s+\S*$/, "") + ".";
+    }
+
+    // ── § Overview Export Report ──────────────────────────────────────────────
+    const OVC = {
+        navyBg: "1e293b", white: "FFFFFF",
+        accent: "4f46e5", green: "16a34a", amber: "d97706",
+        red: "dc2626", slate: "64748b", text: "1e293b",
+        lightBg: "f8fafc", border: "e2e8f0", sub: "94a3b8",
+        teal: "0891b2",
+    };
+
+    function _ovSetBtn(id, loading, label) {
+        const btn = document.getElementById(id);
+        if (!btn) return;
+        btn.disabled = loading;
+        btn.textContent = loading ? "Generating…" : label;
+    }
+    function _ovAllBtns(loading) {
+        _ovSetBtn("ov-export-ppt", loading, "PPT");
+        _ovSetBtn("ov-export-pdf", loading, "PDF");
+    }
+
+    function overviewReportData() {
+        const d = (lastOverview && lastOverview.data) || {};
+        const p = (lastOverview && lastOverview.pres) || {};
+        const pred = predictiveLatestPayload || {};
+        const wo = d.work_orders || {};
+        const pm = d.pm_schedule || {};
+        const dt = d.downtime_summary || {};
+        const sections = p.sections || {};
+        const vdu = p.view_data_used || {};
+
+        const status = deriveStatus(d);
+        const statusText = (refs.statusBadge && refs.statusBadge.textContent) || status.level;
+        const periodText = (refs.statusPeriod && refs.statusPeriod.textContent) || ("Data period: " + periodLabel());
+        const summaryLines = refs.summaryLine ? refs.summaryLine.map(l => l.textContent).filter(Boolean) : [];
+
+        const dqChips = [];
+        if (refs.dataQualityChips) {
+            refs.dataQualityChips.querySelectorAll(".mira-ov-dq-chip").forEach(chip => {
+                const lbl = chip.querySelector(".mira-ov-chip-label");
+                const val = chip.querySelector(".mira-ov-chip-value");
+                if (lbl && val) dqChips.push({ label: lbl.textContent, value: val.textContent, warn: chip.classList.contains("mira-ov-dq-chip-warn") });
+            });
+        }
+
+        const alertRows = [];
+        if (refs.dailyAlerts) {
+            refs.dailyAlerts.querySelectorAll("tbody tr").forEach(tr => {
+                const cells = tr.querySelectorAll("td");
+                if (cells.length >= 3) alertRows.push({
+                    area: cells[0] && cells[0].textContent.trim(),
+                    flag: cells[1] && cells[1].textContent.trim(),
+                    why: cells[2] && cells[2].textContent.trim(),
+                });
+            });
+        }
+
+        const predCategories = (pred.categories || []).filter(c => c.name === "Production Equipment" || c.name === "Utilities");
+        const faultPattern = pred.fault_pattern || null;
+        const dataConfidence = pred.data_confidence || {};
+        const predKpiStrip = (document.getElementById("mira-pred-kpi-strip") || {}).textContent || "";
+
+        return {
+            filters: { periodMode: state.periodMode, year: state.year, month: state.month, stage: state.stage, label: vdu.period_label || periodLabel(), dateRange: vdu.date_range || "" },
+            statusText, periodText, summaryLines,
+            headlineKpis: p.kpi_cards || [],
+            dqChips, alertRows,
+            pmSection: sections.pm_schedule_summary || {},
+            dtSection: sections.downtime_work_order_summary || {},
+            spareSection: sections.spare_parts_summary || {},
+            predCategories, faultPattern, dataConfidence, predKpiStrip,
+            categoryView: predictiveCategoryView || "Production Equipment",
+            warnings: latestWarnings || [],
+            data: { wo, pm, dt },
+            pres: { actionItems: p.action_items || [], priorityFollowUp: p.priority_follow_up || [] },
+            exportedAt: new Date().toLocaleString(),
+        };
+    }
+
+    function _forecastPartsToPrepare(m) {
+        return (m && (m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts)) || [];
+    }
+
+    function _forecastPartNames(m, limit) {
+        var parts = _forecastPartsToPrepare(m).slice(0, limit || 3).map(function(p) {
+            return p && (p.label || p.name || p.part_name || p.item_code);
+        }).filter(Boolean);
+        return parts.join(", ") || "Verify manually";
+    }
+
+    function _forecastPurchaseStatus(m) {
+        var parts = _forecastPartsToPrepare(m);
+        if (!parts.length) return "Check store / verify manually";
+        if (parts.some(function(p) { return /purchase required|reorder/i.test(String(p.stock_status || p.purchase_recommendation || "")); })) {
+            return "Purchase required";
+        }
+        if (parts.some(function(p) { return /check store|not confirmed/i.test(String(p.stock_status || p.purchase_recommendation || "")); })) {
+            return "Check store";
+        }
+        if (parts.every(function(p) { return /in stock/i.test(String(p.stock_status || "")); })) {
+            return "Not required";
+        }
+        return "Check store / verify manually";
+    }
+
+    // ── PPT export ─────────────────────────────────────────────────────────────
+    function exportOverviewPPT() {
+        if (!window.PptxGenJS) { alert("PPT library is still loading. Please try again in a moment."); return; }
+        if (!lastOverview) { alert("Overview data hasn’t loaded yet. Please wait and try again."); return; }
+        _ovAllBtns(true);
+        const TO = window.setTimeout(() => { _ovAllBtns(false); alert("PPT export timed out. Please try again."); }, 30000);
+        try {
+            const R = overviewReportData();
+            const pptx = new PptxGenJS();
+            pptx.layout = "LAYOUT_WIDE";
+            const period = R.filters.label + (R.filters.dateRange ? "  \xb7  " + R.filters.dateRange : "");
+            const stage = R.filters.stage === "stage1" ? "Stage 1" : R.filters.stage === "stage2" ? "Stage 2" : "All Stages";
+            const subtitle = period + "  \xb7  " + stage;
+
+            function pptHdr(slide, title, sub) {
+                slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 13.33, h: 0.56, fill: { color: OVC.navyBg } });
+                slide.addText(title, { x: 0.2, y: 0.05, w: 9.5, h: 0.27, fontSize: 13, bold: true, color: OVC.white, fontFace: "Calibri" });
+                slide.addText(sub,   { x: 0.2, y: 0.3,  w: 11,  h: 0.2,  fontSize: 8.5, color: OVC.sub, fontFace: "Calibri" });
+                slide.addText("MIRA Overview", { x: 10.5, y: 0.1, w: 2.7, h: 0.35, fontSize: 8.5, color: "607080", align: "right", fontFace: "Calibri" });
+            }
+
+            // Slide 1: Overview Summary
+            const s1 = pptx.addSlide();
+            pptHdr(s1, "Maintenance Overview Report", subtitle);
+
+            const statusColor = R.statusText === "Critical" ? OVC.red : R.statusText === "Attention" ? OVC.amber : OVC.green;
+            s1.addShape(pptx.ShapeType.roundRect, { x: 0.15, y: 0.64, w: 1.4, h: 0.34, fill: { color: statusColor }, line: { color: statusColor }, rectRadius: 0.08 });
+            s1.addText(R.statusText, { x: 0.15, y: 0.65, w: 1.4, h: 0.32, fontSize: 9.5, bold: true, color: OVC.white, align: "center", fontFace: "Calibri" });
+            s1.addText(R.periodText, { x: 1.65, y: 0.68, w: 11.5, h: 0.26, fontSize: 8, color: OVC.slate, fontFace: "Calibri" });
+
+            const slClrs = [OVC.red, OVC.text, OVC.accent];
+            R.summaryLines.forEach((line, i) => {
+                if (!line) return;
+                s1.addText(line, { x: 0.15, y: 1.04 + i * 0.22, w: 13.0, h: 0.2, fontSize: 8, color: slClrs[i] || OVC.text, fontFace: "Calibri" });
+            });
+
+            const hkpis = R.headlineKpis.slice(0, 4);
+            const kpiW = hkpis.length ? (13.0 / hkpis.length) - 0.1 : 3;
+            hkpis.forEach((k, i) => {
+                const kx = 0.15 + i * (kpiW + 0.1);
+                const kt = k.tone === "critical" ? OVC.red : k.tone === "watch" ? OVC.amber : k.tone === "good" ? OVC.green : OVC.accent;
+                s1.addShape(pptx.ShapeType.roundRect, { x: kx, y: 1.72, w: kpiW, h: 0.9, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.06 });
+                s1.addText(String(k.display != null ? k.display : (k.value != null ? k.value : "—")), { x: kx + 0.07, y: 1.76, w: kpiW - 0.14, h: 0.4, fontSize: 17, bold: true, color: kt, align: "center", fontFace: "Calibri" });
+                s1.addText(k.label || "", { x: kx + 0.05, y: 2.18, w: kpiW - 0.1, h: 0.18, fontSize: 7, color: OVC.slate, align: "center", fontFace: "Calibri" });
+                if (k.note) s1.addText(k.note, { x: kx + 0.05, y: 2.35, w: kpiW - 0.1, h: 0.2, fontSize: 6.5, color: OVC.sub, align: "center", fontFace: "Calibri" });
+            });
+
+            const kpiSecs = [{ label: "PM Schedule", data: R.pmSection }, { label: "Downtime / MR", data: R.dtSection }, { label: "Spare Parts", data: R.spareSection }];
+            const secW = (13.0 / 3) - 0.1;
+            kpiSecs.forEach((sec, i) => {
+                const sx = 0.15 + i * (secW + 0.1);
+                s1.addShape(pptx.ShapeType.roundRect, { x: sx, y: 2.72, w: secW, h: 1.75, fill: { color: OVC.white }, line: { color: OVC.border }, rectRadius: 0.06 });
+                s1.addText(sec.label, { x: sx + 0.1, y: 2.77, w: secW - 1.1, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
+                const hs = (sec.data && sec.data.health_status) || "";
+                if (hs) {
+                    const hc = hs === "Good" ? OVC.green : hs === "Attention" ? OVC.amber : hs === "Critical" ? OVC.red : OVC.slate;
+                    s1.addText(hs, { x: sx + secW - 1.0, y: 2.77, w: 0.9, h: 0.22, fontSize: 7.5, color: hc, align: "right", fontFace: "Calibri" });
+                }
+                (sec.data && sec.data.metrics || []).slice(0, 4).forEach((m, mi) => {
+                    const my = 3.06 + mi * 0.3;
+                    const mc = m.tone === "critical" ? OVC.red : m.tone === "watch" ? OVC.amber : m.tone === "good" ? OVC.green : OVC.slate;
+                    s1.addText(m.label || "", { x: sx + 0.1, y: my, w: secW - 1.1, h: 0.24, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
+                    s1.addText(String(m.value || "—"), { x: sx + secW - 1.0, y: my, w: 0.9, h: 0.24, fontSize: 8, bold: true, color: mc, align: "right", fontFace: "Calibri" });
+                });
+            });
+
+            const ay = 4.56;
+            s1.addText("Daily Action Alerts", { x: 0.15, y: ay, w: 4, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
+            if (!R.alertRows.length) {
+                s1.addText("No active alerts for the selected period.", { x: 0.15, y: ay + 0.26, w: 13, h: 0.22, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
+            } else {
+                const aHdr = [
+                    [{ text: "Area / Asset", options: { bold: true, fontSize: 7.5, color: OVC.white, fill: { color: OVC.navyBg } } },
+                     { text: "Flag",         options: { bold: true, fontSize: 7.5, color: OVC.white, fill: { color: OVC.navyBg } } },
+                     { text: "Why it needs review", options: { bold: true, fontSize: 7.5, color: OVC.white, fill: { color: OVC.navyBg } } }],
+                ];
+                const aData = R.alertRows.slice(0, 5).map(row => {
+                    const fc = row.flag === "Red" ? OVC.red : row.flag === "Amber" ? OVC.amber : OVC.slate;
+                    return [
+                        { text: row.area || "—", options: { fontSize: 7, color: OVC.text } },
+                        { text: row.flag || "—", options: { fontSize: 7, color: fc, bold: true } },
+                        { text: row.why  || "—", options: { fontSize: 7, color: OVC.text } },
+                    ];
+                });
+                s1.addTable([...aHdr, ...aData], { x: 0.15, y: ay + 0.26, w: 13.0, fontFace: "Calibri", colW: [2.5, 0.9, 9.6], border: { color: OVC.border }, rowH: 0.28 });
+            }
+
+            // Slide 2: Recurring Machine Issue Forecast
+            const s2 = pptx.addSlide();
+            pptHdr(s2, "Recurring Machine Issue Forecast", subtitle);
+
+            if (R.predKpiStrip) s2.addText(R.predKpiStrip, { x: 0.15, y: 0.63, w: 13.0, h: 0.2, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
+
+            const activeCat = R.predCategories.find(c => c.name === R.categoryView) || R.predCategories[0];
+            const catLabel = activeCat ? activeCat.name : R.categoryView;
+            s2.addText("Category: " + catLabel, { x: 0.15, y: 0.87, w: 6, h: 0.2, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
+
+            if (activeCat && activeCat.top_machines && activeCat.top_machines.length) {
+                const mHdr = [[
+                    { text: "#",  options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
+                    { text: "Machine", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
+                    { text: "Issue Signature", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
+                    { text: "Suggested Spare Parts", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
+                    { text: "Stock / Purchase Status", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
+                ]];
+                const mData = activeCat.top_machines.slice(0, 5).map(m => {
+                    const unitName = m.unit || m.specific_machine_group || m.machine_group || "—";
+                    const issue = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
+                    const status = _forecastPurchaseStatus(m);
+                    const sc = status === "Purchase required" ? OVC.red : status === "Not required" ? OVC.green : OVC.amber;
+                    return [
+                        { text: String(m.rank || ""), options: { fontSize: 7, color: OVC.slate } },
+                        { text: unitName + (m.is_critical ? " ★" : ""), options: { fontSize: 7, color: OVC.text, bold: !!m.is_critical } },
+                        { text: issue, options: { fontSize: 7, color: OVC.accent } },
+                        { text: _forecastPartNames(m, 3), options: { fontSize: 7, color: OVC.slate } },
+                        { text: status, options: { fontSize: 7, color: sc, bold: true } },
+                    ];
+                });
+                s2.addTable([...mHdr, ...mData], { x: 0.15, y: 1.1, w: 13.0, fontFace: "Calibri", colW: [0.38, 2.22, 3.0, 5.0, 2.4], border: { color: OVC.border }, rowH: 0.42 });
+                s2.addText("Technician/Engineer verification required before action.", { x: 0.15, y: 3.55, w: 13, h: 0.18, fontSize: 7, color: OVC.slate, fontFace: "Calibri" });
+            } else {
+                s2.addText("No recurring machine data for the selected period.", { x: 0.15, y: 1.1, w: 13, h: 0.3, fontSize: 8.5, color: OVC.slate, fontFace: "Calibri" });
+            }
+
+            const botY = 5.7;
+            s2.addShape(pptx.ShapeType.roundRect, { x: 0.15, y: botY, w: 6.45, h: 1.62, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.06 });
+            s2.addText("Dominant Fault Pattern", { x: 0.25, y: botY + 0.07, w: 6.15, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
+            const fp = R.faultPattern;
+            if (fp && !fp.empty) {
+                s2.addText((fp.fault_family || "—") + "  \xd7" + (fp.count || 0) + "  (" + (fp.pct_of_total || 0) + "% of MR)", { x: 0.25, y: botY + 0.32, w: 6.15, h: 0.24, fontSize: 9, color: OVC.accent, bold: true, fontFace: "Calibri" });
+                if (fp.affected_groups && fp.affected_groups.length) s2.addText("Affects: " + fp.affected_groups.slice(0, 5).join(", "), { x: 0.25, y: botY + 0.6, w: 6.15, h: 0.2, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
+            } else {
+                s2.addText("No dominant fault pattern detected.", { x: 0.25, y: botY + 0.32, w: 6.15, h: 0.22, fontSize: 8, color: OVC.sub, fontFace: "Calibri" });
+            }
+
+            s2.addShape(pptx.ShapeType.roundRect, { x: 6.73, y: botY, w: 6.45, h: 1.62, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.06 });
+            s2.addText("Data Confidence", { x: 6.83, y: botY + 0.07, w: 6.15, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
+            const conf = R.dataConfidence;
+            const confBandColor = conf.band === "High" ? OVC.green : conf.band === "Medium" ? OVC.amber : OVC.red;
+            s2.addText((conf.band || "—") + "  —  " + (conf.label || "Confidence data unavailable."), { x: 6.83, y: botY + 0.32, w: 6.15, h: 0.24, fontSize: 8, color: confBandColor, bold: true, fontFace: "Calibri" });
+            [["Asset Mapped", conf.asset_mapping_pct], ["Complete Dates", conf.date_completeness_pct], ["WO Linked", conf.wo_link_pct]].forEach((pair, pi) => {
+                if (pair[1] != null) s2.addText(pair[0] + ": " + pair[1] + "%", { x: 6.83, y: botY + 0.6 + pi * 0.22, w: 6.15, h: 0.2, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
+            });
+
+            const fileName = "Maintenance_Overview_Report_" + (R.filters.label || "YTD").replace(/[\s/]/g, "_") + ".pptx";
+            pptx.writeFile({ fileName })
+                .then(() => { _ovAllBtns(false); window.clearTimeout(TO); })
+                .catch(() => { _ovAllBtns(false); window.clearTimeout(TO); });
+        } catch (e) {
+            _ovAllBtns(false);
+            window.clearTimeout(TO);
+            alert("PPT export error: " + e.message);
+        }
+    }
+
+    // ── PDF export ─────────────────────────────────────────────────────────────
+    function exportOverviewPDF() {
+        if (!lastOverview) { alert("Overview data hasn’t loaded yet. Please wait and try again."); return; }
+        _ovAllBtns(true);
+        const TO = window.setTimeout(() => { _ovAllBtns(false); }, 30000);
+        try {
+            const R = overviewReportData();
+            const win = window.open("", "_blank");
+            if (!win) { _ovAllBtns(false); window.clearTimeout(TO); alert("Popup blocked. Please allow popups and try again."); return; }
+            win.document.write(_ovBuildPdfHtml(R));
+            win.document.close();
+            win.onload = () => { try { win.focus(); win.print(); } catch (_) {} };
+            window.setTimeout(() => { try { win.focus(); win.print(); } catch (_) {} _ovAllBtns(false); window.clearTimeout(TO); }, 800);
+        } catch (e) {
+            _ovAllBtns(false);
+            window.clearTimeout(TO);
+            alert("PDF export error: " + e.message);
+        }
+    }
+
+    function _ovEsc(t) {
+        return String(t || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+    }
+
+    function _ovBuildPdfHtml(R) {
+        const period = _ovEsc(R.filters.label + (R.filters.dateRange ? " \xb7 " + R.filters.dateRange : ""));
+        const stage = _ovEsc(R.filters.stage === "stage1" ? "Stage 1" : R.filters.stage === "stage2" ? "Stage 2" : "All Stages");
+        const statusColor = R.statusText === "Critical" ? "#dc2626" : R.statusText === "Attention" ? "#d97706" : "#16a34a";
+        const activeCat = R.predCategories.find(c => c.name === R.categoryView) || R.predCategories[0];
+
+        const kpiCardsHtml = R.headlineKpis.slice(0, 4).map(k => {
+            const t = k.tone === "critical" ? "#dc2626" : k.tone === "watch" ? "#d97706" : k.tone === "good" ? "#16a34a" : "#4f46e5";
+            return `<div class="kpi-c"><div class="kpi-v" style="color:${t}">${_ovEsc(String(k.display != null ? k.display : (k.value != null ? k.value : "—")))}</div><div class="kpi-l">${_ovEsc(k.label || "")}</div>${k.note ? `<div class="kpi-n">${_ovEsc(k.note)}</div>` : ""}</div>`;
+        }).join("");
+
+        const secCardsHtml = [
+            { label: "PM Schedule",    data: R.pmSection },
+            { label: "Downtime / MR", data: R.dtSection },
+            { label: "Spare Parts",   data: R.spareSection },
+        ].map(sec => {
+            const mets = (sec.data && sec.data.metrics || []).slice(0, 4).map(m => {
+                const mc = m.tone === "critical" ? "#dc2626" : m.tone === "watch" ? "#d97706" : m.tone === "good" ? "#16a34a" : "#64748b";
+                return `<div class="sm"><span class="sml">${_ovEsc(m.label || "")}</span><span class="smv" style="color:${mc}">${_ovEsc(String(m.value || "—"))}</span></div>`;
+            }).join("");
+            const hs = (sec.data && sec.data.health_status) || "";
+            const hc = hs === "Good" ? "#16a34a" : hs === "Attention" ? "#d97706" : hs === "Critical" ? "#dc2626" : "#64748b";
+            return `<div class="sec-c"><div class="sec-h">${_ovEsc(sec.label)}${hs ? `<span style="color:${hc};font-size:7.5px;margin-left:6px">${_ovEsc(hs)}</span>` : ""}</div>${mets || '<span class="mu">No data</span>'}</div>`;
+        }).join("");
+
+        const dqHtml = R.dqChips.map(c => `<span class="dq${c.warn ? " dqw" : " dqo"}"><span>${_ovEsc(c.label)}</span><strong>${_ovEsc(c.value)}</strong></span>`).join("") || '<span class="mu">—</span>';
+
+        const alertHtml = R.alertRows.length ? `<table class="atbl"><thead><tr><th>Area / Asset</th><th>Flag</th><th>Why it needs review</th></tr></thead><tbody>${
+            R.alertRows.slice(0, 5).map(row => {
+                const fc = row.flag === "Red" ? "#dc2626" : row.flag === "Amber" ? "#d97706" : "#64748b";
+                return `<tr><td>${_ovEsc(row.area)}</td><td style="color:${fc};font-weight:700">${_ovEsc(row.flag)}</td><td>${_ovEsc(row.why)}</td></tr>`;
+            }).join("")
+        }</tbody></table>` : `<p class="mu">No active alerts for this period.</p>`;
+
+        const machHtml = activeCat && activeCat.top_machines && activeCat.top_machines.length
+            ? `<table class="mtbl"><thead><tr><th>#</th><th>Machine</th><th>Issue Signature</th><th>Suggested Spare Parts</th><th>Stock / Purchase Status</th></tr></thead><tbody>${
+                activeCat.top_machines.slice(0, 5).map(m => {
+                    const unit = m.unit || m.specific_machine_group || m.machine_group || "—";
+                    const issue = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
+                    const status = _forecastPurchaseStatus(m);
+                    const cc = status === "Purchase required" ? "#dc2626" : status === "Not required" ? "#16a34a" : "#d97706";
+                    return `<tr><td>${m.rank || ""}</td><td>${_ovEsc(unit)}${m.is_critical ? " <b class='cb'>Crit</b>" : ""}</td><td style="color:#4f46e5">${_ovEsc(issue)}</td><td class="mu">${_ovEsc(_forecastPartNames(m, 3))}</td><td style="color:${cc};font-weight:700">${_ovEsc(status)}</td></tr>`;
+                }).join("")
+            }</tbody></table><p class="mu" style="margin-top:5px">Technician/Engineer verification required before action.</p>`
+            : `<p class="mu">No recurring machine data for this period.</p>`;
+
+        const fp = R.faultPattern;
+        const faultHtml = fp && !fp.empty
+            ? `<strong style="color:#4f46e5">${_ovEsc(fp.fault_family || "—")}</strong>&nbsp;&nbsp;\xd7${fp.count || 0}&nbsp;&nbsp;(${fp.pct_of_total || 0}% of MR)${fp.affected_groups && fp.affected_groups.length ? `<div class="mu" style="margin-top:4px">Affects: ${_ovEsc(fp.affected_groups.slice(0, 5).join(", "))}</div>` : ""}`
+            : `<span class="mu">No dominant fault pattern detected.</span>`;
+        const conf = R.dataConfidence;
+        const cbc = conf.band === "High" ? "#16a34a" : conf.band === "Medium" ? "#d97706" : "#dc2626";
+        const confHtml = `<strong style="color:${cbc}">${_ovEsc(conf.band || "—")}</strong>&nbsp;—&nbsp;${_ovEsc(conf.label || "Confidence data unavailable.")}` +
+            (conf.total > 0 ? `<ul class="mu" style="margin:5px 0 0;padding-left:16px"><li>Asset Mapped: ${conf.asset_mapping_pct != null ? conf.asset_mapping_pct + "%" : "—"}</li><li>Complete Dates: ${conf.date_completeness_pct != null ? conf.date_completeness_pct + "%" : "—"}</li><li>WO Linked: ${conf.wo_link_pct != null ? conf.wo_link_pct + "%" : "—"}</li></ul>` : "");
+
+        return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Maintenance Overview Report</title>
+<style>
+@page{size:A4 landscape;margin:12mm 10mm}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Inter,Arial,sans-serif;font-size:10px;color:#1e293b;background:#fff}
+.pg{page-break-after:always;padding:4px 0}
+.pg:last-child{page-break-after:avoid}
+.ph{background:#1e293b;color:#fff;padding:7px 12px;border-radius:5px;margin-bottom:9px;display:flex;justify-content:space-between;align-items:center}
+.ph h1{font-size:12px;font-weight:700}
+.ph .sub{font-size:8px;color:#94a3b8}
+.sr{display:flex;align-items:center;gap:9px;margin-bottom:7px}
+.sb{padding:2px 10px;border-radius:999px;font-size:9px;font-weight:700;color:#fff}
+.pt{font-size:8px;color:#64748b}
+.sl{font-size:8.5px;padding:1px 0}
+.kr{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:9px}
+.kpi-c{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:6px 7px;text-align:center}
+.kpi-v{font-size:17px;font-weight:800}
+.kpi-l{font-size:7.5px;color:#64748b;margin-top:2px}
+.kpi-n{font-size:7px;color:#94a3b8;margin-top:1px}
+.sr2{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:9px}
+.sec-c{background:#fff;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px}
+.sec-h{font-size:8px;font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between}
+.sm{display:flex;justify-content:space-between;border-bottom:1px solid #f1f5f9;padding:2px 0}
+.sml{font-size:7.5px;color:#64748b}
+.smv{font-size:8px;font-weight:700}
+.sl2{font-size:8.5px;font-weight:700;margin:7px 0 4px;color:#1e293b;border-bottom:1px solid #e2e8f0;padding-bottom:2px}
+.dqrow{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:7px}
+.dq{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:2px 7px;font-size:7.5px;border:1px solid #e2e8f0}
+.dqw{background:#fef3c7;color:#92400e;border-color:#fcd34d}
+.dqo{background:#f0fdf4;color:#166534;border-color:#86efac}
+.atbl,.mtbl{width:100%;border-collapse:collapse;font-size:7.5px}
+.atbl th,.atbl td,.mtbl th,.mtbl td{border:1px solid #e2e8f0;padding:3px 5px;vertical-align:top}
+.atbl th,.mtbl th{background:#1e293b;color:#fff;font-weight:700}
+.atbl tr:nth-child(even),.mtbl tr:nth-child(even){background:#f8fafc}
+.br{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px}
+.bc{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:7px 9px}
+.mu{color:#64748b;font-size:8px}
+.cb{background:#dc2626;color:#fff;border-radius:2px;padding:0 3px;font-size:6px}
+</style></head><body>
+<div class="pg">
+<div class="ph"><div><h1>Maintenance Overview Report</h1><div class="sub">${period} \xb7 ${stage}</div></div><div class="sub">Exported ${_ovEsc(R.exportedAt)}</div></div>
+<div class="sr"><span class="sb" style="background:${statusColor}">${_ovEsc(R.statusText)}</span><span class="pt">${_ovEsc(R.periodText)}</span></div>
+<div style="margin-bottom:7px">${R.summaryLines.map(l => `<div class="sl">${_ovEsc(l)}</div>`).join("")}</div>
+<div class="kr">${kpiCardsHtml}</div>
+<div class="sr2">${secCardsHtml}</div>
+<div class="sl2">Data Quality Indicators</div>
+<div class="dqrow">${dqHtml}</div>
+<div class="sl2">Daily Action Alerts</div>
+${alertHtml}
+</div>
+<div class="pg">
+<div class="ph"><div><h1>Recurring Machine Issue Forecast</h1><div class="sub">${period} \xb7 ${stage} \xb7 ${_ovEsc(R.categoryView)}</div></div><div class="sub">Exported ${_ovEsc(R.exportedAt)}</div></div>
+${R.predKpiStrip ? `<p class="mu" style="margin-bottom:7px">${_ovEsc(R.predKpiStrip)}</p>` : ""}
+${machHtml}
+<div class="br">
+<div class="bc"><div class="sl2">Dominant Fault Pattern</div>${faultHtml}</div>
+<div class="bc"><div class="sl2">Data Confidence</div>${confHtml}</div>
+</div>
+</div>
+</body></html>`;
     }
 
     window.renderMiraOverview = function renderMiraOverview(options = {}) {

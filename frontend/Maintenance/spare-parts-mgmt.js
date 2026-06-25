@@ -67,7 +67,7 @@
     let grgiTrendView = "monthly"; // "monthly" | "fy"
 
     function emptyCache() {
-        return { overview: null, received: null, issued: null, analysis: null, importStatus: null, procurement: null };
+        return { overview: null, received: null, issued: null, analysis: null, importStatus: null, delivery: null, procurement: null };
     }
 
     function el(tag, cls, text) {
@@ -158,7 +158,7 @@
     function requiredResourcesForTab(tab) {
         if (tab === "overview") return ["overview", "importStatus"];
         if (tab === "grgi") return ["overview", "received", "issued", "importStatus"];
-        if (tab === "supplier") return ["procurement", "importStatus"];
+        if (tab === "supplier") return ["delivery", "procurement", "importStatus"];
         if (tab === "data_quality") return ["overview", "analysis", "importStatus"];
         return ["importStatus"];
     }
@@ -172,6 +172,7 @@
         if (key === "received") return `${API}/goods-received${query}`;
         if (key === "issued") return `${API}/goods-issued${query}`;
         if (key === "analysis") return `${API}/item-vendor-analysis${query}`;
+        if (key === "delivery") return `${API}/delivery-performance${query}`;
         if (key === "procurement") return `${API}/procurement-reconciliation${query}`;
         if (key === "importStatus") return `${API}/import-status`;
         return null;
@@ -519,7 +520,7 @@
                     .map((key) => {
                         const url = resourceUrl(key, query);
                         if (!url) return null;
-                        const promise = key === "procurement" ? fetchJson(url).catch(() => null) : fetchJson(url);
+                        const promise = (key === "procurement" || key === "delivery") ? fetchJson(url).catch(() => null) : fetchJson(url);
                         return promise.then((value) => [key, value]);
                     })
                     .filter(Boolean)
@@ -581,12 +582,16 @@ function renderStatus(overview, importStatus) {
         const issuedStatus = (importStatus && importStatus["Goods Issued"]) || {};
         const inventoryStatus = (importStatus && importStatus["Inventory"]) || {};
         const quality = (overview && overview.data_quality) || {};
+        const s1imp = (importStatus && importStatus["Stage 1"]) || {};
+        const s2imp = (importStatus && importStatus["Stage 2"]) || {};
         const s1 = receivedStatus["Stage 1"] || {};
         const s2 = receivedStatus["Stage 2"] || {};
+        const s1label = s1.file_name || (s1imp.uploaded ? s1imp.file_name || "loaded" : "not loaded");
+        const s2label = s2.file_name || (s2imp.uploaded ? s2imp.file_name || "loaded" : "not loaded");
         const indirectStatus = (importStatus && importStatus["Indirect PO"]) || {};
         status.innerHTML =
             `Sources: Gen PO Stage 1 &amp; Stage 2 for PO/GRN. Indirect PO for official procurement reference. Project Actual Transactions for GI / Consumption. Inventory is the stock snapshot. ` +
-            `<span class="spm-status-muted">Stage 1: ${esc(s1.file_name || "not loaded")} | Stage 2: ${esc(s2.file_name || "not loaded")} | Indirect PO: ${
+            `<span class="spm-status-muted">Stage 1: ${esc(s1label)} | Stage 2: ${esc(s2label)} | Indirect PO: ${
                 indirectStatus.uploaded ? esc(num(indirectStatus.row_count) + " lines") : "not loaded"
             } | Consumption: ${
                 issuedStatus.uploaded ? esc(sourceLoadedLabel(issuedStatus, "rows")) : "not loaded"
@@ -708,7 +713,7 @@ function renderStatus(overview, importStatus) {
 
         if (state.tab === "overview") root.append(renderOverviewSummary());
         else if (state.tab === "grgi") root.append(renderGrGiPanel());
-        else if (state.tab === "supplier") root.append(renderSupplierProcurementPanel());
+        else if (state.tab === "supplier") root.append(renderSupplierTab());
         else if (state.tab === "data_quality") root.append(renderDataQualityPanel());
     }
 
@@ -741,10 +746,8 @@ function renderStatus(overview, importStatus) {
         head.append(copy);
         panel.append(head);
 
-        // ── Row 1: 5 main KPI cards ───────────────────────────────────────────
+        // ── Row 1: 4 top KPI cards ────────────────────────────────────────────
         const row1 = el("div", "summary-grid spm-kpi-grid spm-ov-row-main");
-
-        // First 4 cards via the standard pattern
         [
             ["Engineering PO Spend", money(received.total_po_value), "blue",
                 scope.engineering_source_note || "Gen PO Stage 1 + Stage 2"],
@@ -752,10 +755,10 @@ function renderStatus(overview, importStatus) {
                 scope.engineering_source_note || "GRN completed lines"],
             ["Open Commitment", money(received.pending_value), "amber",
                 "Pending GRN / not yet received"],
-            ["GI Consumed",
-                issued.total_issued_value != null ? money(issued.total_issued_value) : "No GI source loaded",
-                "blue",
-                scope.consumption_source_note || "Project Actual Transactions"],
+            ["Current Inventory",
+                inv.in_stock_items != null ? num(inv.in_stock_items) + " items" : "--",
+                "green",
+                inv.current_inventory_value != null ? money(inv.current_inventory_value) : "On-hand list"],
         ].forEach(([label, value, tone, note]) => {
             const card = el("article", `summary-card summary-card-kpi spm-kpi spm-kpi-${tone}`);
             card.append(el("span", "summary-label", label));
@@ -763,64 +766,74 @@ function renderStatus(overview, importStatus) {
             card.append(el("span", "spm-kpi-source", note));
             row1.append(card);
         });
-
-        // 5th card: Current Inventory (special — shows count + value + breakdown)
-        const invCard = el("article", "summary-card summary-card-kpi spm-kpi spm-kpi-green spm-kpi-inventory");
-        invCard.append(el("span", "summary-label", "Current Inventory"));
-        invCard.append(el("strong", null, inv.in_stock_items != null ? num(inv.in_stock_items) + " items" : "--"));
-        if (inv.current_inventory_value != null) {
-            invCard.append(el("div", "spm-ov-inv-value", money(inv.current_inventory_value)));
-        }
-        const breakdown = inv.item_group_breakdown || {};
-        const breakdownParts = Object.entries(breakdown)
-            .sort((a, b) => b[1] - a[1])
-            .map(([g, c]) => `${c} ${g}`)
-            .join(" · ");
-        if (breakdownParts) invCard.append(el("div", "spm-ov-inv-breakdown", breakdownParts));
-        invCard.append(el("span", "spm-kpi-source",
-            inv.unvalued_in_stock_items > 0
-                ? `${num(inv.unvalued_in_stock_items)} items without price match · On-hand list`
-                : "Source: On-hand list"));
-        row1.append(invCard);
         panel.append(row1);
 
-        // ── Row 2: 3 category KPI cards ──────────────────────────────────────
-        const row2 = el("div", "summary-grid spm-kpi-grid spm-ov-row-secondary");
+        // ── Section: PO Classification (compact inline strip) ─────────────────
+        const poSec = el("div", "spm-ov-inline-section");
+        poSec.append(el("span", "spm-ov-inline-label", "PO Classification"));
+        const poItems = el("div", "spm-ov-inline-items");
         [
-            ["Stock Spare Purchase",    money(pocat.stocked_spare_part_po_value),   "blue",
-                pocat.stocked_spare_part_po_count != null ? num(pocat.stocked_spare_part_po_count) + " PO lines" : null],
-            ["Non-stock Direct Purchase", money(pocat.non_stock_spare_part_po_value), "amber",
-                pocat.non_stock_spare_part_po_count != null ? num(pocat.non_stock_spare_part_po_count) + " PO lines" : null],
-            ["Services / Labour / Repair", money(pocat.service_labour_repair_po_value), "red",
-                pocat.service_labour_repair_po_count != null ? num(pocat.service_labour_repair_po_count) + " PO lines · incl. contractor, calibration, cleaning" : null],
+            ["Stock Spare", money(pocat.stocked_spare_part_po_value), "blue",
+                pocat.stocked_spare_part_po_count != null ? num(pocat.stocked_spare_part_po_count) + " lines" : null],
+            ["Non-stock", money(pocat.non_stock_spare_part_po_value), "amber",
+                pocat.non_stock_spare_part_po_count != null ? num(pocat.non_stock_spare_part_po_count) + " lines" : null],
+            ["Services / Labour", money(pocat.service_labour_repair_po_value), "red",
+                pocat.service_labour_repair_po_count != null ? num(pocat.service_labour_repair_po_count) + " lines" : null],
         ].forEach(([label, value, tone, sub]) => {
-            const card = el("article", `summary-card summary-card-kpi spm-kpi spm-kpi-${tone} spm-kpi-dual`);
-            card.append(el("span", "summary-label", label));
-            card.append(el("strong", null, value));
-            if (sub) card.append(el("span", "spm-kpi-sub", sub));
-            row2.append(card);
+            const item = el("div", "spm-ov-inline-item");
+            item.append(el("span", "spm-ov-inline-item-label", label));
+            const val = el("span", `spm-ov-inline-item-value spm-ov-inline-${tone}`, value);
+            item.append(val);
+            if (sub) item.append(el("span", "spm-ov-inline-item-sub", sub));
+            poItems.append(item);
         });
-        panel.append(row2);
+        poSec.append(poItems);
+        panel.append(poSec);
 
-        // ── Row 3: compact procurement reference strip ────────────────────────
-        if (pk.available !== false) {
-            panel.append(renderProcurementReconStrip(pk));
-        }
+        // ── Section: Inventory & Consumption ─────────────────────────────────
+        const invSec = el("div", "spm-ov-inline-section");
+        invSec.append(el("span", "spm-ov-inline-label", "Inventory & Consumption"));
+        const invItems = el("div", "spm-ov-inline-items");
+        [
+            ["Current Inventory",
+                inv.in_stock_items != null ? num(inv.in_stock_items) + " items" : "--",
+                "green",
+                inv.current_inventory_value != null ? money(inv.current_inventory_value) : null],
+            ["GI Consumed",
+                issued.total_issued_value != null ? money(issued.total_issued_value) : "--",
+                "blue",
+                scope.consumption_source_note || "Project Actual Transactions"],
+        ].forEach(([label, value, tone, sub]) => {
+            const item = el("div", "spm-ov-inline-item");
+            item.append(el("span", "spm-ov-inline-item-label", label));
+            item.append(el("span", `spm-ov-inline-item-value spm-ov-inline-${tone}`, value));
+            if (sub) item.append(el("span", "spm-ov-inline-item-sub", sub));
+            invItems.append(item);
+        });
+        invSec.append(invItems);
+        panel.append(invSec);
 
-        // ── Footer note ───────────────────────────────────────────────────────
-        panel.append(el("p", "spm-flow-note spm-ov-footnote",
-            "Indirect PO is used as procurement reference only. Engineering spend is scoped from Stage 1 and Stage 2 Gen PO files. Current inventory is based on the On-hand list."));
-
-        // ── Data quality note (only when issues exist) ────────────────────────
-        const dqIssues = [];
-        if (dq.missing_received_date > 0) dqIssues.push(`${num(dq.missing_received_date)} PO rows missing GR date`);
-        if (dq.rows_without_work_order > 0) dqIssues.push(`${num(dq.rows_without_work_order)} GI rows without WO reference`);
-        if ((inv.unvalued_in_stock_items || 0) > 0) dqIssues.push(`${num(inv.unvalued_in_stock_items)} on-hand items missing price match — inventory valuation is based on latest matched PO price`);
-        if (pk.available !== false && (pk.price_qty_mismatch_count || 0) > 0) dqIssues.push(`${num(pk.price_qty_mismatch_count)} Engineering PO lines with amount / quantity mismatch in Indirect PO`);
-        if (dqIssues.length > 0) {
-            const dqNote = el("div", "spm-ov-dq-note");
-            dqNote.innerHTML = "<strong>Data quality: </strong>" + dqIssues.map(esc).join(" &nbsp;·&nbsp; ");
-            panel.append(dqNote);
+        // ── Section: Attention Needed ─────────────────────────────────────────
+        const attention = [];
+        if ((inv.unvalued_in_stock_items || 0) > 0)
+            attention.push(`${num(inv.unvalued_in_stock_items)} inventory items missing price match`);
+        if (pk.available !== false && (pk.price_qty_mismatch_count || 0) > 0)
+            attention.push(`${num(pk.price_qty_mismatch_count)} PO price / qty mismatches`);
+        if (pk.available !== false && pk.match_rate_pct != null)
+            attention.push(`Procurement reference match only ${pct(pk.match_rate_pct)}`);
+        if ((pocat.service_labour_repair_po_value || 0) > 0)
+            attention.push("Services / labour spend should be reviewed separately from spare parts");
+        if (dq.missing_received_date > 0)
+            attention.push(`${num(dq.missing_received_date)} PO rows missing GR date`);
+        if (dq.rows_without_work_order > 0)
+            attention.push(`${num(dq.rows_without_work_order)} GI rows without WO reference`);
+        if (attention.length > 0) {
+            const attSec = el("div", "spm-ov-attention");
+            attSec.append(el("span", "spm-ov-inline-label", "Attention Needed"));
+            const ul = el("ul", "spm-ov-attention-list");
+            attention.forEach((msg) => ul.append(el("li", null, msg)));
+            attSec.append(ul);
+            panel.append(attSec);
         }
 
         return panel;
@@ -1186,44 +1199,200 @@ function renderStatus(overview, importStatus) {
         ));
     }
 
-    function renderSupplierProcurementPanel() {
+    function renderSupplierTab() {
+        const root = el("div");
+        root.append(renderDeliveryPerformancePanel());
+        root.append(renderProcurementReferenceSection());
+        return root;
+    }
+
+    function deliveryStatusChip(status) {
+        const chip = el("span", "spm-dp-chip");
+        if (status === "Good") chip.className += " spm-dp-good";
+        else if (status === "Monitor") chip.className += " spm-dp-monitor";
+        else if (status === "Attention") chip.className += " spm-dp-attention";
+        else if (status === "Data Issue") chip.className += " spm-dp-dataissue";
+        else if (status === "Received on time") chip.className += " spm-dp-good";
+        else if (status === "Received late") chip.className += " spm-dp-attention";
+        else if (status === "Open not due") chip.className += " spm-dp-open";
+        else if (status === "Open overdue") chip.className += " spm-dp-overdue";
+        chip.textContent = status || "--";
+        return chip;
+    }
+
+    function renderDeliveryPerformancePanel() {
         const panel = el("section", "card-shell spm-compact-panel");
         const head = el("div", "section-head spm-panel-head");
         const copy = el("div");
-        copy.append(el("h2", null, "Supplier & Vendor Performance (Procurement Reference)"));
-        copy.append(el("p", "section-subtitle", `${financialViewLabel()}. Vendor/procurement totals come from the Indirect PO reference file; matched Engineering values come from Gen PO files.`));
+        copy.append(el("h2", null, "Supplier Delivery Performance"));
+        copy.append(el("p", "section-subtitle",
+            "Source: Gen PO files (Stage 1 & 2). GRN-PO date vs. lead time determines on-time/late status. " +
+            "Open POs use days since Date Gen PO. Rows missing Date Gen PO or Lead time are excluded from the on-time rate."));
         head.append(copy);
         panel.append(head);
+
+        const dp = cache.delivery || {};
+        const kpis = dp.kpis || {};
+        const vendors = dp.vendor_table || [];
+        const watchlist = dp.watchlist || [];
+
+        if (!cache.delivery) {
+            panel.append(el("p", "spm-muted", "No Gen PO data loaded. Import Stage 1 or Stage 2 Gen PO files via Manage Imports to enable delivery performance."));
+            return panel;
+        }
+
+        // 6 KPI cards
+        const onTimeRate = kpis.on_time_rate_pct;
+        const onTimeTone = onTimeRate == null ? "" : onTimeRate >= 90 ? "green" : onTimeRate >= 70 ? "amber" : "red";
+        const overdueTone = (kpis.overdue_open_count || 0) > 0 ? "amber" : "green";
+        panel.append(
+            kpiGrid(
+                [
+                    ["PO Lines Tracked", num(kpis.po_lines_tracked), "blue", "All Gen PO rows in scope"],
+                    ["Received / GRN Completed", num(kpis.received_count), "green", "GRN-PO date ≥ 0"],
+                    ["Open / Not Received", num(kpis.open_count), "", "GRN-PO date negative or blank"],
+                    ["Overdue Open PO", num(kpis.overdue_open_count), overdueTone, "Waiting longer than lead time"],
+                    ["On-time Delivery Rate", onTimeRate != null ? pct(onTimeRate) : "--", onTimeTone, "Received lines only"],
+                    ["Avg Delay Days", days(kpis.avg_delay_days), kpis.avg_delay_days > 0 ? "amber" : "", "Across all delayed lines"],
+                ],
+                true
+            )
+        );
+        if ((kpis.data_issue_count || 0) > 0) {
+            panel.append(el("p", "spm-flow-note",
+                `${num(kpis.data_issue_count)} row(s) excluded from on-time rate — missing Date Gen PO or Lead time.`));
+        }
+
+        // Vendor performance table
+        if (vendors.length) {
+            const tSection = el("div", "spm-table-section");
+            const thead = el("div", "spm-table-head");
+            thead.append(el("h3", "spm-subtitle", `Vendor Performance (${num(vendors.length)} vendors)`));
+            tSection.append(thead);
+            const wrap = el("div", "table-wrapper spm-table-wrap");
+            const cols = [
+                ["Vendor", "vendor"],
+                ["PO Value", "po_value", "money"],
+                ["PO Lines", "po_lines", "num"],
+                ["Received", "received", "num"],
+                ["Open", "open", "num"],
+                ["Overdue Open", "overdue_open", "num"],
+                ["On-time %", "on_time_pct", "pct"],
+                ["Avg Actual Days", "avg_actual_days", "days"],
+                ["Avg Lead Time", "avg_lead_time", "days"],
+                ["Avg Delay Days", "avg_delay_days", "days"],
+                ["Status", "status", "chip"],
+            ];
+            wrap.innerHTML =
+                `<table class="spm-table"><thead><tr>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>` +
+                vendors.map((v) =>
+                    `<tr>${cols.map((c) => {
+                        const raw = v[c[1]];
+                        if (c[2] === "chip") {
+                            const cls = raw === "Good" ? "spm-dp-good"
+                                : raw === "Monitor" ? "spm-dp-monitor"
+                                : raw === "Attention" ? "spm-dp-attention"
+                                : "spm-dp-dataissue";
+                            return `<td><span class="spm-dp-chip ${cls}">${esc(raw || "--")}</span></td>`;
+                        }
+                        if (c[2] === "money") return `<td>${esc(money(raw))}</td>`;
+                        if (c[2] === "num") return `<td>${esc(num(raw))}</td>`;
+                        if (c[2] === "pct") return `<td>${raw != null ? esc(pct(raw)) : "--"}</td>`;
+                        if (c[2] === "days") return `<td>${raw != null ? esc(days(raw)) : "--"}</td>`;
+                        return `<td>${esc(raw ?? "--")}</td>`;
+                    }).join("")}</tr>`
+                ).join("") +
+                "</tbody></table>";
+            tSection.append(wrap);
+            tSection.append(el("p", "spm-flow-note", "Source: Gen PO files. On-time % is based on received lines only."));
+            panel.append(tSection);
+        }
+
+        // Open PO Delay Watchlist
+        if (watchlist.length) {
+            const wSection = el("div", "spm-table-section");
+            wSection.append(el("h3", "spm-subtitle", `Open PO Delay Watchlist — Overdue (${num(watchlist.length)} lines)`));
+            const wrap = el("div", "table-wrapper spm-table-wrap");
+            const wcols = [
+                ["Vendor", "vendor"],
+                ["PO No.", "po_no"],
+                ["Description", "description"],
+                ["Date Gen PO", "date_gen_po"],
+                ["Lead Time (d)", "lead_time", "days"],
+                ["Days Waiting", "days_waiting", "num"],
+                ["Delay Days", "delay_days", "days"],
+                ["Total Price", "total_price", "money"],
+                ["Status", "status", "chip"],
+            ];
+            wrap.innerHTML =
+                `<table class="spm-table"><thead><tr>${wcols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>` +
+                watchlist.map((r) =>
+                    `<tr>${wcols.map((c) => {
+                        const raw = r[c[1]];
+                        if (c[2] === "chip") {
+                            return `<td><span class="spm-dp-chip spm-dp-overdue">${esc(raw || "--")}</span></td>`;
+                        }
+                        if (c[2] === "money") return `<td>${esc(money(raw))}</td>`;
+                        if (c[2] === "num") return `<td>${esc(num(raw))}</td>`;
+                        if (c[2] === "days") return `<td>${raw != null ? esc(days(raw)) : "--"}</td>`;
+                        return `<td>${esc(raw ?? "--")}</td>`;
+                    }).join("")}</tr>`
+                ).join("") +
+                "</tbody></table>";
+            wSection.append(wrap);
+            wSection.append(el("p", "spm-flow-note", "Only open PO lines where days waiting exceeds lead time. Sorted by delay (highest first)."));
+            panel.append(wSection);
+        } else if (vendors.length) {
+            panel.append(el("p", "spm-data-note", "No overdue open POs in current scope."));
+        }
+
+        return panel;
+    }
+
+    function renderProcurementReferenceSection() {
+        const details = document.createElement("details");
+        details.className = "spm-procurement-ref card-shell spm-compact-panel";
+        details.style.marginTop = "16px";
+
+        const summary = document.createElement("summary");
+        summary.className = "spm-procurement-ref-summary";
+        summary.innerHTML =
+            `<span class="spm-procurement-ref-title">Procurement Reference Match — Indirect PO vs Gen PO</span>` +
+            `<span class="spm-procurement-ref-note">Indirect PO is not used for delivery performance</span>`;
+        details.append(summary);
+
+        const body = el("div", "spm-procurement-ref-body");
+        body.append(el("p", "spm-flow-note",
+            "Indirect PO is a procurement reference file and may include company-wide / non-engineering purchases. " +
+            "It is not used for delivery performance. Figures here are for reconciliation reference only."));
 
         const pk = (cache.procurement && cache.procurement.kpis) || {};
         const vendors = (cache.procurement && cache.procurement.vendor_performance) || [];
 
         if (!pk.total_indirect_lines && !vendors.length) {
-            panel.append(el("p", "spm-muted", "No Indirect PO data loaded. Import the Indirect PO file via Manage Imports to enable vendor reconciliation."));
-            return panel;
+            body.append(el("p", "spm-muted", "No Indirect PO data loaded. Import the Indirect PO file via Manage Imports to enable this section."));
+            details.append(body);
+            return details;
         }
 
-        // Summary KPIs
-        panel.append(
+        body.append(
             kpiGrid(
                 [
-                    ["Company-wide Indirect PO Value", money(pk.total_indirect_po_value), "blue", "Source: Indirect PO procurement file"],
-                    ["PO Lines", num(pk.total_indirect_lines), "", "Source: Indirect PO procurement file"],
-                    ["Engineering PO Matched in Procurement File", num(pk.matched_lines), "", "Source: Engineering PO files matched in procurement file"],
-                    ["Reconciliation Match Rate", pct(pk.match_rate_pct), pk.match_rate_pct >= 80 ? "green" : "amber", "Source: Indirect PO procurement file"],
-                    ["Price / Qty Mismatches", num(pk.price_qty_mismatch_count), pk.price_qty_mismatch_count > 0 ? "amber" : "", "Source: Indirect PO procurement file"],
+                    ["Company-wide Indirect PO Value", money(pk.total_indirect_po_value), "blue", "Source: Indirect PO"],
+                    ["PO Lines", num(pk.total_indirect_lines), "", "Source: Indirect PO"],
+                    ["Eng. PO Matched in Procurement", num(pk.matched_lines), "", "Engineering PO matched in file"],
+                    ["Match Rate", pct(pk.match_rate_pct), (pk.match_rate_pct || 0) >= 80 ? "green" : "amber", "Source: Indirect PO"],
+                    ["Price / Qty Mismatches", num(pk.price_qty_mismatch_count), (pk.price_qty_mismatch_count || 0) > 0 ? "amber" : "", "Source: Indirect PO"],
                 ],
                 true
             )
         );
-        panel.append(el("p", "spm-flow-note", "The procurement file is used as a reference only and may include non-engineering/company-wide purchases."));
 
-        // Status breakdown
         const breakdown = (pk.status_breakdown || []).slice(0, 8);
         if (breakdown.length) {
             const bSection = el("div", "spm-table-section");
             bSection.append(el("h3", "spm-subtitle", "Reconciliation Status Breakdown"));
-            const breakdownGrid = el("div", "spm-barlist");
+            const bGrid = el("div", "spm-barlist");
             const maxCount = Math.max(...breakdown.map((b) => b.count), 1);
             breakdown.forEach((b) => {
                 const row = el("div", "spm-bar-row");
@@ -1236,16 +1405,15 @@ function renderStatus(overview, importStatus) {
                     : b.label.includes("Only") ? "#6b7280" : "#3b82f6";
                 track.append(fill);
                 row.append(track, el("span", "spm-bar-val", num(b.count) + " lines"));
-                breakdownGrid.append(row);
+                bGrid.append(row);
             });
-            bSection.append(breakdownGrid);
-            panel.append(bSection);
+            bSection.append(bGrid);
+            body.append(bSection);
         }
 
-        // Vendor table
         if (vendors.length) {
             const tSection = el("div", "spm-table-section");
-            tSection.append(el("h3", "spm-subtitle", `Vendor Performance — Indirect PO (${num(vendors.length)} vendors)`));
+            tSection.append(el("h3", "spm-subtitle", `Vendor Reference — Indirect PO (${num(vendors.length)} vendors)`));
             const wrap = el("div", "table-wrapper spm-table-wrap");
             const cols = [
                 ["Vendor", "vendor"],
@@ -1264,25 +1432,16 @@ function renderStatus(overview, importStatus) {
                 "</tbody></table>";
             tSection.append(wrap);
             tSection.append(el("p", "spm-flow-note", "Source: Indirect PO procurement file"));
-            panel.append(tSection);
+            body.append(tSection);
         }
 
-        // Procurement category breakdown
         const procCats = (cache.procurement && cache.procurement.procurement_categories) || [];
         if (procCats.length) {
-            panel.append(barCard("PO Value by Procurement Category", procCats, money, "Source: Indirect PO procurement file"));
+            body.append(barCard("PO Value by Procurement Category", procCats, money, "Source: Indirect PO procurement file"));
         }
 
-        // Flag breakdown (SPARE, MAINT, etc.)
-        const flags = (cache.procurement && cache.procurement.flags) || [];
-        if (flags.length) {
-            const flagSection = el("div", "spm-table-section");
-            flagSection.append(el("h3", "spm-subtitle", "PO Value by Flag"));
-            flagSection.append(barCard("", flags.slice(0, 12), money, "Source: Indirect PO procurement file"));
-            panel.append(flagSection);
-        }
-
-        return panel;
+        details.append(body);
+        return details;
     }
 
     function renderClassificationReconPanel() {

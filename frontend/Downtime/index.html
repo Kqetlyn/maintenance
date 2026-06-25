@@ -10,7 +10,7 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260623-crit-collapse-1">
+    <link rel="stylesheet" href="style.css?v=20260623-crit-collapse-2">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
     <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -18,6 +18,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body data-sync-page="downtime">
     <div id="navbar"></div>
@@ -74,7 +75,18 @@
                     </label>
                     <button class="toggle-btn import-btn" type="submit">Load</button>
                 </form>
-                <button class="toggle-btn export-btn" type="button" id="export-btn" onclick="exportMaintenanceData()">Export</button>
+                <div class="wr-btn-group">
+                    <select id="wr-period-select" class="inline-select wr-period-select" title="Report period">
+                        <option value="this_week">This Week</option>
+                        <option value="last_week">Last Week</option>
+                        <option value="this_month">This Month</option>
+                        <option value="last_month">Last Month</option>
+                        <option value="ytd">YTD / FY</option>
+                    </select>
+                    <button class="toggle-btn wr-btn" type="button" id="wr-ppt-btn" onclick="exportWeeklyPPT()">PPT</button>
+                    <button class="toggle-btn wr-btn" type="button" id="wr-pdf-btn" onclick="exportWeeklyPDF()">PDF</button>
+                    <button class="toggle-btn wr-btn" type="button" id="wr-xl-btn" onclick="exportWeeklyExcel()">Excel</button>
+                </div>
                 <div class="refresh-badge" id="last-synced">Last synced unavailable</div>
             </div>
         </header>
@@ -352,52 +364,50 @@
                                     <div class="kdi-analysis-card-title">Critical S1 vs S2 — MTTR Comparison</div>
                                     <p class="kdi-analysis-card-subtitle"><strong>S1</strong> = single-machine critical group (one machine). <strong>S2</strong> = multi-machine critical group (several machines). Follows the page-level <strong>Stage</strong> and <strong>Category</strong> filters; the financial year below drives this chart's time axis.</p>
                                 </div>
-                                <span class="kpi-direction-pill kpi-direction-pill-warn">Lower is better</span>
-                            </div>
-                            <div class="kdi-analysis-filter-bar kdi-crit-cmp-filter-bar">
-                                <div class="kdi-analysis-filter-control">
-                                    <label class="kdi-filter-label" for="kdi-crit-cmp-fy">Financial Year</label>
-                                    <select id="kdi-crit-cmp-fy" class="inline-select kdi-analysis-filter-select"></select>
-                                </div>
-                                <div class="kdi-analysis-filter-control">
-                                    <label class="kdi-filter-label" for="kdi-crit-cmp-fy2">Compare with</label>
-                                    <select id="kdi-crit-cmp-fy2" class="inline-select kdi-analysis-filter-select"><option value="">None</option></select>
-                                </div>
-                                <div class="kdi-analysis-filter-control">
-                                    <label class="kdi-filter-label" for="kdi-crit-cmp-type">Critical Type</label>
-                                    <select id="kdi-crit-cmp-type" class="inline-select kdi-analysis-filter-select">
-                                        <option value="both">Both</option>
-                                        <option value="s1">S1 — Single-machine critical</option>
-                                        <option value="s2">S2 — Multi-machine critical</option>
-                                    </select>
-                                </div>
-                                <div class="kdi-analysis-filter-control">
-                                    <label class="kdi-filter-label" for="kdi-crit-cmp-metric">Metric</label>
-                                    <select id="kdi-crit-cmp-metric" class="inline-select kdi-analysis-filter-select">
-                                        <option value="average">Average MTTR</option>
-                                        <option value="median">Median MTTR</option>
-                                        <option value="p75">P75 MTTR</option>
-                                        <option value="p90">P90 MTTR</option>
-                                    </select>
-                                </div>
-                                <div class="kdi-analysis-filter-control">
-                                    <label class="kdi-filter-label" for="kdi-crit-cmp-category">Category</label>
-                                    <select id="kdi-crit-cmp-category" class="inline-select kdi-analysis-filter-select">
-                                        <option value="all">All Critical Categories</option>
-                                        <option value="Production Equipment">Production Equipment</option>
-                                        <option value="Utilities">Utilities</option>
-                                    </select>
+                                <div class="kdi-crit-cmp-head-right">
+                                    <span class="kpi-direction-pill kpi-direction-pill-warn">Lower is better</span>
+                                    <button class="kdi-crit-cmp-toggle-btn" id="kdi-crit-cmp-toggle-btn" onclick="kdiToggleCritCmpSection()">▶ Expand</button>
                                 </div>
                             </div>
-                            <div class="kdi-analysis-chart-wrap">
-                                <div class="kdi-crit-cmp-chart-header">
-                                    <div>
-                                        <div class="kdi-chart-title" id="kdi-crit-cmp-chart-title">Critical Machine MTTR Monthly Trend</div>
-                                        <p class="kdi-crit-cmp-chart-subtitle" id="kdi-crit-cmp-chart-subtitle">Monthly MTTR trend for S1/S2 critical machine groups. Lower is better.</p>
+                            <div id="kdi-crit-cmp-section-body" class="kdi-crit-cmp-section-collapsed">
+                                <div class="kdi-analysis-filter-bar kdi-crit-cmp-filter-bar">
+                                    <div class="kdi-analysis-filter-control">
+                                        <label class="kdi-filter-label" for="kdi-crit-cmp-fy">Financial Year</label>
+                                        <select id="kdi-crit-cmp-fy" class="inline-select kdi-analysis-filter-select"></select>
                                     </div>
-                                    <button class="kdi-crit-cmp-toggle-btn" id="kdi-crit-cmp-toggle-btn" onclick="kdiToggleCritCmpChart()">Hide chart</button>
+                                    <div class="kdi-analysis-filter-control">
+                                        <label class="kdi-filter-label" for="kdi-crit-cmp-fy2">Compare with</label>
+                                        <select id="kdi-crit-cmp-fy2" class="inline-select kdi-analysis-filter-select"><option value="">None</option></select>
+                                    </div>
+                                    <div class="kdi-analysis-filter-control">
+                                        <label class="kdi-filter-label" for="kdi-crit-cmp-type">Critical Type</label>
+                                        <select id="kdi-crit-cmp-type" class="inline-select kdi-analysis-filter-select">
+                                            <option value="both">Both</option>
+                                            <option value="s1">S1 — Single-machine critical</option>
+                                            <option value="s2">S2 — Multi-machine critical</option>
+                                        </select>
+                                    </div>
+                                    <div class="kdi-analysis-filter-control">
+                                        <label class="kdi-filter-label" for="kdi-crit-cmp-metric">Metric</label>
+                                        <select id="kdi-crit-cmp-metric" class="inline-select kdi-analysis-filter-select">
+                                            <option value="average">Average MTTR</option>
+                                            <option value="median">Median MTTR</option>
+                                            <option value="p75">P75 MTTR</option>
+                                            <option value="p90">P90 MTTR</option>
+                                        </select>
+                                    </div>
+                                    <div class="kdi-analysis-filter-control">
+                                        <label class="kdi-filter-label" for="kdi-crit-cmp-category">Category</label>
+                                        <select id="kdi-crit-cmp-category" class="inline-select kdi-analysis-filter-select">
+                                            <option value="all">All Critical Categories</option>
+                                            <option value="Production Equipment">Production Equipment</option>
+                                            <option value="Utilities">Utilities</option>
+                                        </select>
+                                    </div>
                                 </div>
-                                <div id="kdi-crit-cmp-chart-body">
+                                <div class="kdi-analysis-chart-wrap">
+                                    <div class="kdi-chart-title" id="kdi-crit-cmp-chart-title">Critical Machine MTTR Monthly Trend</div>
+                                    <p class="kdi-crit-cmp-chart-subtitle" id="kdi-crit-cmp-chart-subtitle">Monthly MTTR trend for S1/S2 critical machine groups. Lower is better.</p>
                                     <!-- Single-type view (S1 only or S2 only) -->
                                     <div id="kdi-crit-cmp-single" class="kdi-crit-cmp-single">
                                         <div class="chart-container kdi-chart-container kdi-crit-trend-chart" data-chart-id="kdiCritCmpChart"><canvas id="kdiCritCmpChart"></canvas></div>
@@ -413,8 +423,8 @@
                                             <div class="chart-container kdi-chart-container kdi-crit-trend-chart kdi-crit-mini-chart" data-chart-id="kdiCritCmpChart2"><canvas id="kdiCritCmpChart2"></canvas></div>
                                         </div>
                                     </div>
+                                    <div class="kdi-crit-cmp-summary" id="kdi-crit-cmp-summary"></div>
                                 </div>
-                                <div class="kdi-crit-cmp-summary" id="kdi-crit-cmp-summary"></div>
                             </div>
                         </div>
                     </div>
@@ -623,14 +633,7 @@
                     <label class="inline-label" for="mr-tracking-month">Month</label>
                     <select id="mr-tracking-month" class="inline-select"></select>
                 </div>
-                <div class="filter-inline mr-tracking-filter">
-                    <label class="inline-label" for="mr-tracking-source">Source</label>
-                    <select id="mr-tracking-source" class="inline-select">
-                        <option value="all">All Sources</option>
-                        <option value="normal">Normal MR</option>
-                        <option value="gemba">Gemba Walk</option>
-                    </select>
-                </div>
+
             </div>
             <div class="mr-tracking-summary" id="mr-tracking-summary">Loading MR tracking.</div>
             <div class="mr-tracking-quality hidden" id="mr-tracking-quality"></div>
@@ -646,47 +649,7 @@
                     <div class="chart-container mr-tracking-chart" data-chart-id="mrMonthlySeverityChart"><canvas id="mrMonthlySeverityChart"></canvas></div>
                 </div>
             </div>
-            <div class="card nested-card gemba-walk-section hidden" id="gemba-walk-section">
-                <div class="card-title" id="gemba-walk-section-title">Gemba Walk Findings</div>
-                <div class="kpi-grid gemba-kpi-grid">
-                    <div class="kpi-card highlight-purple">
-                        <div class="kpi-label">Total Findings</div>
-                        <div class="kpi-value mini" id="gemba-total">--</div>
-                        <div class="kpi-trend">In selected period</div>
-                    </div>
-                    <div class="kpi-card highlight-blue">
-                        <div class="kpi-label">Open Findings</div>
-                        <div class="kpi-value mini" id="gemba-open">--</div>
-                        <div class="kpi-trend">Not yet closed</div>
-                    </div>
-                    <div class="kpi-card highlight-red">
-                        <div class="kpi-label">Critical / High</div>
-                        <div class="kpi-value mini" id="gemba-critical-high">--</div>
-                        <div class="kpi-trend">Open Critical or High severity</div>
-                    </div>
-                    <div class="kpi-card highlight-amber">
-                        <div class="kpi-label">Overdue (&gt;14 days)</div>
-                        <div class="kpi-value mini" id="gemba-overdue">--</div>
-                        <div class="kpi-trend">Open findings older than 14 days</div>
-                    </div>
-                    <div class="kpi-card highlight-green">
-                        <div class="kpi-label">Closure Rate</div>
-                        <div class="kpi-value mini" id="gemba-closure-rate">--%</div>
-                        <div class="kpi-trend">Finished / Total raised</div>
-                    </div>
-                </div>
-                <div class="mr-tracking-chart-grid">
-                    <div class="card nested-card mr-tracking-chart-card">
-                        <div class="card-title">Findings by Issue Category</div>
-                        <div class="chart-container mr-tracking-chart" data-chart-id="gembaCategoryChart"><canvas id="gembaCategoryChart"></canvas></div>
-                    </div>
-                    <div class="card nested-card mr-tracking-chart-card">
-                        <div class="card-title">Open Findings by Age</div>
-                        <p class="card-subtitle">Days since raised — open findings only.</p>
-                        <div class="chart-container mr-tracking-chart" data-chart-id="gembaAgingChart"><canvas id="gembaAgingChart"></canvas></div>
-                    </div>
-                </div>
-            </div>
+
             <button type="button" class="topic-analysis-toggle" data-analysis-toggle aria-expanded="false">View Analysis</button>
             <div class="card nested-card mr-outstanding-table-card topic-analysis-only">
                 <div class="mr-carryover-header">
@@ -2075,7 +2038,8 @@
     </main>
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
-    <script src="script.js?v=20260623-crit-collapse-1" defer></script>
+    <script src="script.js?v=20260623-crit-collapse-2" defer></script>
+    <script src="weekly-report.js?v=20260624-wr-1" defer></script>
     <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
 </body>
 </html>
