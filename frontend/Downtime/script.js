@@ -153,6 +153,13 @@ let assetProfiles = {};            // {assetId: slim profile} from /api/asset-li
 let includeRelatedMatches = false; // "Include possible related matches" toggle (low-confidence)
 let openWorkOrdersData = [];
 let openWorkOrdersLoaded = false;
+let inactiveCriticalMachinesPayload = null;
+let inactiveCriticalMachinesLoading = false;
+let inactiveCriticalMachinesError = "";
+let inactiveCriticalMachinesKey = "";
+let inactiveCriticalMachinesPromise = null;
+let inactiveCriticalExpandedGroups = new Set();
+let inactiveCriticalCollapsedGroups = new Set();
 let assetListLoaded = false;
 let assetListLoadFailed = false;
 let selectedMachineName = null;
@@ -178,10 +185,64 @@ const EQUIP_GROUP_TO_CATEGORY = {
     "Unknown / Review": "Unclassified",
 };
 function getRowEquipmentCategory(row) {
-    const c = row && row.equipment_category;
-    if (c) return c;
-    return EQUIP_GROUP_TO_CATEGORY[String((row && row.machine_group) || "").trim()] || "Unclassified";
+    const c = row && (
+        row.resolved_machine_category
+        || row.resolvedMachineCategory
+        || row.equipment_category
+        || row.mappedMainAssetGroup
+        || row.mapped_main_asset_group
+        || row.category
+        || row.asset_category
+    );
+    if (c) {
+        const direct = String(c).trim();
+        return EQUIP_GROUP_TO_CATEGORY[direct] || direct;
+    }
+    const group = String((row && (row.machine_group || row.machine_name || row.machine_name_display)) || "").trim();
+    return EQUIP_GROUP_TO_CATEGORY[group] || "Unclassified";
 }
+
+function getKdiResolvedAssetId(row) {
+    return String(row?.resolved_asset_id || row?.resolvedAssetId || row?.asset_id || row?.equipment_id || "").trim();
+}
+
+function getKdiResolvedMachineName(row, meta = null) {
+    return String(
+        row?.resolved_machine_name
+        || row?.resolvedMachineName
+        || meta?.asset_name
+        || meta?.machine_name
+        || row?.machine_name
+        || row?.asset_name
+        || row?.equipment_name
+        || getKdiResolvedAssetId(row)
+        || "Unclassified"
+    ).trim();
+}
+
+function getKdiResolvedMachineCategory(row, meta = null) {
+    return String(
+        row?.resolved_machine_category
+        || row?.resolvedMachineCategory
+        || row?.equipment_category
+        || meta?.machine_name
+        || row?.machine_group
+        || row?.equipment_name
+        || "Unclassified"
+    ).trim();
+}
+
+function getKdiResolvedMachineGroup(row, meta = null) {
+    return String(
+        row?.resolved_machine_group
+        || row?.resolvedMachineGroup
+        || row?.asset_machine_group
+        || row?.mappedMachineGroup
+        || meta?.asset_machine_group
+        || ""
+    ).trim();
+}
+
 function applyCategoryFilter(rows) {
     if (!Array.isArray(rows) || selectedEquipmentCategory === "all") return rows || [];
     return rows.filter((r) => getRowEquipmentCategory(r) === selectedEquipmentCategory);
@@ -7752,9 +7813,10 @@ function computeMtbfFromWorkOrders(wos) {
     // Per-asset MTBF — strict end-to-start only (no start-to-start fallback).
     const byAsset = new Map();
     wos.forEach((wo) => {
-        const id = String(wo.asset_id || "").trim();
+        const id = getKdiResolvedAssetId(wo);
         if (!id || id.toUpperCase() === "WO-ASSET" || id === "--") return;
         if (isMtbfGeneralAreaWo(wo)) return;            // skip area/location placeholders
+        if (isPreventiveReliabilityWo(wo)) return;
         if (!byAsset.has(id)) byAsset.set(id, []);
         byAsset.get(id).push(wo);
     });
@@ -7786,10 +7848,10 @@ function computeMtbfFromWorkOrders(wos) {
         }
 
         const avgMtbf = gaps.length > 0 ? gaps.reduce((a, b) => a + b, 0) / gaps.length : null;
-        const meta = assetLookup.get(assetId) || {};
+        const meta = assetLookup.get(assetWos[0]?.asset_id || assetId) || {};
         results.push({
             asset_id: assetId,
-            machine_group: meta.machine_name || assetWos[0]?.machine_group || assetId,
+            machine_group: getKdiResolvedMachineGroup(assetWos[0], meta) || getKdiResolvedMachineName(assetWos[0], meta) || assetId,
             criticality: meta.criticality || assetWos[0]?.criticality || "",
             average_mtbf_hours: avgMtbf,
             work_order_count: sorted.length,
@@ -7809,9 +7871,23 @@ const MTBF_MIN_GAP_HOURS       = 1 / 60; // absolute floor — gaps <= 1 min are
 const MTBF_GENERAL_AREA_RE = /\b(risk\s*area|work\s*area|high\s+risk|low\s+risk|medium\s+risk|general\s+area|production\s+area|low\s+risk\s+area|high\s+risk\s+area)\b/i;
 
 function isMtbfGeneralAreaWo(wo) {
+    if (wo?.resolution_source === "description_detection" && (wo?.resolved_machine_group || wo?.resolvedMachineGroup)) return false;
     const name = [wo.machine_group, wo.asset_display_name, wo.machine_name, wo.raw_functional_location, wo.location]
         .filter(Boolean).join(" ");
     return MTBF_GENERAL_AREA_RE.test(name);
+}
+
+function isPreventiveReliabilityWo(wo) {
+    const text = [
+        wo?.job_trade,
+        wo?.maintenance_job_type,
+        wo?.job_type,
+        wo?.work_type,
+        wo?.work_order_type,
+        wo?.description,
+        wo?.description_original,
+    ].filter(Boolean).join(" ").toLowerCase();
+    return /\b(pm|preventive|preventative|planned maintenance)\b/.test(text);
 }
 
 function getMtbfWorkOrderStart(wo) {
@@ -7854,7 +7930,9 @@ function collectMtbfGapPoints(wos, range, criticalityFilter = "") {
             seenWorkOrderIds.add(workOrderId);
         }
         if (!matchesMtbfCriticalityFilter(wo, criticalityFilter, assetLookup)) return;
-        const assetId = String(wo.asset_id || "").trim();
+        if (isPreventiveReliabilityWo(wo)) return;
+        if (isMtbfGeneralAreaWo(wo)) return;
+        const assetId = getKdiResolvedAssetId(wo);
         if (!assetId || assetId.toUpperCase() === "WO-ASSET") return;
         const start = getMtbfWorkOrderStart(wo);
         const end = getMtbfWorkOrderEnd(wo);
@@ -7870,7 +7948,7 @@ function collectMtbfGapPoints(wos, range, criticalityFilter = "") {
             const previous = sorted[i - 1];
             const next = sorted[i];
             const gapHours = (next._start - previous._end) / 3600000;
-            if (gapHours <= 0) continue;
+            if (gapHours <= MTBF_MIN_GAP_HOURS) continue;
             if (range?.start && next._start < range.start) continue;
             if (range?.end && next._start > range.end) continue;
             points.push({ timestamp: next._start, gap_hours: gapHours });
@@ -9157,6 +9235,7 @@ function handleEquipmentCategoryChange(event) {
     // Frontend-only filter — no re-fetch needed; the page re-renders from the
     // already-loaded rows with the category filter applied in getWorkOrderRows().
     selectedEquipmentCategory = event?.target?.value || "all";
+    invalidateInactiveCriticalMachines();
     try {
         renderDowntimePage();
         if (document.getElementById("utilities-panel")?.classList.contains("active")) {
@@ -9170,6 +9249,7 @@ function handleEquipmentCategoryChange(event) {
 function handleDowntimeStageChange(event) {
     downtimeStageFilter = event?.target?.value || DOWNTIME_STAGE_ALL;
     resetStageScopedCaches();
+    invalidateInactiveCriticalMachines();
     mrMovementUserSelectedYear = false;
     mrTrackingSelectedYear = "";
     mrTrackingSelectedMonth = "";
@@ -9180,6 +9260,7 @@ function handleDowntimeStageChange(event) {
 
 async function handleAssetMappingRefresh() {
     resetStageScopedCaches();
+    invalidateInactiveCriticalMachines();
     downtimeCachePayload = null;
     setImportStatus("Refreshing Asset Master mapping...", "");
     try {
@@ -9219,6 +9300,7 @@ async function handleWorkOrderImport(event) {
         }
         downtimeCachePayload = null;
         resetStageScopedCaches();
+        invalidateInactiveCriticalMachines();
         mrMovementUserSelectedYear = false;
         mrTrackingSelectedYear = "";
         mrTrackingSelectedMonth = "";
@@ -9590,6 +9672,40 @@ function wireFilters() {
     document.querySelectorAll("[data-performance-view]").forEach((button) => {
         button.addEventListener("click", () => setPerformanceView(button.dataset.performanceView || "machine-groups"));
     });
+    document.getElementById("critical-inactive-trigger")?.addEventListener("click", openInactiveCriticalMachinesDrawer);
+    document.getElementById("critical-inactive-link")?.addEventListener("click", openInactiveCriticalMachinesDrawer);
+    document.getElementById("inactive-critical-close")?.addEventListener("click", closeInactiveCriticalMachinesDrawer);
+    document.getElementById("inactive-critical-drawer-overlay")?.addEventListener("click", (event) => {
+        if (event.target?.id === "inactive-critical-drawer-overlay") closeInactiveCriticalMachinesDrawer();
+    });
+    document.getElementById("inactive-critical-search")?.addEventListener("input", renderInactiveCriticalMachinesDrawer);
+    document.getElementById("inactive-critical-body")?.addEventListener("click", (event) => {
+        const groupToggle = event.target.closest("[data-inactive-group-toggle]");
+        if (groupToggle) {
+            const key = groupToggle.dataset.inactiveGroupToggle || "";
+            const groupRows = (inactiveCriticalMachinesPayload?.machines || []).filter((machine) => {
+                const groupKey = machine.exactMachineDetected
+                    ? `exact:${machine.exactMachineDetected}`
+                    : `asset:${machine.assetId || machine.assetName || "unknown"}`;
+                return groupKey === key;
+            });
+            const defaultExpanded = groupRows.some((row) => row.validationFlag);
+            const currentlyExpanded = inactiveCriticalExpandedGroups.has(key) || (defaultExpanded && !inactiveCriticalCollapsedGroups.has(key));
+            if (currentlyExpanded) {
+                inactiveCriticalExpandedGroups.delete(key);
+                inactiveCriticalCollapsedGroups.add(key);
+            } else {
+                inactiveCriticalCollapsedGroups.delete(key);
+                inactiveCriticalExpandedGroups.add(key);
+            }
+            renderInactiveCriticalMachinesDrawer();
+            return;
+        }
+        const action = event.target.closest("[data-inactive-drilldown]");
+        const row = event.target.closest("[data-inactive-asset-id]");
+        const assetId = action?.dataset.inactiveDrilldown || row?.dataset.inactiveAssetId || "";
+        if (assetId) openInactiveCriticalMachineDetail(assetId);
+    });
     kdiWireStaticControls();
 }
 
@@ -9631,7 +9747,67 @@ function getCriticalMachineActivityStatus(row) {
     return "active";
 }
 
-function renderActivityStatusCharts() {
+function getInactiveCriticalMachinesRequestKey() {
+    const stage = getSelectedDowntimeStage();
+    const stageValue = stage && stage !== DOWNTIME_STAGE_ALL ? stage : "";
+    const categoryValue = selectedEquipmentCategory || "all";
+    return JSON.stringify({ stage: stageValue, category: categoryValue });
+}
+
+function buildInactiveCriticalMachinesUrl() {
+    const query = new URLSearchParams({ _: String(Date.now()) });
+    const stage = getSelectedDowntimeStage();
+    if (stage && stage !== DOWNTIME_STAGE_ALL) query.set("stage", stage);
+    if (selectedEquipmentCategory && selectedEquipmentCategory !== "all") query.set("category", selectedEquipmentCategory);
+    return `/api/maintenance/critical-machines/inactive?${query.toString()}`;
+}
+
+function invalidateInactiveCriticalMachines() {
+    inactiveCriticalMachinesPayload = null;
+    inactiveCriticalMachinesError = "";
+    inactiveCriticalMachinesKey = "";
+    inactiveCriticalMachinesPromise = null;
+    inactiveCriticalExpandedGroups = new Set();
+    inactiveCriticalCollapsedGroups = new Set();
+}
+
+function loadInactiveCriticalMachines(force = false) {
+    const key = getInactiveCriticalMachinesRequestKey();
+    if (!force && inactiveCriticalMachinesPayload && inactiveCriticalMachinesKey === key) {
+        return Promise.resolve(inactiveCriticalMachinesPayload);
+    }
+    if (!force && inactiveCriticalMachinesPromise && inactiveCriticalMachinesKey === key) {
+        return inactiveCriticalMachinesPromise;
+    }
+    inactiveCriticalMachinesKey = key;
+    inactiveCriticalMachinesLoading = true;
+    inactiveCriticalMachinesError = "";
+    inactiveCriticalMachinesPromise = fetch(buildInactiveCriticalMachinesUrl(), { cache: "no-store" })
+        .then((response) => {
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            return response.json();
+        })
+        .then((payload) => {
+            inactiveCriticalMachinesPayload = payload || {};
+            return inactiveCriticalMachinesPayload;
+        })
+        .catch((error) => {
+            inactiveCriticalMachinesError = error?.message || "Inactive critical machine data could not be loaded.";
+            console.warn("Inactive critical machine load failed:", error);
+            return null;
+        })
+        .finally(() => {
+            inactiveCriticalMachinesLoading = false;
+            inactiveCriticalMachinesPromise = null;
+            renderActivityStatusCharts();
+            if (!document.getElementById("inactive-critical-drawer-overlay")?.hidden) {
+                renderInactiveCriticalMachinesDrawer();
+            }
+        });
+    return inactiveCriticalMachinesPromise;
+}
+
+function renderActivityStatusChartsLegacy() {
     destroyChart("activityDonutChart");
     const setCounts = (activeText, maintenanceText, totalText) => {
         setText("act-count-active", activeText);
@@ -9723,6 +9899,307 @@ function renderActivityStatusCharts() {
     } else {
         setNote(`${fmtNumber(latestByAsset.size)} of ${fmtNumber(total)} critical machine${total === 1 ? "" : "s"} had WOs in this period.`);
     }
+}
+
+function renderActivityStatusCharts() {
+    destroyChart("activityDonutChart");
+    const setCounts = (activeText, maintenanceText, totalText) => {
+        setText("act-count-active", activeText);
+        setText("act-count-maintenance", maintenanceText);
+        setText("act-count-total", totalText);
+    };
+    const setDetails = (activeDetail, inactiveDetail, totalDetail) => {
+        setText("cma-active-detail", activeDetail);
+        setText("cma-inactive-detail", inactiveDetail);
+        setText("cma-total-detail", totalDetail);
+    };
+    const setNote = (message) => setText("critical-status-card-note", message);
+
+    if (assetListLoadFailed) {
+        setCounts("--", "--", "--");
+        setDetails("", "", "");
+        setNote("Critical machine status is unavailable because Asset Master could not be loaded.");
+        return;
+    }
+    if (!assetListLoaded) {
+        setCounts("--", "--", "--");
+        setDetails("", "", "");
+        setNote("Loading Asset Master to identify critical machines.");
+        return;
+    }
+
+    const key = getInactiveCriticalMachinesRequestKey();
+    if (inactiveCriticalMachinesError && inactiveCriticalMachinesKey === key) {
+        setCounts("--", "--", "--");
+        setDetails("", "", "");
+        setNote(`Inactive machine details unavailable: ${inactiveCriticalMachinesError}`);
+        return;
+    }
+    if (!inactiveCriticalMachinesPayload || inactiveCriticalMachinesKey !== key) {
+        setCounts("--", "--", "--");
+        setDetails("", "", "");
+        setNote("Loading inactive critical machine details.");
+        loadInactiveCriticalMachines(false);
+        return;
+    }
+
+    const payload = inactiveCriticalMachinesPayload || {};
+    const total = Number(payload.totalCritical || 0);
+    const inactiveTotal = Number(payload.totalInactive || 0);
+    const activeTotal = Number(payload.totalActive || Math.max(total - inactiveTotal, 0));
+    const breakdown = payload.categoryBreakdown || {};
+    const prod = breakdown["Production Equipment"] || {};
+    const util = breakdown["Utilities"] || {};
+    const activeProd = Number(prod.active || 0);
+    const activeUtil = Number(util.active || 0);
+    const inactiveProd = Number(prod.inactive || 0);
+    const inactiveUtil = Number(util.inactive || 0);
+    const prodTotal = Number(prod.total || 0);
+    const utilTotal = Number(util.total || 0);
+    const otherTotal = Math.max(total - prodTotal - utilTotal, 0);
+    const catStr = (p, u) => {
+        const parts = [];
+        if (p) parts.push(`Production ${fmtNumber(p)}`);
+        if (u) parts.push(`Utilities ${fmtNumber(u)}`);
+        return parts.join(" / ") || "--";
+    };
+    const totalDetail = `Production ${fmtNumber(prodTotal)} / Utilities ${fmtNumber(utilTotal)}${otherTotal ? ` / Other ${fmtNumber(otherTotal)}` : ""}`;
+
+    setCounts(String(activeTotal), String(inactiveTotal), fmtNumber(total));
+    setDetails(catStr(activeProd, activeUtil), catStr(inactiveProd, inactiveUtil), totalDetail);
+    if (!total) {
+        setNote("No critical machines found for the selected scope.");
+    } else if (!inactiveTotal) {
+        setNote("No inactive critical machines currently found.");
+    } else {
+        setNote("Click Inactive or View inactive machines to see affected machines.");
+    }
+}
+
+function formatInactiveOpenAge(days) {
+    const value = Number(days);
+    if (!Number.isFinite(value)) return "--";
+    if (value < 1) return "<1 day";
+    return `${value.toLocaleString(undefined, { maximumFractionDigits: value >= 10 ? 0 : 1 })} days`;
+}
+
+function inactiveSeverityBadge(severity) {
+    const label = String(severity || "--").trim() || "--";
+    const normalized = normalizeClassification(label);
+    const rankMatch = normalized.match(/\d+/);
+    const rank = rankMatch ? Number(rankMatch[0]) : (normalized.includes("critical") ? 1 : 99);
+    const level = rank <= 1 ? "critical" : (rank <= 2 ? "warning" : "offline");
+    return buildStatusPill(level, label);
+}
+
+function inactiveStatusBadge(status) {
+    const text = String(status || "Open").trim() || "Open";
+    return buildStatusPill("warning", text);
+}
+
+function mappingConfidenceBadge(confidence) {
+    const text = String(confidence || "--").trim() || "--";
+    const normalized = normalizeClassification(text);
+    const level = normalized === "high" ? "stable" : (normalized === "medium" ? "warning" : "critical");
+    return buildStatusPill(level, text);
+}
+
+function renderInactiveCriticalSummary(payload) {
+    const el = document.getElementById("inactive-critical-summary");
+    if (!el) return;
+    const longest = payload?.longestOpenDays ? formatInactiveOpenAge(payload.longestOpenDays) : "--";
+    const lastSynced = payload?.lastSynced ? (fmtDateOnly(payload.lastSynced) || String(payload.lastSynced)) : "--";
+    el.innerHTML = [
+        ["Inactive", fmtNumber(payload?.totalInactive || 0)],
+        ["Highest severity", fmtNumber(payload?.highestSeverityCount || 0)],
+        ["Longest open", longest],
+        ["Last synced", lastSynced],
+    ].map(([label, value]) => `
+        <div class="inactive-critical-summary-item">
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(value)}</strong>
+        </div>
+    `).join("");
+}
+
+function renderInactiveCriticalMachinesDrawer() {
+    const body = document.getElementById("inactive-critical-body");
+    const state = document.getElementById("inactive-critical-state");
+    const subtitle = document.getElementById("inactive-critical-drawer-subtitle");
+    if (!body || !state) return;
+
+    if (inactiveCriticalMachinesLoading && !inactiveCriticalMachinesPayload) {
+        state.hidden = false;
+        state.textContent = "Loading inactive critical machines.";
+        body.innerHTML = `<tr><td colspan="11" class="empty-cell">Loading inactive critical machines.</td></tr>`;
+        renderInactiveCriticalSummary({});
+        return;
+    }
+    if (inactiveCriticalMachinesError) {
+        state.hidden = false;
+        state.textContent = `Inactive critical machines could not be loaded: ${inactiveCriticalMachinesError}`;
+        body.innerHTML = `<tr><td colspan="11" class="empty-cell">Unable to load inactive critical machines.</td></tr>`;
+        renderInactiveCriticalSummary({});
+        return;
+    }
+
+    const payload = inactiveCriticalMachinesPayload || {};
+    const machines = Array.isArray(payload.machines) ? payload.machines : [];
+    renderInactiveCriticalSummary(payload);
+    if (subtitle) {
+        subtitle.textContent = `${fmtNumber(payload.totalInactive || 0)} inactive of ${fmtNumber(payload.totalCritical || 0)} critical machines in the current Stage / Category scope.`;
+    }
+
+    const term = normalizeClassification(document.getElementById("inactive-critical-search")?.value || "");
+    const filtered = machines.filter((machine) => {
+        if (!term) return true;
+        const haystack = normalizeClassification([
+            machine.assetId,
+            machine.assetName,
+            machine.exactMachineDetected,
+            machine.machineGroup,
+            machine.machineCategory,
+            machine.areaType,
+            machine.functionalLocation,
+            machine.latestMrNo,
+            machine.latestWoNo,
+            machine.description,
+            machine.translatedDescription,
+            machine.validationFlag,
+        ].join(" "));
+        return haystack.includes(term);
+    });
+
+    if (!machines.length) {
+        state.hidden = false;
+        state.textContent = "No inactive critical machines currently found.";
+        body.innerHTML = `<tr><td colspan="11" class="empty-cell">No inactive critical machines currently found.</td></tr>`;
+        return;
+    }
+    if (!filtered.length) {
+        state.hidden = false;
+        state.textContent = "No inactive critical machines match the current search.";
+        body.innerHTML = `<tr><td colspan="11" class="empty-cell">No inactive critical machines match the current search.</td></tr>`;
+        return;
+    }
+
+    state.hidden = true;
+    state.textContent = "";
+    const groups = new Map();
+    filtered.forEach((machine) => {
+        const key = machine.exactMachineDetected
+            ? `exact:${machine.exactMachineDetected}`
+            : `asset:${machine.assetId}`;
+        if (!groups.has(key)) {
+            groups.set(key, {
+                key,
+                label: machine.exactMachineDetected || machine.assetName || machine.assetId || "Unknown machine",
+                rows: [],
+            });
+        }
+        groups.get(key).rows.push(machine);
+    });
+
+    const renderIssueCell = (machine) => {
+        const issue = machine.description || machine.problemType || "--";
+        const translated = machine.translatedDescription && machine.translatedDescription !== issue
+            ? machine.translatedDescription
+            : "";
+        const typeLine = [machine.problemType, machine.jobType, machine.trade].filter(Boolean).join(" / ");
+        return `
+            <div class="inactive-critical-desc" title="${escapeHtml(issue)}">${escapeHtml(issue)}</div>
+            ${translated ? `<div class="inactive-critical-translation">${escapeHtml(translated)}</div>` : ""}
+            <div class="inactive-critical-sub">${escapeHtml(typeLine || "--")}</div>
+        `;
+    };
+
+    const renderMachineRow = (machine, childClass = "") => {
+        const age = Number(machine.openAgeDays || 0);
+        const rowClass = `${age >= 7 ? "long-open" : ""} ${childClass}`.trim();
+        const mrWo = [machine.latestMrNo, machine.latestWoNo].filter(Boolean).join(" / ") || "--";
+        const dates = `${fmtDateOnly(machine.actualStart) || "--"} / ${fmtDateOnly(machine.actualEnd) || "--"}`;
+        return `
+            <tr class="${rowClass}" data-inactive-asset-id="${escapeHtml(machine.assetId || "")}">
+                <td>
+                    <div class="inactive-critical-asset">${escapeHtml(machine.assetId || "--")}</div>
+                    <div class="inactive-critical-sub">${escapeHtml(machine.assetName || "--")}</div>
+                </td>
+                <td>
+                    <div>${escapeHtml(machine.exactMachineDetected || "--")}</div>
+                    ${machine.exactMachineAssetId ? `<div class="inactive-critical-sub">${escapeHtml(machine.exactMachineAssetId)}</div>` : ""}
+                </td>
+                <td>
+                    <div>${escapeHtml(machine.machineGroup || "--")}</div>
+                    <div class="inactive-critical-sub">${escapeHtml(machine.machineCategory || "--")} / ${escapeHtml(machine.areaType || "--")} ${machine.criticalType ? `/ ${escapeHtml(machine.criticalType)}` : ""}</div>
+                </td>
+                <td>
+                    <div>${escapeHtml(machine.stage || "--")}</div>
+                    <div class="inactive-critical-sub">${escapeHtml(machine.functionalLocation || "--")}</div>
+                </td>
+                <td>${escapeHtml(mrWo)}</td>
+                <td>${inactiveStatusBadge(machine.status)}<div class="inactive-critical-sub">${inactiveSeverityBadge(machine.severity)} ${mappingConfidenceBadge(machine.mappingConfidence)}</div></td>
+                <td>${escapeHtml(dates)}</td>
+                <td><strong>${escapeHtml(formatInactiveOpenAge(machine.openAgeDays))}</strong></td>
+                <td>${renderIssueCell(machine)}</td>
+                <td><div class="inactive-critical-validation">${escapeHtml(machine.validationFlag || "--")}</div></td>
+                <td>${escapeHtml(machine.owner || "--")}<div><button type="button" class="inactive-critical-action" data-inactive-drilldown="${escapeHtml(machine.assetId || "")}">Drill down</button></div></td>
+            </tr>
+        `;
+    };
+
+    body.innerHTML = [...groups.values()].map((group) => {
+        const rows = group.rows;
+        if (rows.length === 1) return renderMachineRow(rows[0]);
+        const representative = rows[0];
+        const defaultExpanded = rows.some((row) => row.validationFlag);
+        const expanded = inactiveCriticalExpandedGroups.has(group.key) || (defaultExpanded && !inactiveCriticalCollapsedGroups.has(group.key));
+        const childRows = expanded ? rows.map((row) => renderMachineRow(row, "inactive-critical-child-row")).join("") : "";
+        const worstAge = Math.max(...rows.map((row) => Number(row.openAgeDays || 0)));
+        return `
+            <tr class="inactive-critical-group-row" data-inactive-group-toggle="${escapeHtml(group.key)}">
+                <td colspan="11">
+                    <div class="inactive-critical-group-main">
+                        <span class="inactive-critical-group-caret">${expanded ? "v" : ">"}</span>
+                        <strong>${escapeHtml(group.label)}</strong>
+                        <span>${fmtNumber(rows.length)} open issue${rows.length === 1 ? "" : "s"}</span>
+                        <span>${escapeHtml(representative.machineCategory || "--")} / ${escapeHtml(representative.areaType || "--")}</span>
+                        <span>Longest open ${escapeHtml(formatInactiveOpenAge(worstAge))}</span>
+                        ${rows.some((row) => row.validationFlag) ? `<span class="inactive-critical-validation-chip">Mapping check needed</span>` : ""}
+                    </div>
+                </td>
+            </tr>
+            ${childRows}
+        `;
+    }).join("");
+}
+
+function openInactiveCriticalMachinesDrawer() {
+    const overlay = document.getElementById("inactive-critical-drawer-overlay");
+    if (!overlay) return;
+    overlay.hidden = false;
+    renderInactiveCriticalMachinesDrawer();
+    loadInactiveCriticalMachines(false);
+}
+
+function closeInactiveCriticalMachinesDrawer() {
+    const overlay = document.getElementById("inactive-critical-drawer-overlay");
+    if (overlay) overlay.hidden = true;
+}
+
+function openInactiveCriticalMachineDetail(assetId) {
+    const id = String(assetId || "").trim().toUpperCase();
+    if (!id) return;
+    const machine = (assetListData || []).find((entry) =>
+        (entry.assets || []).some((asset) => String(asset.asset_id || "").trim().toUpperCase() === id)
+    );
+    if (!machine) return;
+    closeInactiveCriticalMachinesDrawer();
+    setPerformanceView("utilities");
+    selectMachineName(machine.machine_name);
+    setTimeout(() => {
+        selectAssetUnit(id);
+        document.getElementById("machine-detail-panel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 80);
 }
 
 function getWorkOrdersForAsset(assetId) {
@@ -12344,7 +12821,7 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
     const assetMap = new Map();
 
     wos.forEach((wo) => {
-        const assetId = String(wo.asset_id || wo.equipment_id || "").trim() || "Missing Asset";
+        const assetId = getKdiResolvedAssetId(wo) || "Missing Asset";
         if (!assetMap.has(assetId)) {
             const meta = getAssetMetaFromLookup(assetLookup, wo.asset_id);
             // Prefer the per-asset friendly name from Asset_Master.xlsx,
@@ -12353,9 +12830,13 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
             // kept in `group` below for the group-by view.
             assetMap.set(assetId, {
                 assetId,
-                assetName: String(meta?.asset_name || meta?.machine_name || wo.machine_name || wo.asset_name || wo.equipment_name || assetId).trim(),
-                group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
-                assetMachineGroup: String(meta?.asset_machine_group || wo.asset_machine_group || "").trim(),
+                originalAssetId: String(wo.asset_id || wo.equipment_id || "").trim(),
+                originalAssetName: String(wo.asset_display_name || wo.asset_name || wo.mappedAssetName || wo.machine_name || "").trim(),
+                assetName: getKdiResolvedMachineName(wo, meta),
+                group: getKdiResolvedMachineCategory(wo, meta),
+                assetMachineGroup: getKdiResolvedMachineGroup(wo, meta),
+                resolutionSource: String(wo.resolution_source || "").trim(),
+                resolutionConfidence: String(wo.resolution_confidence || "").trim(),
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 hours: [],
                 totalDowntimeHours: 0,
@@ -12659,8 +13140,12 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
             rowsById.set(key, {
                 assetId: entry?.assetId || "--",
                 assetName: entry?.assetName || entry?.assetId || "--",
+                originalAssetId: entry?.originalAssetId || entry?.assetId || "--",
+                originalAssetName: entry?.originalAssetName || "",
                 group: entry?.group || "Unclassified",
                 assetMachineGroup: entry?.assetMachineGroup || "",
+                resolutionSource: entry?.resolutionSource || "",
+                resolutionConfidence: entry?.resolutionConfidence || "",
                 criticality: entry?.criticality || "Unclassified",
                 woCount: 0,
                 mttrWoCount: 0,
@@ -12674,8 +13159,11 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
         }
         const row = rowsById.get(key);
         if ((!row.assetName || row.assetName === row.assetId) && entry?.assetName) row.assetName = entry.assetName;
+        if ((!row.originalAssetName || row.originalAssetName === row.originalAssetId) && entry?.originalAssetName) row.originalAssetName = entry.originalAssetName;
         if (!row.group || row.group === "Unclassified") row.group = entry?.group || row.group;
         if (!row.assetMachineGroup && entry?.assetMachineGroup) row.assetMachineGroup = entry.assetMachineGroup;
+        if (!row.resolutionSource && entry?.resolutionSource) row.resolutionSource = entry.resolutionSource;
+        if (!row.resolutionConfidence && entry?.resolutionConfidence) row.resolutionConfidence = entry.resolutionConfidence;
         if ((!row.criticality || row.criticality === "Unclassified") && entry?.criticality) row.criticality = entry.criticality;
         return row;
     };
@@ -12745,19 +13233,28 @@ function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critF
         isMachineGroupMode ? activeFilter : ""
     ).filter((row) => !drilldownSearch || kdiAssetMatchesSearch(row, drilldownSearch) || kdiNormalizeSearchTerm(row.group).includes(drilldownSearch));
     if (!rows.length) {
-        tbody.innerHTML = `<tr><td colspan="8" class="empty-cell">${drilldownSearch ? "No assets match the search." : "No data for the selected filter."}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="11" class="empty-cell">${drilldownSearch ? "No assets match the search." : "No data for the selected filter."}</td></tr>`;
         return;
     }
     tbody.innerHTML = rows.map((row) => `
         <tr>
-            <td>${escapeHtml(row.assetId || "--")}</td>
-            <td>${escapeHtml(row.assetName || "--")}</td>
-            <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
-            <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
+            <td>${escapeHtml(row.group || "--")}</td>
+            <td>${escapeHtml(row.assetMachineGroup || "--")}</td>
+            <td>
+                <div>${escapeHtml(row.assetName || "--")}</div>
+                <div class="kdi-resolution-sub">${escapeHtml(row.assetId || "--")}</div>
+            </td>
+            <td>
+                <div>${escapeHtml(row.originalAssetId || "--")}</div>
+                <div class="kdi-resolution-sub">${escapeHtml(row.originalAssetName || "--")}</div>
+            </td>
+            <td>${escapeHtml(String(row.resolutionSource || "--").replace(/_/g, " "))}</td>
+            <td>${row.resolutionConfidence ? buildStatusPill(row.resolutionConfidence === "high" ? "stable" : (row.resolutionConfidence === "medium" ? "warning" : "critical"), row.resolutionConfidence) : "--"}</td>
             <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
-            <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
-            <td>${row.lastFailureDate ? escapeHtml(fmtDateOnly(row.lastFailureDate)) : "--"}</td>
+            <td class="kdi-number-cell">${fmtNumber(row.mttrWoCount)}</td>
+            <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
             <td class="kdi-number-cell">${fmtNumber(row.repeatFailureCount)}</td>
+            <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
         </tr>
     `).join("");
 }
@@ -12773,22 +13270,27 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
     const byAsset = new Map();
 
     wos.forEach((wo) => {
-        const assetId = String(wo.asset_id || "").trim();
+        const assetId = getKdiResolvedAssetId(wo);
         if (!assetId || assetId.toUpperCase() === "WO-ASSET") return;
         if (isMtbfGeneralAreaWo(wo)) return;   // exclude general area/location placeholders
+        if (isPreventiveReliabilityWo(wo)) return;
         const start = parseDateValue(wo.actual_start_time || wo.actual_start || wo.maintenance_start_time || wo.start_time);
         if (!start) return;
         // STRICT: no fallback to start — must have an actual end for end-to-start MTBF.
         const end = parseDateValue(wo.actual_end_time || wo.actual_end || wo.maintenance_end_time || wo.end_time);
         if (!byAsset.has(assetId)) {
-            const meta = getAssetMetaFromLookup(assetLookup, assetId);
+            const meta = getAssetMetaFromLookup(assetLookup, wo.asset_id || assetId);
             // Prefer the per-asset friendly name from Asset_Master.xlsx
             // (same precedence rule as the MTTR computation above).
             byAsset.set(assetId, {
                 assetId,
-                assetName: String(meta?.asset_name || meta?.machine_name || wo.machine_name || wo.asset_name || wo.equipment_name || assetId).trim(),
-                group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
-                assetMachineGroup: String(meta?.asset_machine_group || wo.asset_machine_group || "").trim(),
+                originalAssetId: String(wo.asset_id || "").trim(),
+                originalAssetName: String(wo.asset_display_name || wo.asset_name || wo.mappedAssetName || wo.machine_name || "").trim(),
+                assetName: getKdiResolvedMachineName(wo, meta),
+                group: getKdiResolvedMachineCategory(wo, meta),
+                assetMachineGroup: getKdiResolvedMachineGroup(wo, meta),
+                resolutionSource: String(wo.resolution_source || "").trim(),
+                resolutionConfidence: String(wo.resolution_confidence || "").trim(),
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 wos: [],
                 lastFailureDate: null,

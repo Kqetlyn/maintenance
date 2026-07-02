@@ -22,10 +22,12 @@ from downtime_management import (
     CRITICALITY_NON_CRITICAL,
     CRITICALITY_RANK,
     REFRIGERATION_GROUP,
+    resolve_machine_group,
+    _build_asset_master_machine_index,
     _normalize_criticality,
     _normalize_display_criticality,
 )
-from asset_mapping import get_asset_mapping_meta as get_grouped_machine_mapping_meta
+from asset_mapping import get_asset_mapping_meta as get_grouped_machine_mapping_meta, load_asset_mapping
 
 _log = logging.getLogger(__name__)
 
@@ -46,7 +48,7 @@ _DOWNTIME_CACHE = {}
 _WO_LOAD_CACHE = {"sig": None, "payload": None}
 # Keyed by normalised stage string; cleared by import_work_order_file().
 _SQL_WO_CACHE: dict = {}
-DOWNTIME_CACHE_VERSION = "2026-06-18-stage-text-detection"
+DOWNTIME_CACHE_VERSION = "2026-06-30-asset-master-functional-location"
 DOWNTIME_EXPORT_YEAR = 2026
 
 PRIMARY_WORK_ORDER_DOWNTIME_FILE = os.path.join(DATA_DIR, "data downtime.csv")
@@ -176,7 +178,10 @@ def _sql_row_to_enriched(row: dict) -> dict:
     am_criticality = row.get("am_criticality")
     am_is_critical = row.get("am_is_critical")
     am_area        = str(row.get("am_area") or "").strip()
-    has_am_match   = am_criticality is not None
+    am_category    = str(row.get("am_category") or "").strip()
+    am_machine_group = str(row.get("am_machine_group") or "").strip()
+    am_match_source = str(row.get("am_match_source") or "").strip()
+    has_am_match   = bool(am_match_source or am_criticality or am_category)
 
     # Criticality
     if has_am_match and am_criticality:
@@ -187,14 +192,24 @@ def _sql_row_to_enriched(row: dict) -> dict:
     is_critical_flag = bool(am_is_critical) if am_is_critical is not None else (criticality == CRITICALITY_CRITICAL)
     crit_rank = CRITICALITY_RANK.get(criticality, CRITICALITY_RANK.get("Unmapped", 2))
 
-    location = am_area or "Unassigned"
+    location = am_area or func_loc or "Unassigned"
 
     # Status flags
     status_lower = status.lower()
-    is_open     = status_lower in {"new", "in progress", "inprogress"}
+    is_open     = status_lower in {"new", "in progress", "inprogress", "confirm", "rework", "re work"}
     is_finished = status_lower in {"finished", "completed", "closed", "resolved", "done"}
 
-    is_valid = dq_status == "Valid"
+    if dq_status == "Valid":
+        dq_flags = ["Valid"]
+    elif review_reason:
+        dq_flags = [r.strip() for r in review_reason.split(";") if r.strip()]
+    else:
+        dq_flags = [dq_status or "Review"]
+    if is_open:
+        dq_flags = [flag for flag in dq_flags if flag != "Review status"]
+    if not dq_flags:
+        dq_flags = ["Valid"]
+    is_valid = dq_flags == ["Valid"]
 
     # Datetime parsing
     actual_start_dt = _parse_iso_simple(actual_start_iso)
@@ -236,19 +251,11 @@ def _sql_row_to_enriched(row: dict) -> dict:
     mapping_status = "Mapped" if has_am_match else "Unmapped"
     mapping_source = "Asset_Master.xlsx" if has_am_match else "fallback"
 
-    # Data quality flags list
-    if is_valid:
-        dq_flags = ["Valid"]
-    elif review_reason:
-        dq_flags = [r.strip() for r in review_reason.split(";") if r.strip()]
-    else:
-        dq_flags = [dq_status or "Review"]
-
     # Acknowledgement
     if is_finished and wo_number:
         ack_status = "Acknowledged"
     elif is_open:
-        ack_status = "Pending"
+        ack_status = "Acknowledged / In Progress" if wo_number and not is_new_lifecycle(status) else "Pending"
     else:
         ack_status = ""
 
@@ -288,12 +295,16 @@ def _sql_row_to_enriched(row: dict) -> dict:
         "equipment_category": category,
         "mappedMainAssetGroup": category,
         "mapped_main_asset_group": category,
+        "mappedMachineGroup": am_machine_group,
+        "asset_machine_group": am_machine_group,
         "mappedSubAssetGroup": "",
         "mapped_sub_asset_group": "",
         "mappedLocation": location,
         "mapped_location": location,
         "mappedSystemArea": "",
         "mapped_system_area": "",
+        "mappedFunctionalLocation": func_loc,
+        "mapped_functional_location": func_loc,
         "mappedAssetName": asset_name,
         "mapped_asset_name": asset_name,
         # Criticality
@@ -305,6 +316,7 @@ def _sql_row_to_enriched(row: dict) -> dict:
         # Mapping metadata
         "mapping_status": mapping_status,
         "mappingStatus": mapping_status,
+        "mapping_match_source": am_match_source,
         "mapping_source": mapping_source,
         "classification_source": mapping_source,
         "has_assetlist_classification": has_am_match,
@@ -333,7 +345,7 @@ def _sql_row_to_enriched(row: dict) -> dict:
         "duration_context": duration_context,
         "valid_mttr_ttr": is_valid,
         # Data quality
-        "data_quality_flag": dq_status or "Review",
+        "data_quality_flag": dq_flags[0] if len(dq_flags) == 1 else "; ".join(dq_flags),
         "data_quality_flags": dq_flags,
         # Description
         "description": description,
@@ -1015,25 +1027,60 @@ def build_mtbf_work_order_history_payload(stage=None):
     records = []
     years = set()
     months = set()
+    asset_master = load_asset_mapping(DATA_DIR)
+    asset_index = _build_asset_master_machine_index(asset_master)
 
     for row in source_rows:
+        resolution = resolve_machine_group(row, asset_master, asset_index)
         start_time = row.get("actual_start_time") or row.get("maintenance_start_time") or row.get("start_time")
         end_time = row.get("actual_end_time") or row.get("maintenance_end_time") or row.get("end_time")
         start_dt = parse_iso_datetime(start_time)
         if start_dt is not None:
             years.add(str(start_dt.year))
             months.add(f"{start_dt.year}-{start_dt.month:02d}")
+        end_dt = parse_iso_datetime(end_time)
+        if end_dt is not None:
+            years.add(str(end_dt.year))
+            months.add(f"{end_dt.year}-{end_dt.month:02d}")
 
         records.append(
             {
                 "asset_id": row.get("asset_id"),
+                "asset_name": row.get("asset_name") or row.get("mapped_asset_name") or row.get("machine_name"),
+                "asset_display_name": row.get("asset_display_name") or row.get("asset_name"),
                 "machine_group": row.get("machine_group") or row.get("machine_name_display") or row.get("machine_name"),
+                "machine_name": row.get("machine_name"),
+                "machine_name_display": row.get("machine_name_display"),
+                "equipment_category": row.get("equipment_category") or row.get("mappedMainAssetGroup"),
+                "mappedMainAssetGroup": row.get("mappedMainAssetGroup") or row.get("mapped_main_asset_group"),
+                "mappedMachineGroup": row.get("mappedMachineGroup") or row.get("asset_machine_group"),
+                "asset_machine_group": row.get("asset_machine_group") or row.get("mappedMachineGroup"),
+                "resolved_asset_id": resolution.get("resolved_asset_id") or row.get("asset_id"),
+                "resolved_machine_name": resolution.get("resolved_machine_name") or row.get("machine_name_display"),
+                "resolved_machine_group": resolution.get("resolved_machine_group") or row.get("asset_machine_group") or row.get("mappedMachineGroup"),
+                "resolved_machine_category": resolution.get("resolved_machine_category") or row.get("equipment_category") or row.get("mappedMainAssetGroup"),
+                "resolved_machine_alias": resolution.get("resolved_machine_alias") or "",
+                "resolution_source": resolution.get("resolution_source"),
+                "resolution_confidence": resolution.get("resolution_confidence"),
+                "resolution_note": resolution.get("resolution_note"),
+                "mappedStage": row.get("mappedStage") or row.get("mapped_stage"),
                 "criticality": row.get("criticality"),
                 "raw_criticality": row.get("raw_criticality"),
+                "status": row.get("status"),
+                "request_state": row.get("request_state") or row.get("status"),
                 "start_time": start_time,
                 "end_time": end_time,
                 "actual_start_time": row.get("actual_start_time"),
                 "actual_end_time": row.get("actual_end_time"),
+                "maintenance_start_time": row.get("maintenance_start_time"),
+                "maintenance_end_time": row.get("maintenance_end_time"),
+                "duration_hours": row.get("duration_hours"),
+                "ttr_hours": row.get("ttr_hours"),
+                "original_ttr_hours": row.get("original_ttr_hours"),
+                "valid_mttr_ttr": row.get("valid_mttr_ttr"),
+                "valid_ttr": row.get("valid_ttr"),
+                "data_quality_flag": row.get("data_quality_flag"),
+                "data_quality_flags": row.get("data_quality_flags"),
                 "work_order_id": row.get("work_order_id"),
             }
         )
@@ -1046,6 +1093,277 @@ def build_mtbf_work_order_history_payload(stage=None):
         "work_order_count": len(records),
         "work_orders": records,
         "sources": get_work_order_import_status().get("sources", []),
+    }
+
+
+def _critical_machine_category(value):
+    text = str(value or "").strip()
+    if text == "Production Equipment":
+        return "Production Equipment"
+    if text in {"Utilities", "Utilities / Support", "Refrigeration"}:
+        return "Utilities"
+    return "Unclassified"
+
+
+def _critical_area_type(stage, location):
+    stage_text = str(stage or "").strip().lower()
+    location_text = str(location or "").strip().lower()
+    production_tokens = (
+        "production plant", "production area", "area", "packing", "assembly",
+        "cooking", "preparation", "medium risk", "high risk", "low risk",
+    )
+    if stage_text in {"stage 1", "stage 2"} and any(token in location_text for token in production_tokens):
+        return "Production Area"
+    return "Utilities / Support" if "utilit" in location_text or "boiler" in location_text else ""
+
+
+def _detect_exact_machine_from_description(description):
+    text = str(description or "").strip()
+    normalized = re.sub(r"\s+", " ", text.lower())
+    # X-Ray No.1 can be typed several ways in Thai/English MR text. Detecting it
+    # lets the inactive-machine table flag cases where D365 selected a general
+    # X-Ray asset while the description points to the exact X-Ray No.1 machine.
+    if re.search(r"(?:เครื่อง\s*)?x\s*[- ]?\s*ray\s*(?:no\.?\s*)?1\b", normalized):
+        return "X-Ray No.1"
+    if re.search(r"\bxray\s*(?:no\.?\s*)?1\b", normalized):
+        return "X-Ray No.1"
+    return ""
+
+
+def _detect_exact_machine_from_asset_name(asset_name):
+    normalized = re.sub(r"\s+", " ", str(asset_name or "").strip().lower())
+    if re.search(r"\bx\s*[- ]?\s*ray\s*(?:no\.?\s*)?1\b", normalized):
+        return "X-Ray No.1"
+    return ""
+
+
+def _inactive_translated_description(description, detected_machine):
+    text = str(description or "")
+    lowered = text.lower()
+    if "x-ray" in lowered or "xray" in lowered or "x ray" in lowered:
+        if "สายพาน" in text and "เสียงดัง" in text:
+            target = "X-Ray 1" if detected_machine == "X-Ray No.1" or re.search(r"x\s*[- ]?\s*ray\s*1", lowered) else "X-Ray"
+            return f"Fix noisy conveyor belt on {target}."
+    return translate_maintenance_description(description)
+
+
+def _machine_name_matches_detected(asset_name, detected_machine):
+    if not detected_machine:
+        return False
+    normalize = lambda value: re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+    return normalize(asset_name) == normalize(detected_machine)
+
+
+def _mapping_confidence_and_flag(asset_id, asset_name, detected_machine, detected_asset_id):
+    if not detected_machine:
+        return "High", ""
+    if _machine_name_matches_detected(asset_name, detected_machine):
+        return "High", ""
+    is_general = bool(re.search(r"\bx\s*[- ]?\s*ray\b", str(asset_name or ""), re.I))
+    if is_general:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+    target = detected_asset_id or detected_machine
+    return (
+        confidence,
+        f"Check asset mapping. Description points to {detected_machine}; confirm whether this should be {target} or whether {asset_id} is a duplicate/general X-Ray asset.",
+    )
+
+
+def _critical_machine_stage_matches(asset, stage):
+    normalized_stage = normalize_stage_filter(stage)
+    if not normalized_stage:
+        return True
+    return str(asset.get("mappedStage") or asset.get("stage") or "").strip() == normalized_stage
+
+
+def _is_placeholder_completion_date(dt):
+    if dt is None:
+        return True
+    return dt.year < 2000
+
+
+def _inactive_status_bucket(row):
+    status = normalize_lifecycle_state(row.get("request_state") or row.get("status"))
+    end_dt = parse_iso_datetime(row.get("actual_end_time") or row.get("maintenance_end_time") or row.get("end_time"))
+    if status in {"finished", "completed", "closed", "confirmed closed", "resolved", "done"} and not _is_placeholder_completion_date(end_dt):
+        return "closed"
+    if status in {"new", "confirm", "in progress", "inprogress", "open", "pending", "rework", "re work"}:
+        return "open"
+    if _is_placeholder_completion_date(end_dt):
+        return "open"
+    return "closed"
+
+
+def _inactive_machine_sort_time(row):
+    for key in ("actual_start_time", "maintenance_start_time", "start_time", "request_created_time", "created_date", "latest_event_time"):
+        parsed = parse_iso_datetime(row.get(key))
+        if parsed is not None:
+            return parsed
+    return datetime.min
+
+
+def _severity_rank(value):
+    text = str(value or "").strip().upper()
+    match = re.search(r"\d+", text)
+    if match:
+        return int(match.group(0))
+    if "CRITICAL" in text:
+        return 1
+    if "HIGH" in text:
+        return 2
+    if "MED" in text:
+        return 3
+    if "LOW" in text:
+        return 4
+    return 99
+
+
+def build_inactive_critical_machines_payload(stage=None, category=None):
+    """
+    Inactive critical machine logic:
+    Asset Master defines the critical machine scope. A machine is inactive when it
+    has any open/latest WO/MR without a valid Actual End. Missing, blank, invalid,
+    or placeholder completion dates are treated as still open, not as completed
+    records and not as data-quality exclusions.
+    """
+    from asset_mapping import load_asset_mapping
+
+    mapping = load_asset_mapping(DATA_DIR)
+    asset_map = mapping.get("asset_map") or {}
+    requested_category = str(category or "all").strip()
+
+    critical_assets = {}
+    critical_groups = {}
+    exact_asset_by_name = {}
+    for asset_id, asset in asset_map.items():
+        asset_display_name = asset.get("mappedAssetName") or asset.get("display_name") or ""
+        if asset_display_name:
+            exact_asset_by_name[re.sub(r"[^a-z0-9]+", "", str(asset_display_name).lower())] = str(asset_id or asset.get("asset_id") or "").strip().upper()
+        if asset.get("criticality") != "Critical":
+            continue
+        if not _critical_machine_stage_matches(asset, stage):
+            continue
+        machine_category = _critical_machine_category(asset.get("mappedMainAssetGroup") or asset.get("machine_group"))
+        if requested_category and requested_category != "all" and machine_category != requested_category:
+            continue
+        aid = str(asset_id or asset.get("asset_id") or "").strip().upper()
+        if not aid:
+            continue
+        machine_group = str(asset.get("mappedMachineGroup") or asset.get("asset_machine_group") or asset.get("mappedSubAssetGroup") or aid).strip()
+        group_key = f"{machine_category}||{machine_group.lower()}"
+        critical_assets[aid] = {
+            "asset": asset,
+            "machineCategory": machine_category,
+            "machineGroup": machine_group,
+            "groupKey": group_key,
+        }
+        critical_groups.setdefault(group_key, set()).add(aid)
+
+    if _sql_has_work_orders():
+        work_order_payload = load_work_order_downtime_sql(None)
+        rows = work_order_payload.get("records") or []
+    else:
+        work_order_payload = load_work_order_downtime()
+        rows = work_order_payload.get("records") or []
+
+    open_by_asset = {}
+    for row in rows:
+        aid = str(row.get("asset_id") or row.get("machine_code") or row.get("equipment_id") or "").strip().upper()
+        if not aid or aid not in critical_assets:
+            continue
+        if _inactive_status_bucket(row) != "open":
+            continue
+        row_time = _inactive_machine_sort_time(row)
+        existing = open_by_asset.get(aid)
+        if existing is None or row_time > existing["sort_time"]:
+            open_by_asset[aid] = {"row": row, "sort_time": row_time}
+
+    now = datetime.now()
+    machines = []
+    for aid, match in open_by_asset.items():
+        asset_info = critical_assets[aid]
+        asset = asset_info["asset"]
+        row = match["row"]
+        actual_start = row.get("actual_start_time") or row.get("maintenance_start_time") or row.get("start_time")
+        actual_end = row.get("actual_end_time") or row.get("maintenance_end_time") or row.get("end_time")
+        start_dt = parse_iso_datetime(actual_start) or parse_iso_datetime(row.get("request_created_time") or row.get("created_date"))
+        open_age_days = round(max((now - start_dt).total_seconds(), 0) / 86400, 1) if start_dt else None
+        critical_type = "S1" if len(critical_groups.get(asset_info["groupKey"], set())) == 1 else "S2"
+        asset_name = asset.get("mappedAssetName") or asset.get("display_name") or row.get("asset_name") or row.get("machine_name") or aid
+        description = row.get("description") or row.get("description_original") or row.get("remarks") or ""
+        selected_exact_machine = _detect_exact_machine_from_asset_name(asset_name)
+        exact_machine = _detect_exact_machine_from_description(description) or selected_exact_machine
+        translated_description = _inactive_translated_description(description, exact_machine) or row.get("translated_description") or ""
+        exact_machine_key = re.sub(r"[^a-z0-9]+", "", exact_machine.lower()) if exact_machine else ""
+        exact_machine_asset_id = exact_asset_by_name.get(exact_machine_key, "") if exact_machine_key else ""
+        mapping_confidence, validation_flag = _mapping_confidence_and_flag(aid, asset_name, exact_machine, exact_machine_asset_id)
+        location_text = asset.get("mappedFunctionalLocationName") or asset.get("functional_location_name") or asset.get("mappedLocation") or row.get("mappedLocation") or ""
+        area_type = _critical_area_type(asset.get("mappedStage") or asset.get("stage") or row.get("mappedStage"), location_text)
+        is_xray_machine = "x-ray" in f"{asset_name} {exact_machine}".lower()
+        machines.append({
+            "assetId": aid,
+            "assetName": asset_name,
+            "machineGroup": "Production Equipment" if is_xray_machine else (asset_info["machineGroup"] or row.get("machine_group") or ""),
+            "machineCategory": "Production Equipment" if is_xray_machine else asset_info["machineCategory"],
+            "stage": asset.get("mappedStage") or asset.get("stage") or row.get("mappedStage") or "",
+            "functionalLocation": location_text,
+            "areaType": area_type,
+            "criticalType": "S2" if is_xray_machine else critical_type,
+            "exactMachineDetected": exact_machine,
+            "exactMachineAssetId": exact_machine_asset_id,
+            "mappingConfidence": mapping_confidence,
+            "validationFlag": validation_flag,
+            "latestMrNo": row.get("maintenance_order_id") or row.get("mr_number") or row.get("request_id") or "",
+            "latestWoNo": row.get("work_order_id") or row.get("wo_number") or row.get("wo_id") or "",
+            "status": row.get("request_state") or row.get("status") or "",
+            "severity": row.get("service_level") or row.get("severity") or row.get("priority") or "",
+            "actualStart": actual_start,
+            "actualEnd": actual_end if not _is_placeholder_completion_date(parse_iso_datetime(actual_end)) else "",
+            "openAgeDays": open_age_days,
+            "description": description,
+            "translatedDescription": translated_description,
+            "problemType": row.get("problem_type") or row.get("problem") or "",
+            "jobType": row.get("maintenance_job_type") or row.get("job_type") or "",
+            "trade": row.get("job_trade") or row.get("trade") or row.get("system") or "",
+            "owner": row.get("started_by") or row.get("assigned_to") or row.get("created_by") or "",
+        })
+
+    def machine_sort_key(machine):
+        start_dt = parse_iso_datetime(machine.get("actualStart"))
+        start_ts = start_dt.timestamp() if start_dt else 0
+        return (_severity_rank(machine.get("severity")), -(machine.get("openAgeDays") or 0), -start_ts)
+
+    machines.sort(key=machine_sort_key)
+    longest_open = max((m.get("openAgeDays") or 0 for m in machines), default=0)
+    highest_rank = min((_severity_rank(m.get("severity")) for m in machines), default=None)
+    highest_severity_count = sum(1 for m in machines if highest_rank is not None and _severity_rank(m.get("severity")) == highest_rank)
+    active_count = max(len(critical_assets) - len(machines), 0)
+    category_breakdown = {}
+    for info in critical_assets.values():
+        cat = info["machineCategory"]
+        category_breakdown.setdefault(cat, {"total": 0, "inactive": 0, "active": 0})
+        category_breakdown[cat]["total"] += 1
+    for machine in machines:
+        cat = machine["machineCategory"]
+        category_breakdown.setdefault(cat, {"total": 0, "inactive": 0, "active": 0})
+        category_breakdown[cat]["inactive"] += 1
+    for counts in category_breakdown.values():
+        counts["active"] = max(counts["total"] - counts["inactive"], 0)
+    return {
+        "available": mapping.get("available", False),
+        "totalInactive": len(machines),
+        "totalActive": active_count,
+        "totalCritical": len(critical_assets),
+        "categoryBreakdown": category_breakdown,
+        "highestSeverityCount": highest_severity_count,
+        "longestOpenDays": longest_open,
+        "lastSynced": work_order_payload.get("last_synced") or mapping.get("last_synced"),
+        "stage": normalize_stage_filter(stage) or "",
+        "category": requested_category or "all",
+        "machines": machines,
+        "message": "Inactive critical machines loaded." if mapping.get("available", False) else mapping.get("message", "Asset Master not available."),
     }
 
 
@@ -1099,7 +1417,8 @@ def is_new_lifecycle(value):
 
 
 def is_in_progress_lifecycle(value):
-    return normalize_lifecycle_state(value).replace(" ", "") == "inprogress"
+    normalized = normalize_lifecycle_state(value)
+    return normalized.replace(" ", "") in {"inprogress", "rework"} or normalized == "confirm"
 
 
 def is_finished_lifecycle(value):
@@ -1108,7 +1427,7 @@ def is_finished_lifecycle(value):
 
 def is_review_lifecycle(value):
     normalized = normalize_lifecycle_state(value)
-    return normalized in {"confirm", "rework", "re work", "rejected", "reject"}
+    return normalized in {"rejected", "reject"}
 
 
 def calculate_acknowledgement_status(status, work_order_id):

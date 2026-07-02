@@ -41,6 +41,7 @@ from spare_parts_service import (
 # downtime_service is needed by the Maintenance "Analysis" and "Downtime" tabs
 # (/api/downtime?period=all_years&work_orders_only=1) and by spare_parts_service
 from downtime_service import (
+    build_inactive_critical_machines_payload,
     build_downtime_payload,
     build_mtbf_work_order_history_payload,
     get_work_order_import_status,
@@ -622,6 +623,14 @@ def downtime_import_work_orders():
 @app.route("/api/downtime/mtbf-history")
 def downtime_mtbf_history():
     return jsonify(build_mtbf_work_order_history_payload(stage=request.args.get("stage")))
+
+
+@app.route("/api/maintenance/critical-machines/inactive")
+def maintenance_inactive_critical_machines():
+    return jsonify(build_inactive_critical_machines_payload(
+        stage=request.args.get("stage"),
+        category=request.args.get("category"),
+    ))
 
 
 def get_path_mtime_iso(path):

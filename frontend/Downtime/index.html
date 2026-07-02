@@ -147,12 +147,12 @@
                             <span class="cma-row-count" id="act-count-active">--</span>
                             <span class="cma-row-detail" id="cma-active-detail"></span>
                         </div>
-                        <div class="cma-row">
+                        <button type="button" class="cma-row cma-row-action" id="critical-inactive-trigger" aria-haspopup="dialog">
                             <span class="cma-dot" style="background:#d97706;"></span>
                             <span class="cma-row-label">Inactive</span>
                             <span class="cma-row-count" id="act-count-maintenance">--</span>
                             <span class="cma-row-detail" id="cma-inactive-detail"></span>
-                        </div>
+                        </button>
                         <div class="cma-divider"></div>
                         <div class="cma-row cma-row-total">
                             <span></span>
@@ -162,6 +162,7 @@
                         </div>
                     </div>
                     <div class="kpi-trend critical-status-card-note" id="critical-status-card-note">All critical machines counted; no-WO machines are Active.</div>
+                    <button type="button" class="critical-status-link" id="critical-inactive-link">View inactive machines</button>
                 </div>
                 <div class="kpi-card highlight-blue compact-summary-card">
                     <div class="kpi-label">Open MR by Severity</div>
@@ -341,18 +342,21 @@
                                     <table>
                                         <thead>
                                             <tr>
-                                                <th>Asset ID</th>
-                                                <th>Asset Name</th>
-                                                <th>MTTR</th>
-                                                <th>MTBF</th>
+                                                <th>Machine Category</th>
+                                                <th>Machine Group</th>
+                                                <th>Resolved Machine</th>
+                                                <th>Original Asset</th>
+                                                <th>Source</th>
+                                                <th>Confidence</th>
                                                 <th>WO Count</th>
-                                                <th>Total Downtime</th>
-                                                <th>Last Failure Date</th>
-                                                <th>Repeat Failure Count</th>
+                                                <th>Valid MTTR Records</th>
+                                                <th>MTTR</th>
+                                                <th>Valid MTBF Gaps</th>
+                                                <th>MTBF</th>
                                             </tr>
                                         </thead>
                                         <tbody id="kdi-mttr-asset-table-body">
-                                            <tr><td colspan="8" class="empty-cell">Expand to view individual asset reliability details.</td></tr>
+                                            <tr><td colspan="11" class="empty-cell">Expand to view individual asset reliability details.</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -531,18 +535,21 @@
                                     <table>
                                         <thead>
                                             <tr>
-                                                <th>Asset ID</th>
-                                                <th>Asset Name</th>
-                                                <th>MTTR</th>
-                                                <th>MTBF</th>
+                                                <th>Machine Category</th>
+                                                <th>Machine Group</th>
+                                                <th>Resolved Machine</th>
+                                                <th>Original Asset</th>
+                                                <th>Source</th>
+                                                <th>Confidence</th>
                                                 <th>WO Count</th>
-                                                <th>Total Downtime</th>
-                                                <th>Last Failure Date</th>
-                                                <th>Repeat Failure Count</th>
+                                                <th>Valid MTTR Records</th>
+                                                <th>MTTR</th>
+                                                <th>Valid MTBF Gaps</th>
+                                                <th>MTBF</th>
                                             </tr>
                                         </thead>
                                         <tbody id="kdi-mtbf-asset-table-body">
-                                            <tr><td colspan="8" class="empty-cell">Expand to view individual asset reliability details.</td></tr>
+                                            <tr><td colspan="11" class="empty-cell">Expand to view individual asset reliability details.</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -1061,7 +1068,7 @@
                         </div>
                     </div>
                     <div class="table-wrapper compact-table-wrapper preventive-corrective-table-wrapper">
-                        <table>
+                        <table class="preventive-corrective-table">
                             <thead>
                                 <tr>
                                     <th>MR / WO</th>
@@ -1610,7 +1617,7 @@
                         <div class="card-title">Records Requiring Correction Before KPI Use</div>
                         <p class="card-subtitle">Invalid dates, missing dates, missing asset IDs, review status, or missing SLA fields.</p>
                         <div class="table-wrapper wo-response-table-wrapper">
-                            <table>
+                            <table class="data-quality-action-table">
                                 <thead>
                                     <tr>
                                         <th>MR / WO</th>
@@ -2036,6 +2043,46 @@
         </section>
 
     </main>
+
+    <div class="inactive-critical-drawer-overlay" id="inactive-critical-drawer-overlay" hidden>
+        <aside class="inactive-critical-drawer" role="dialog" aria-modal="true" aria-labelledby="inactive-critical-drawer-title">
+            <div class="inactive-critical-drawer-head">
+                <div>
+                    <div class="kdi-section-kicker">Critical Machine Status</div>
+                    <h3 id="inactive-critical-drawer-title">Inactive Critical Machines</h3>
+                    <p id="inactive-critical-drawer-subtitle">Latest open MR / WO per inactive critical machine.</p>
+                </div>
+                <button type="button" class="inactive-critical-close" id="inactive-critical-close" aria-label="Close">&times;</button>
+            </div>
+            <div class="inactive-critical-summary" id="inactive-critical-summary"></div>
+            <div class="inactive-critical-toolbar">
+                <input id="inactive-critical-search" type="search" placeholder="Search asset ID or machine name">
+            </div>
+            <div class="inactive-critical-state" id="inactive-critical-state" hidden></div>
+            <div class="inactive-critical-table-wrap">
+                <table class="inactive-critical-table">
+                    <thead>
+                        <tr>
+                            <th>Asset / Machine</th>
+                            <th>Exact Machine Detected</th>
+                            <th>Group / Area</th>
+                            <th>Stage / Location</th>
+                            <th>MR / WO</th>
+                            <th>Status / Confidence</th>
+                            <th>Start / End</th>
+                            <th>Open Age</th>
+                            <th>Issue</th>
+                            <th>Validation Flag</th>
+                            <th>Owner / Action</th>
+                        </tr>
+                    </thead>
+                    <tbody id="inactive-critical-body">
+                        <tr><td colspan="11" class="empty-cell">Loading inactive critical machines.</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </aside>
+    </div>
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
     <script src="script.js?v=20260623-crit-collapse-2" defer></script>

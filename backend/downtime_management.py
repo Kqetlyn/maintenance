@@ -48,6 +48,101 @@ _MTBF_GENERAL_AREA_RE = re.compile(
 
 YEAR_START_MONTH = 1
 YEAR_START_DAY = 1
+MACHINE_ALIAS_MAPPING_FILENAME = "machine_alias_mapping.csv"
+
+_GENERIC_ASSET_RE = re.compile(
+    r"\b(production\s+area|kitchen\s+area|line\s+area|packing\s+area|assembly\s+area"
+    r"|cooking\s+area|preparation\s+area|risk\s+area|high\s+risk|medium\s+risk|low\s+risk"
+    r"|plant\s+area|work\s+area|general\s+area|facility|building)\b",
+    re.IGNORECASE,
+)
+
+
+MACHINE_DETECTION_RULES = [
+    {
+        "group": "Bratt Pan",
+        "category": "Production Equipment",
+        "patterns": [
+            r"\bbrat+t\s*pan\s*(?:no\.?\s*)?(\d+)?\b",
+            r"\bbrattpan\s*(\d+)?\b",
+            r"\bbp\s*[- ]?(\d+)\b",
+        ],
+        "name": lambda number: f"Bratt Pan {number}" if number else "Bratt Pan",
+    },
+    {
+        "group": "Combi Oven",
+        "category": "Production Equipment",
+        "patterns": [r"\bcombi(?:\s+oven)?\s*(?:no\.?\s*)?(\d+)?\b", r"\brational\s+oven\s*(\d+)?\b", r"\boven\s*(?:no\.?\s*)?(\d+)?\b"],
+        "name": lambda number: f"Combi Oven {number}" if number else "Combi Oven",
+    },
+    {
+        "group": "Mixers",
+        "category": "Production Equipment",
+        "patterns": [
+            r"\bfood\s+mixers?\s*(?:no\.?\s*)?(\d+)?\b",
+            r"\bmixers?\s*(?:no\.?\s*)?(\d+)?\b",
+            r"\bmixing\s+(?:machine|equipment)\s*(?:no\.?\s*)?(\d+)?\b",
+            r"(?:เครื่อง\s*)?mixers?\s*(?:no\.?\s*)?(\d+)?\b",
+            r"เครื่อง\s*ตี\s*ผสม",
+            r"เครื่อง\s*ผสม",
+            r"\bmix40\b",
+            r"\b40\s*(?:litre|liter|l)\b",
+            r"40\s*ลิตร",
+            r"\b80\s*kg\b",
+        ],
+        "name": lambda n: f"Food Mixer No.{n}" if n else "Food Mixer - unspecified",
+    },
+    {"group": "Kettle", "category": "Production Equipment", "patterns": [r"\bkettles?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Kettle {n}" if n else "Kettle"},
+    {"group": "Dicer", "category": "Production Equipment", "patterns": [r"\bdicers?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Dicer {n}" if n else "Dicer"},
+    {"group": "Slicer", "category": "Production Equipment", "patterns": [r"\bslicers?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Slicer {n}" if n else "Slicer"},
+    {
+        "group": "Packing Machine",
+        "category": "Production Equipment",
+        "patterns": [r"\bpacking\s+(?:machine|line)\s*(?:no\.?\s*)?(\d+)?\b", r"\bpackers?\s*(?:no\.?\s*)?(\d+)?\b"],
+        "name": lambda n: f"Packing Machine {n}" if n else "Packing Machine",
+    },
+    {"group": "Sealer", "category": "Production Equipment", "patterns": [r"\bsealers?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Sealer {n}" if n else "Sealer"},
+    {
+        "group": "Metal Detector",
+        "category": "Production Equipment",
+        "patterns": [r"\bmetal\s+detectors?\s*(?:no\.?\s*)?(\d+)?\b", r"\bmd\s+machine\s*(?:no\.?\s*)?(\d+)?\b"],
+        "name": lambda n: f"Metal Detector {n}" if n else "Metal Detector",
+    },
+    {
+        "group": "Checkweigher",
+        "category": "Production Equipment",
+        "patterns": [r"\bcheck\s*weigh(?:er|ing|t)?\s*(?:no\.?\s*)?(\d+)?\b", r"\bcheckweighers?\s*(?:no\.?\s*)?(\d+)?\b"],
+        "name": lambda n: f"Checkweigher No.{n}" if n else "Checkweigher",
+    },
+    {
+        "group": "X-Ray",
+        "category": "Production Equipment",
+        "patterns": [r"(?:เครื่อง\s*)?x\s*[- ]?\s*ray\s*(?:no\.?\s*)?(\d+)?\b", r"\bxray\s*(?:no\.?\s*)?(\d+)?\b"],
+        "name": lambda n: f"X-Ray No.{n}" if n else "X-Ray",
+    },
+    {
+        "group": "Spiral Freezer",
+        "category": "Refrigeration",
+        "patterns": [r"\bspiral(?:\s+blast)?\s+freezers?\s*(?:no\.?\s*)?(\d+)?\b", r"\bsbf\s*(?:no\.?\s*)?(\d+)?\b"],
+        "name": lambda n: f"Spiral Freezer {n}" if n else "Spiral Freezer",
+    },
+    {
+        "group": "Air Blast Freezer",
+        "category": "Refrigeration",
+        "patterns": [r"\bair\s+blast(?:\s+freezer)?\s*(?:no\.?\s*)?(\d+)?\b", r"\bblast\s+freezers?\s*(?:no\.?\s*)?(\d+)?\b", r"\babf\s*(?:no\.?\s*)?(\d+)?\b"],
+        "name": lambda n: f"Air Blast Freezer {n}" if n else "Air Blast Freezer",
+    },
+    {"group": "Chiller", "category": "Refrigeration", "patterns": [r"\bchillers?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Chiller {n}" if n else "Chiller"},
+    {"group": "Freezer", "category": "Refrigeration", "patterns": [r"\bfreezers?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Freezer {n}" if n else "Freezer"},
+    {"group": "Boiler", "category": "Utilities", "patterns": [r"\bboilers?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Boiler {n}" if n else "Boiler"},
+    {"group": "Air Compressor", "category": "Utilities", "patterns": [r"\bair\s+compressors?\s*(?:no\.?\s*)?(\d+)?\b", r"\bcompressors?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Air Compressor {n}" if n else "Air Compressor"},
+    {"group": "Pump", "category": "Utilities", "patterns": [r"\bpumps?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Pump {n}" if n else "Pump"},
+    {"group": "Cooling Tower", "category": "Utilities", "patterns": [r"\bcooling\s+towers?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Cooling Tower {n}" if n else "Cooling Tower"},
+    {"group": "WWTP", "category": "Utilities", "patterns": [r"\bwwtp\b", r"\bwaste\s*water\s+treatment\b"], "name": lambda n: "WWTP"},
+    {"group": "RO System", "category": "Utilities", "patterns": [r"\bro\s+systems?\b", r"\breverse\s+osmosis\b"], "name": lambda n: "RO System"},
+    {"group": "Steam Box", "category": "Production Equipment", "patterns": [r"\bsteam\s*box(?:es)?\s*(?:no\.?\s*)?(\d+)?\b", r"\bsteambox(?:es)?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Steam Box {n}" if n else "Steam Box"},
+    {"group": "Conveyor", "category": "Production Equipment", "patterns": [r"\bconveyors?\s*(?:no\.?\s*)?(\d+)?\b"], "name": lambda n: f"Conveyor {n}" if n else "Conveyor"},
+]
 
 
 def _clean_text(value, fallback=""):
@@ -60,13 +155,235 @@ def _normalize_key(value):
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
 
-
 def _normalized_text(value):
     return re.sub(r"\s+", " ", str(value or "").strip().lower())
 
 
 def _normalize_asset_id(value):
     return _clean_text(value).upper()
+
+
+def _machine_resolution_text(row):
+    fields = [
+        "description",
+        "description_original",
+        "translated_description",
+        "remarks",
+        "fault_description",
+        "asset_description",
+        "raw_machine_name",
+        "machine_name",
+        "asset_name",
+        "asset_display_name",
+        "mappedAssetName",
+        "mapped_asset_name",
+        "raw_functional_location",
+        "mappedLocation",
+        "mapped_location",
+        "mappedFunctionalLocationName",
+        "functional_location_name",
+        "location",
+        "building",
+    ]
+    return _normalized_text(" ".join(_clean_text(row.get(field)) for field in fields))
+
+
+def _detect_machine_from_text(row):
+    text = _machine_resolution_text(row)
+    if not text:
+        return None
+    for rule in MACHINE_DETECTION_RULES:
+        for pattern in rule["patterns"]:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if not match:
+                continue
+            number = ""
+            for group in match.groups():
+                if group:
+                    number = str(group).strip()
+                    break
+            name = rule["name"](number)
+            return {
+                "resolved_machine_group": rule["group"],
+                "resolved_machine_category": rule["category"],
+                "resolved_machine_name": name,
+                "resolved_machine_alias": _detect_mixer_alias(text) if rule["group"] == "Mixers" else "",
+                "detected_token": match.group(0),
+                "has_specific_number": bool(number),
+            }
+    alias = _detect_mixer_alias(text)
+    if alias:
+        return {
+            "resolved_machine_group": "Mixers",
+            "resolved_machine_category": "Production Equipment",
+            "resolved_machine_name": "Food Mixer - unspecified",
+            "resolved_machine_alias": alias,
+            "detected_token": alias,
+            "has_specific_number": False,
+        }
+    return None
+
+
+def _detect_mixer_alias(text):
+    checks = [
+        (r"น้องทอง", "น้องทอง"),
+        (r"น้องเงิน", "น้องเงิน"),
+        (r"\b40\s*(?:litre|liter|l)\b|40\s*ลิตร|\bmix40\b", "40L"),
+        (r"\b80\s*kg\b", "80kg"),
+    ]
+    for pattern, alias in checks:
+        if re.search(pattern, text, re.IGNORECASE):
+            return alias
+    return ""
+
+
+def _build_asset_master_machine_index(mapping):
+    index = {}
+    for asset_id, asset in (mapping or {}).get("asset_map", {}).items():
+        display_name = _clean_text(asset.get("display_name") or asset.get("mappedAssetName"))
+        asset_group = _clean_text(asset.get("asset_machine_group") or asset.get("mappedMachineGroup"))
+        for value in (display_name, asset_group):
+            key = _normalize_key(value)
+            if key and key not in index:
+                index[key] = {
+                    "asset_id": asset_id,
+                    "asset_name": display_name,
+                    "machine_group": asset_group,
+                    "machine_category": _clean_text(asset.get("machine_group") or asset.get("mappedMainAssetGroup")),
+                }
+    return index
+
+
+def _load_machine_alias_mapping(asset_master):
+    path_text = (asset_master or {}).get("path") or ""
+    if not path_text:
+        return {}
+    alias_path = os.path.join(os.path.dirname(path_text), MACHINE_ALIAS_MAPPING_FILENAME)
+    if not os.path.exists(alias_path):
+        return {}
+    try:
+        df = pd.read_csv(alias_path, dtype=str).fillna("")
+    except Exception:
+        return {}
+    aliases = {}
+    for _, row in df.iterrows():
+        alias = _clean_text(row.get("alias_or_keyword"))
+        asset_id = _normalize_asset_id(row.get("resolved_asset_id"))
+        machine_name = _clean_text(row.get("resolved_machine_name"))
+        if not alias or not asset_id or not machine_name:
+            continue
+        aliases[_normalize_key(alias)] = {
+            "resolved_asset_id": asset_id,
+            "resolved_machine_name": machine_name,
+            "resolution_confidence": _clean_text(row.get("confidence"), "high").lower(),
+            "approved_by": _clean_text(row.get("approved_by")),
+        }
+    return aliases
+
+
+def _is_generic_asset_selection(row):
+    asset_text = " ".join(
+        _clean_text(row.get(field))
+        for field in (
+            "asset_display_name",
+            "mappedAssetName",
+            "mapped_asset_name",
+            "machine_name_display",
+            "machine_name",
+            "raw_machine_name",
+            "mappedLocation",
+            "mapped_location",
+            "raw_functional_location",
+        )
+    )
+    asset_group = _clean_text(row.get("asset_machine_group") or row.get("mappedMachineGroup"))
+    category = _clean_text(row.get("mappedMainAssetGroup") or row.get("mapped_main_asset_group") or row.get("machine_group"))
+    if not _clean_text(row.get("asset_id")):
+        return True
+    if _GENERIC_ASSET_RE.search(asset_text):
+        return True
+    if asset_group.lower() in {"production areas", "production area", "work area", "area"}:
+        return True
+    if not asset_group and category in {"Production Equipment", "Utilities", "Utilities / Support", "Refrigeration", "Facility / Building"}:
+        return True
+    selected_name = _clean_text(row.get("asset_display_name") or row.get("mappedAssetName") or row.get("machine_name_display"))
+    return bool(re.search(r"\b(machine|equipment|line)\b", selected_name, re.IGNORECASE)) and not re.search(r"\b(?:no\.?\s*)?\d+\b", selected_name, re.IGNORECASE)
+
+
+def _asset_master_resolution(row):
+    category = _clean_text(row.get("mappedMainAssetGroup") or row.get("mapped_main_asset_group") or row.get("machine_group"), "Unclassified")
+    group = _clean_text(row.get("asset_machine_group") or row.get("mappedMachineGroup") or row.get("mappedSubAssetGroup") or row.get("mapped_sub_asset_group"))
+    name = _clean_text(row.get("mappedAssetName") or row.get("mapped_asset_name") or row.get("asset_display_name") or row.get("machine_name_display") or group or category)
+    return {
+        "resolved_asset_id": _clean_text(row.get("asset_id")),
+        "resolved_machine_name": name,
+        "resolved_machine_group": group or name or category,
+        "resolved_machine_category": category,
+        "resolution_source": "asset_master" if row.get("has_asset_master_mapping") or row.get("has_assetlist_classification") else "fallback",
+        "resolution_confidence": "high" if row.get("has_asset_master_mapping") or row.get("has_assetlist_classification") else "low",
+        "resolved_machine_alias": "",
+        "resolution_note": "",
+    }
+
+
+def resolve_machine_group(record, asset_master=None, asset_index=None):
+    """Hybrid grouping used before MTTR/MTBF.
+
+    Asset Master remains the primary source for real machine assets. Description
+    detection only takes over for area/general selections or when the text names
+    a more specific numbered machine than the selected asset.
+    """
+    asset_master = asset_master or {}
+    asset_index = asset_index or _build_asset_master_machine_index(asset_master)
+    alias_mapping = _load_machine_alias_mapping(asset_master)
+    base = _asset_master_resolution(record)
+    detected = _detect_machine_from_text(record)
+    generic_selection = _is_generic_asset_selection(record)
+    if not detected:
+        base["resolution_source"] = "functional_location" if generic_selection and _clean_text(record.get("raw_functional_location") or record.get("mappedLocation")) else base["resolution_source"]
+        base["resolution_confidence"] = "medium" if base["resolution_source"] == "functional_location" else base["resolution_confidence"]
+        return base
+
+    selected_key = _normalize_key(base.get("resolved_machine_name"))
+    detected_key = _normalize_key(detected["resolved_machine_name"])
+    group_key = _normalize_key(detected["resolved_machine_group"])
+    asset_match = asset_index.get(detected_key) or {}
+    base_group_key = _normalize_key(base.get("resolved_machine_group"))
+    if base.get("resolution_source") == "asset_master" and not generic_selection:
+        if group_key and (group_key == base_group_key or group_key in selected_key or base_group_key in group_key):
+            return {**base, "resolution_note": "Asset Master kept because selected asset is already a specific machine."}
+    alias_key = _normalize_key(detected.get("resolved_machine_alias"))
+    approved_alias = alias_mapping.get(alias_key) if alias_key else None
+    if generic_selection and approved_alias:
+        approved_match = asset_index.get(_normalize_key(approved_alias.get("resolved_machine_name"))) or {}
+        return {
+            "resolved_asset_id": approved_alias.get("resolved_asset_id"),
+            "resolved_machine_name": approved_alias.get("resolved_machine_name"),
+            "resolved_machine_group": approved_match.get("machine_group") or detected["resolved_machine_group"],
+            "resolved_machine_category": approved_match.get("machine_category") or detected["resolved_machine_category"],
+            "resolved_machine_alias": detected.get("resolved_machine_alias") or "",
+            "resolution_source": "alias_mapping",
+            "resolution_confidence": approved_alias.get("resolution_confidence") or "high",
+            "resolution_note": f"Alias mapping approved by {approved_alias.get('approved_by') or 'Engineering'}",
+        }
+    detected_confidence = "high" if detected.get("has_specific_number") and asset_match.get("asset_id") else ("medium" if detected["resolved_machine_group"] == "Mixers" or detected.get("has_specific_number") else "low")
+    detected_resolution = {
+        "resolved_asset_id": asset_match.get("asset_id") or (f"DETECTED-{detected_key.upper()}" if detected_key else base.get("resolved_asset_id")),
+        "resolved_machine_name": detected["resolved_machine_name"],
+        "resolved_machine_group": detected["resolved_machine_group"],
+        "resolved_machine_category": detected["resolved_machine_category"],
+        "resolved_machine_alias": detected.get("resolved_machine_alias") or "",
+        "resolution_source": "description_detection",
+        "resolution_confidence": detected_confidence,
+        "resolution_note": f"Detected from text token: {detected.get('detected_token')}",
+    }
+    if not generic_selection and selected_key and selected_key == detected_key:
+        return {**base, "resolution_note": "Asset Master and description detection agree."}
+    if not generic_selection and selected_key and group_key and group_key in selected_key and not detected.get("has_specific_number"):
+        return {**base, "resolution_note": "Asset Master kept because description only confirms the same group."}
+    if not generic_selection and selected_key and detected.get("has_specific_number") and detected_key in selected_key:
+        return {**base, "resolution_note": "Asset Master kept because selected asset matches detected machine number."}
+    return detected_resolution
 
 
 def _normalize_criticality(value):
@@ -116,6 +433,8 @@ def _normalize_status(value):
 def _is_mtbf_general_area(row: dict) -> bool:
     """True when the row represents a physical area/location rather than a
     specific machine — MTBF between area-level WOs is not meaningful."""
+    if row.get("resolution_source") == "description_detection" and _clean_text(row.get("resolved_machine_group")):
+        return False
     name_fields = [
         row.get("machine_name") or "",
         row.get("asset_display_name") or "",
@@ -140,7 +459,23 @@ def _is_mtbf_eligible_status(value):
 
 def _is_open_work_order_status(value):
     normalized = _normalize_status(value)
-    return normalized in {"new", "in progress", "inprogress"}
+    return normalized in {"new", "in progress", "inprogress", "confirm", "rework", "re work"}
+
+
+def _is_preventive_work_order(row):
+    haystack = " ".join(
+        _clean_text(row.get(field))
+        for field in (
+            "job_trade",
+            "maintenance_job_type",
+            "job_type",
+            "work_type",
+            "work_order_type",
+            "description",
+            "description_original",
+        )
+    ).lower()
+    return bool(re.search(r"\b(pm|preventive|preventative|planned maintenance)\b", haystack))
 
 
 def _infer_criticality(asset_id, machine_name, location, job_trade, description):
@@ -204,6 +539,7 @@ def load_grouped_machine_mapping(data_dir):
 
 def enrich_work_order_records(records, data_dir):
     mapping = load_asset_mapping(data_dir)
+    asset_index = _build_asset_master_machine_index(mapping)
     enriched = []
     for row in records or []:
         asset_id = _normalize_asset_id(row.get("asset_id") or row.get("machine_code"))
@@ -277,6 +613,15 @@ def enrich_work_order_records(records, data_dir):
             "actual_start_time": row.get("actual_start_time") or row.get("maintenance_start_time"),
             "actual_end_time": row.get("actual_end_time") or row.get("maintenance_end_time"),
         }
+        resolution = resolve_machine_group(merged, mapping, asset_index)
+        merged.update(resolution)
+        merged["machine_group"] = resolution["resolved_machine_category"] or merged["machine_group"]
+        merged["equipment_category"] = resolution["resolved_machine_category"] or merged["equipment_category"]
+        merged["machine_name_display"] = resolution["resolved_machine_name"] or merged["machine_name_display"]
+        merged["mappedMainAssetGroup"] = resolution["resolved_machine_category"] or merged.get("mappedMainAssetGroup")
+        merged["mapped_main_asset_group"] = resolution["resolved_machine_category"] or merged.get("mapped_main_asset_group")
+        merged["mappedMachineGroup"] = resolution["resolved_machine_group"] or merged.get("mappedMachineGroup")
+        merged["asset_machine_group"] = resolution["resolved_machine_group"] or merged.get("asset_machine_group")
         merged["machine_name"] = merged["machine_name_display"]
         merged["area"] = merged["location"]
         enriched.append(merged)
@@ -526,7 +871,8 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
             seen_work_order_ids.add(work_order_id)
         actual_start = _get_work_order_start(row)
         actual_end = _get_work_order_end(row)
-        if not row.get("asset_id"):
+        resolved_identity = _clean_text(row.get("resolved_asset_id") or row.get("resolved_identity") or row.get("asset_id"))
+        if not resolved_identity:
             continue
         if _is_mtbf_general_area(row):   # skip area/location placeholders
             continue
@@ -535,6 +881,8 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
         if actual_end <= actual_start:
             continue
         if not _is_mtbf_eligible_status(row.get("request_state")):
+            continue
+        if _is_preventive_work_order(row):
             continue
         if row.get("data_quality_flag") and row.get("data_quality_flag") != "Valid":
             continue
@@ -553,7 +901,7 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
 
     rows_by_asset = defaultdict(list)
     for row in eligible_rows:
-        rows_by_asset[row["asset_id"]].append(row)
+        rows_by_asset[resolved_identity].append(row)
 
     for asset_id, asset_items in rows_by_asset.items():
         asset_items.sort(key=lambda item: item["_actual_start"])
@@ -605,8 +953,11 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
 
         asset_row = {
             "asset_id": asset_id,
-            "asset_name": latest_item.get("asset_display_name") or latest_item.get("machine_name") or asset_id,
-            "machine_group": latest_item.get("machine_group") or latest_item.get("machine_name_display") or asset_id,
+            "asset_name": latest_item.get("resolved_machine_name") or latest_item.get("asset_display_name") or latest_item.get("machine_name") or asset_id,
+            "machine_group": latest_item.get("resolved_machine_group") or latest_item.get("asset_machine_group") or latest_item.get("machine_group") or latest_item.get("machine_name_display") or asset_id,
+            "machine_category": latest_item.get("resolved_machine_category") or latest_item.get("machine_group") or latest_item.get("equipment_category") or "",
+            "resolution_source": latest_item.get("resolution_source") or "",
+            "resolution_confidence": latest_item.get("resolution_confidence") or "",
             "criticality": latest_item.get("criticality") or CRITICALITY_NON_CRITICAL,
             "raw_criticality": latest_item["raw_criticality"] if "raw_criticality" in latest_item else latest_item.get("criticality", ""),
             "normalized_criticality": latest_item.get("normalized_criticality") or latest_item.get("criticality") or CRITICALITY_NON_CRITICAL,
@@ -943,6 +1294,8 @@ def build_management_downtime_payload(
     mapping_meta=None,
 ):
     period_floor = period_start or _resolve_year_floor(period_start, period_end)
+    asset_master = load_asset_mapping(data_dir)
+    asset_index = _build_asset_master_machine_index(asset_master)
     work_order_ids = [
         _clean_text(row.get("work_order_id"))
         for row in records or []
@@ -951,6 +1304,9 @@ def build_management_downtime_payload(
     work_order_id_counts = Counter(work_order_ids)
     duplicate_work_order_ids = {work_order_id for work_order_id, count in work_order_id_counts.items() if count > 1}
     rows = []
+    resolution_counts = Counter()
+    confidence_counts = Counter()
+    resolution_mapping_rows = []
     for row in records or []:
         ttr_hours = pd.to_numeric(row.get("ttr_hours") if row.get("ttr_hours") is not None else row.get("duration_hours"), errors="coerce")
         raw_criticality = row["raw_criticality"] if "raw_criticality" in row else row.get("criticality", "")
@@ -977,6 +1333,37 @@ def build_management_downtime_payload(
             "mappedLocation": row.get("mappedLocation") or row.get("mapped_location") or row.get("location") or row.get("building"),
             "mappedSystemArea": row.get("mappedSystemArea") or row.get("mapped_system_area") or "",
         }
+        original_asset_id = _clean_text(prepared.get("asset_id"))
+        original_asset_name = _clean_text(prepared.get("asset_display_name") or prepared.get("mappedAssetName") or prepared.get("machine_name_display") or prepared.get("raw_machine_name"))
+        original_category = _clean_text(prepared.get("mappedMainAssetGroup") or prepared.get("machine_group"))
+        resolution = resolve_machine_group(prepared, asset_master, asset_index)
+        prepared.update(resolution)
+        prepared["machine_group"] = resolution["resolved_machine_category"] or prepared.get("machine_group")
+        prepared["equipment_category"] = resolution["resolved_machine_category"] or prepared.get("equipment_category") or group_to_category(prepared.get("machine_group"))
+        prepared["machine_name_display"] = resolution["resolved_machine_name"] or prepared.get("machine_name_display")
+        prepared["mappedMainAssetGroup"] = resolution["resolved_machine_category"] or prepared.get("mappedMainAssetGroup")
+        prepared["mapped_main_asset_group"] = resolution["resolved_machine_category"] or prepared.get("mapped_main_asset_group")
+        prepared["mappedMachineGroup"] = resolution["resolved_machine_group"] or prepared.get("mappedMachineGroup")
+        prepared["asset_machine_group"] = resolution["resolved_machine_group"] or prepared.get("asset_machine_group")
+        prepared["resolved_identity"] = resolution["resolved_asset_id"] or original_asset_id or _normalize_key(resolution.get("resolved_machine_name"))
+        resolution_counts[prepared.get("resolution_source") or "fallback"] += 1
+        confidence_counts[prepared.get("resolution_confidence") or "low"] += 1
+        if prepared.get("resolution_source") != "asset_master" or prepared.get("resolution_confidence") == "low":
+            resolution_mapping_rows.append({
+                "work_order_id": prepared.get("work_order_id") or "--",
+                "request_id": prepared.get("maintenance_order_id") or "--",
+                "original_asset_id": original_asset_id,
+                "original_asset_name": original_asset_name,
+                "original_machine_category": original_category,
+                "description": prepared.get("description_original") or prepared.get("description") or "",
+                "detected_machine_group": prepared.get("resolved_machine_group") or "",
+                "detected_machine_name": prepared.get("resolved_machine_name") or "",
+                "resolved_machine_alias": prepared.get("resolved_machine_alias") or "",
+                "resolved_asset_id": prepared.get("resolved_asset_id") or "",
+                "resolution_source": prepared.get("resolution_source") or "fallback",
+                "resolution_confidence": prepared.get("resolution_confidence") or "low",
+                "resolution_note": prepared.get("resolution_note") or "",
+            })
         prepared["criticality_rank"] = CRITICALITY_RANK.get(prepared["criticality"], CRITICALITY_RANK["Unmapped"])
         if pd.notna(ttr_hours) and float(ttr_hours) > 0:
             prepared["ttr_hours"] = round(float(ttr_hours), 3)
@@ -1068,14 +1455,16 @@ def build_management_downtime_payload(
         if row.get("mtbf_missing_reasons"):
             group_row["mtbf_missing_count"] += 1
             group_row["mtbf_missing_reasons"].update(row.get("mtbf_missing_reasons") or [])
-        if row.get("asset_id"):
-            group_row["asset_ids"].add(row["asset_id"])
+        asset_identity = row.get("resolved_asset_id") or row.get("resolved_identity") or row.get("asset_id")
+        if asset_identity:
+            group_row["asset_ids"].add(asset_identity)
             asset_row = group_row["asset_ttr_map"].setdefault(
-                row["asset_id"],
+                asset_identity,
                 {
-                    "asset_id": row["asset_id"],
-                    "asset_label": row.get("asset_label") or row["asset_id"],
-                    "asset_display_name": row.get("asset_display_name") or row.get("raw_machine_name") or row.get("machine_name_display") or row["asset_id"],
+                    "asset_id": asset_identity,
+                    "asset_label": row.get("asset_label") or row.get("asset_id") or asset_identity,
+                    "asset_display_name": row.get("resolved_machine_name") or row.get("asset_display_name") or row.get("raw_machine_name") or row.get("machine_name_display") or asset_identity,
+                    "original_asset_id": row.get("asset_id") or "",
                     "work_order_count": 0,
                     "valid_ttr_count": 0,
                     "total_ttr_hours": 0.0,
@@ -1200,6 +1589,14 @@ def build_management_downtime_payload(
             "machine_group": row.get("machine_group") or row.get("machine_name_display") or "--",
             "equipment_category": row.get("equipment_category") or group_to_category(row.get("machine_group")),
             "machine_name": row.get("machine_name_display") or row.get("machine_group") or "--",
+            "resolved_asset_id": row.get("resolved_asset_id") or row.get("asset_id") or "",
+            "resolved_machine_name": row.get("resolved_machine_name") or row.get("machine_name_display") or "",
+            "resolved_machine_group": row.get("resolved_machine_group") or row.get("asset_machine_group") or "",
+            "resolved_machine_category": row.get("resolved_machine_category") or row.get("equipment_category") or row.get("machine_group") or "",
+            "resolved_machine_alias": row.get("resolved_machine_alias") or "",
+            "resolution_source": row.get("resolution_source") or "fallback",
+            "resolution_confidence": row.get("resolution_confidence") or "low",
+            "resolution_note": row.get("resolution_note") or "",
             "asset_display_name": row.get("asset_display_name") or row.get("raw_machine_name") or row.get("machine_name_display") or "--",
             "machine_equipment_name": row.get("machine_equipment_name") or row.get("raw_machine_name") or row.get("asset_display_name") or "--",
             "criticality": row.get("criticality") or CRITICALITY_NON_CRITICAL,
@@ -1310,6 +1707,25 @@ def build_management_downtime_payload(
             1 for row in machine_group_rows if row["criticality"] == "Critical" and row["work_order_count"] >= REPEATED_WORK_ORDER_THRESHOLD
         ),
     }
+    machine_resolution = {
+        "counts_by_source": dict(resolution_counts),
+        "counts_by_confidence": dict(confidence_counts),
+        "asset_master_count": int(resolution_counts.get("asset_master", 0)),
+        "description_detection_count": int(resolution_counts.get("description_detection", 0)),
+        "functional_location_count": int(resolution_counts.get("functional_location", 0)),
+        "fallback_count": int(resolution_counts.get("fallback", 0)),
+        "low_confidence_count": int(confidence_counts.get("low", 0)),
+        "mappings": sorted(
+            resolution_mapping_rows,
+            key=lambda item: (
+                0 if item.get("resolution_source") == "description_detection" else 1,
+                0 if item.get("resolution_confidence") == "low" else 1,
+                item.get("detected_machine_group") or "",
+                item.get("original_asset_id") or "",
+            ),
+        )[:250],
+        "note": "MTTR/MTBF grouping uses Asset Master for specific assets. If the selected asset is area/general but the text names a machine, description detection supplies the resolved machine group/name. If neither source is specific, the original Asset Master category is kept.",
+    }
 
     return {
         "summary": summary,
@@ -1322,5 +1738,6 @@ def build_management_downtime_payload(
         "filters": filters,
         "alerts": alerts,
         "mapping_meta": mapping_meta if mapping_meta is not None else get_grouped_machine_mapping_meta(data_dir),
+        "machine_resolution": machine_resolution,
         "historical_trend": historical_trend,
     }

@@ -893,6 +893,29 @@ html.downtime-embed .dashboard-content {
     max-height: 360px;
 }
 
+.preventive-corrective-table,
+.data-quality-action-table {
+    min-width: 1500px;
+}
+
+.preventive-corrective-table .description-cell,
+.data-quality-action-table .description-cell {
+    min-width: 420px;
+    max-width: none;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    line-height: 1.45;
+    vertical-align: top;
+}
+
+.preventive-corrective-table th:nth-child(6),
+.preventive-corrective-table th:nth-child(7),
+.data-quality-action-table th:nth-child(7),
+.data-quality-action-table th:nth-child(8) {
+    min-width: 420px;
+}
+
 .pm-cm-action-cell {
     min-width: 150px;
 }
@@ -1553,6 +1576,19 @@ html.downtime-embed .dashboard-content {
     align-items: center;
     gap: 8px;
 }
+.cma-row-action {
+    width: 100%;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+    text-align: left;
+}
+.cma-row-action:hover .cma-row-label,
+.cma-row-action:hover .cma-row-count {
+    color: var(--accent);
+}
 .cma-dot {
     width: 9px;
     height: 9px;
@@ -1692,6 +1728,215 @@ html.downtime-embed .dashboard-content {
     padding-top: 10px !important;
     font-size: 0.76rem !important;
     line-height: 1.35 !important;
+}
+
+.critical-status-link {
+    align-self: flex-start;
+    border: 1px solid #bfdbfe;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-radius: 6px;
+    padding: 5px 9px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+.critical-status-link:hover {
+    background: #dbeafe;
+}
+
+.inactive-critical-drawer-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 80;
+    background: rgba(15, 23, 42, 0.28);
+    display: flex;
+    justify-content: flex-end;
+}
+.inactive-critical-drawer-overlay[hidden] {
+    display: none;
+}
+.inactive-critical-drawer {
+    width: min(1180px, 94vw);
+    height: 100%;
+    background: #fff;
+    box-shadow: -18px 0 36px rgba(15, 23, 42, 0.18);
+    display: flex;
+    flex-direction: column;
+    padding: 22px;
+    gap: 14px;
+}
+.inactive-critical-drawer-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+.inactive-critical-drawer-head h3 {
+    margin: 2px 0 4px;
+    font-size: 1.15rem;
+}
+.inactive-critical-drawer-head p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.84rem;
+}
+.inactive-critical-close {
+    border: 0;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 1.65rem;
+    line-height: 1;
+    cursor: pointer;
+}
+.inactive-critical-summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(120px, 1fr));
+    gap: 10px;
+}
+.inactive-critical-summary-item {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #f8fafc;
+}
+.inactive-critical-summary-item span {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.68rem;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+.inactive-critical-summary-item strong {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-dark);
+    font-size: 1rem;
+}
+.inactive-critical-toolbar {
+    display: flex;
+    justify-content: flex-end;
+}
+.inactive-critical-toolbar input {
+    width: min(360px, 100%);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 9px 11px;
+    font-size: 0.86rem;
+}
+.inactive-critical-state {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px;
+    color: var(--text-muted);
+    background: #f8fafc;
+}
+.inactive-critical-table-wrap {
+    overflow: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    min-height: 0;
+}
+.inactive-critical-table {
+    min-width: 1680px;
+}
+.inactive-critical-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: #f8fafc;
+}
+.inactive-critical-table tbody tr {
+    cursor: pointer;
+}
+.inactive-critical-table tbody tr.long-open {
+    background: #fff7ed;
+}
+.inactive-critical-group-row {
+    background: #f1f5f9;
+    cursor: pointer;
+}
+.inactive-critical-group-main {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    color: var(--text-dark);
+}
+.inactive-critical-group-main span {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+.inactive-critical-group-main strong {
+    font-size: 0.92rem;
+}
+.inactive-critical-group-caret {
+    width: 18px;
+    height: 18px;
+    border-radius: 999px;
+    background: #e0f2fe;
+    color: #0369a1 !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+.inactive-critical-child-row td:first-child {
+    padding-left: 24px;
+}
+.inactive-critical-validation-chip {
+    color: #991b1b !important;
+    background: #fee2e2;
+    border-radius: 999px;
+    padding: 3px 8px;
+}
+.inactive-critical-asset {
+    font-weight: 800;
+    color: var(--text-dark);
+}
+.inactive-critical-sub {
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+}
+.inactive-critical-desc {
+    max-width: 300px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+.inactive-critical-translation {
+    margin-top: 3px;
+    max-width: 300px;
+    color: var(--text-muted);
+    font-size: 0.74rem;
+    line-height: 1.3;
+}
+.inactive-critical-validation {
+    max-width: 280px;
+    color: #7f1d1d;
+    font-size: 0.76rem;
+    line-height: 1.35;
+}
+.inactive-critical-action {
+    border: 1px solid #bfdbfe;
+    background: #eff6ff;
+    color: #1d4ed8;
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+@media (max-width: 760px) {
+    .inactive-critical-drawer {
+        width: 100vw;
+        padding: 16px;
+    }
+    .inactive-critical-summary {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
 }
 
 .critical-status-card .empty-state {
@@ -5410,6 +5655,13 @@ details.kdi-asset-drilldown[open] > .kdi-drilldown-summary::before {
     border-radius: 0;
     border: none;
     margin: 0;
+}
+
+.kdi-resolution-sub {
+    display: block;
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
 }
 
 
