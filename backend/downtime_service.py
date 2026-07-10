@@ -1676,7 +1676,7 @@ def write_work_orders_to_db(replace_existing: bool = False) -> dict:
         row_count=len(records),
         valid_count=result["valid"],
         invalid_count=result["invalid"],
-        notes=f"Auto-sync after import ({import_format})",
+        notes=f"Auto-sync after import ({_pbi.get_import_format_display_name(import_format)})",
     )
 
     imported_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -1698,7 +1698,8 @@ def write_work_orders_to_db(replace_existing: bool = False) -> dict:
         "rows_with_missing_dates": result.get("missing_dates", 0),
         "message": (
             f"Imported {result.get('inserted', 0)} new + {result.get('updated', 0)} updated "
-            f"({result['valid']} valid, {result['invalid']} review) from {import_format}."
+            f"({result['valid']} valid, {result['invalid']} review) from "
+            f"{_pbi.get_import_format_display_name(import_format)}."
         ),
     }
     _LAST_IMPORT_STATS.clear()
@@ -1782,7 +1783,7 @@ def import_work_order_file(file_storage, replace=True):
             clear_work_order_runtime_caches()
             return result
     except Exception as exc:
-        return {"ok": False, "message": f"Power BI Full MR/WO import error: {exc}"}
+        return {"ok": False, "message": f"D365 Full MR/WO import error: {exc}"}
 
     # Pre-compute file-level quality stats for existing formats (background write below).
     import_format = "work_orders"

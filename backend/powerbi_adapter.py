@@ -122,6 +122,21 @@ def get_import_format_name(df: Any) -> str:
     return STANDARD_WO_FORMAT
 
 
+# "Power BI" here only names the column layout this adapter detects (a report
+# built on top of D365 data, exported to Excel) — the data itself is D365's,
+# so user-facing messages should say that instead of the internal format code.
+_FORMAT_DISPLAY_NAMES = {
+    POWERBI_MR_WO_TTR_FORMAT: "D365 MR/WO Export",
+    POWERBI_FULL_MR_WO_FORMAT: "D365 MR/WO Export",
+    STANDARD_WO_FORMAT: "Standard Work Order Export",
+}
+
+
+def get_import_format_display_name(format_name: str) -> str:
+    """User-facing label for a detected import format."""
+    return _FORMAT_DISPLAY_NAMES.get(format_name, format_name)
+
+
 def get_powerbi_source_type(df: Any) -> str:
     """Return 'powerbi' if a Power BI format is detected, else 'work_orders'."""
     return "powerbi" if detect_powerbi_export(df) else "work_orders"

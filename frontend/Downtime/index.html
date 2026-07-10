@@ -1598,7 +1598,7 @@
                 <div class="topic-analysis-stack">
                     <div class="card nested-card">
                         <div class="card-title">Records Requiring Correction Before KPI Use</div>
-                        <p class="card-subtitle">Shows only records that affect KPI reliability: missing Asset ID / WO ID, missing ActualStart, Finished records with missing ActualEnd, or invalid date sequence (real ActualEnd before ActualStart). Open or incomplete records (New / Confirm / In Progress / Rejected / reWork) with a D365 placeholder ActualEnd (1900-01-01 or blank) are excluded from MTTR but are <strong>not</strong> treated as data errors. SLA fields are not checked for Power BI imports. <button type="button" id="repair-pbi-flags-btn" class="inline-action-btn" title="Re-evaluate quality flags for Power BI records imported before the lifecycle fix">Repair PBI Flags</button></p>
+                        <p class="card-subtitle">Shows only records that affect KPI reliability: missing Asset ID / WO ID, missing ActualStart, Finished records with missing ActualEnd, or invalid date sequence (real ActualEnd before ActualStart). Open or incomplete records (New / Confirm / In Progress / Rejected / reWork) with a D365 placeholder ActualEnd (1900-01-01 or blank) are excluded from MTTR but are <strong>not</strong> treated as data errors. SLA fields are not checked for D365 exports. <button type="button" id="repair-pbi-flags-btn" class="inline-action-btn" title="Re-evaluate quality flags for D365 records imported before the lifecycle fix">Repair Import Flags</button></p>
                         <div class="table-wrapper wo-response-table-wrapper">
                             <table>
                                 <thead>

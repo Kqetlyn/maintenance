@@ -5,6 +5,8 @@ __pycache__/
 *.log
 logs/
 *.db
+*.db-shm
+*.db-wal
 
 # Data files — kept locally, uploaded via the app on the deployed version
 data/argos_translate/

@@ -1347,7 +1347,7 @@ def maintenance_summary():
         import db as _db
         batch_id = _db.get_active_powerbi_full_batch_id()
         if not batch_id:
-            return jsonify({"ok": False, "message": "No active Power BI import batch found.", "batch_id": None}), 200
+            return jsonify({"ok": False, "message": "No active D365 import batch found.", "batch_id": None}), 200
 
         with _db.get_connection() as conn:
             status_rows = conn.execute(
