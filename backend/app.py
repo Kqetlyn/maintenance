@@ -69,18 +69,53 @@ DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(os.path.join(BASE_DIR, 
 os.makedirs(DATA_DIR, exist_ok=True)
 ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
 
+def _persisted_secret_key() -> str:
+    """Session-signing key that survives restarts without any deployment config.
+
+    An env var always wins if set. Otherwise, reuse a key saved on disk from a
+    prior boot; if none exists yet, generate one and save it (atomically, so
+    concurrent workers starting at the same time can't each write a different
+    key and end up disagreeing on it). This is what makes sessions consistent
+    across worker processes and across redeploys with zero required setup.
+    """
+    env_key = os.environ.get("DASHBOARD_SECRET_KEY") or os.environ.get("SECRET_KEY")
+    if env_key:
+        return env_key
+    key_path = os.path.join(DATA_DIR, ".dashboard_secret_key")
+    try:
+        with open(key_path, "r", encoding="utf-8") as fh:
+            existing = fh.read().strip()
+        if existing:
+            return existing
+    except FileNotFoundError:
+        pass
+    new_key = secrets.token_hex(32)
+    tmp_path = f"{key_path}.{os.getpid()}.tmp"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(new_key)
+        os.replace(tmp_path, key_path)  # atomic on POSIX and Windows
+    except OSError:
+        pass
+    # Re-read rather than trust `new_key`: if another process/worker won the
+    # race and replaced the file first, everyone must converge on ITS value.
+    try:
+        with open(key_path, "r", encoding="utf-8") as fh:
+            return fh.read().strip() or new_key
+    except OSError:
+        return new_key
+
+
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
 app.config.update(
-    SECRET_KEY=os.environ.get("DASHBOARD_SECRET_KEY") or os.environ.get("SECRET_KEY") or secrets.token_hex(32),
+    SECRET_KEY=_persisted_secret_key(),
     PERMANENT_SESSION_LIFETIME=timedelta(minutes=int(os.environ.get("DASHBOARD_SESSION_TIMEOUT_MINUTES", "60"))),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
 )
 if os.environ.get("DASHBOARD_COOKIE_SECURE", "").lower() in {"1", "true", "yes"}:
     app.config["SESSION_COOKIE_SECURE"] = True
-if not (os.environ.get("DASHBOARD_SECRET_KEY") or os.environ.get("SECRET_KEY")):
-    print("[auth] WARNING: DASHBOARD_SECRET_KEY is not set; sessions will reset when the process restarts.")
 try:
     _auth.ensure_users_table()
     _seeded_users = _auth.seed_initial_users_from_env()
