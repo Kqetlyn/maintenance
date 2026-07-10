@@ -598,7 +598,16 @@ def _invalidate_route_cache():
                 pass
     except Exception:
         pass
-    for mod, attr in (("pm_schedule_service", "_PM_PAGE_PAYLOAD_CACHE"), ("downtime_service", "_DOWNTIME_CACHE")):
+    # kpi_query_service/predictive_service memoize on top of downtime_service's
+    # own caches (up to 15 min TTL) — without clearing these too, the MIRA
+    # Overview / Predictive Insights pages keep serving pre-import data for
+    # up to 15 minutes after an otherwise-successful import.
+    for mod, attr in (
+        ("pm_schedule_service", "_PM_PAGE_PAYLOAD_CACHE"),
+        ("downtime_service", "_DOWNTIME_CACHE"),
+        ("mira.services.kpi_query_service", "_MEMO"),
+        ("mira.services.predictive_service", "_MEMO"),
+    ):
         try:
             import importlib
             getattr(importlib.import_module(mod), attr).clear()
