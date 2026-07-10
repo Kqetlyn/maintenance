@@ -76,7 +76,10 @@ def get_last_import_stats() -> dict:
 
 def clear_work_order_runtime_caches() -> None:
     """Clear all in-process downtime/work-order caches after a data mutation."""
-    clear_work_order_runtime_caches()
+    _DOWNTIME_CACHE.clear()
+    _WO_LOAD_CACHE["sig"] = None
+    _WO_LOAD_CACHE["payload"] = None
+    _SQL_WO_CACHE.clear()
 
 
 def _env_truthy(name: str, default: str = "0") -> bool:
