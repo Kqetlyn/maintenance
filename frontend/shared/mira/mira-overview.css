@@ -1853,10 +1853,10 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
 }
 .mira-pred-esc-link:hover { text-decoration: underline; }
 
-/* ── Bottom row: Fault Pattern + Data Confidence ─────────────────────────── */
+/* ── Bottom row: Scoring Rules ────────────────────────────────────────────── */
 .mira-pred-bottom-row {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
     gap: 12px;
 }
 
@@ -1867,8 +1867,6 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
     border-radius: 10px;
     padding: 14px 16px;
 }
-
-.mira-ov-pred-card-confidence { padding: 12px 16px; }
 
 .mira-ov-pred-card-title {
     font-size: 0.72rem;
@@ -1972,10 +1970,6 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
 }
 
 /* ── Responsive ────────────────────────────────────────────────────────────── */
-@media (max-width: 900px) {
-    .mira-pred-bottom-row { grid-template-columns: 1fr; }
-}
-
 @media (max-width: 900px) {
     /* Collapse 8-column grid to a compact stacked layout on smaller screens */
     .mira-pred-mg-colhdr { display: none; }

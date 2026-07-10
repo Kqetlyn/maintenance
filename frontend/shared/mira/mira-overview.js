@@ -442,9 +442,6 @@
         sec.append(el("div", "mira-ov-section-label", "Predictive Maintenance Insights"));
         sec.append(el("p", "mira-ov-pred-subtitle",
             "Rule-based risk cards from verified WO/MR history, MTBF movement, criticality, aged open work orders, and linked spare-part consumption."));
-        const kpiStrip = el("div", "mira-pred-kpi-strip");
-        kpiStrip.id = "mira-pred-kpi-strip";
-        sec.append(kpiStrip);
         sec.append(el("p", "mira-ov-disclaimer",
             "Calculated risk is shown first. AI wording is limited to short summaries of the structured card data; no open-ended chat is used."));
         const catsWrap = el("div", "mira-pred-cats-wrap");
@@ -459,14 +456,7 @@
         card2Body.id = "mira-pred-fault-body";
         card2Body.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-md\"></div>";
         card2.append(card2Body);
-        const card4 = el("div", "mira-ov-pred-card mira-ov-pred-card-confidence");
-        card4.id = "mira-pred-card4";
-        card4.append(el("div", "mira-ov-pred-card-title", "AI Use Policy"));
-        const card4Body = el("div");
-        card4Body.id = "mira-pred-confidence-body";
-        card4Body.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-sm\"></div>";
-        card4.append(card4Body);
-        bottomRow.append(card2, card4);
+        bottomRow.append(card2);
         sec.append(bottomRow);
 
         const footnote = el("p", "mira-pred-methodology-footnote");
@@ -581,25 +571,9 @@
     function _renderPredRiskCards(d) {
         predictiveLatestPayload = d;
         _assetDetailCache = new Map();
-        const strip = document.getElementById("mira-pred-kpi-strip");
         const body = document.getElementById("mira-pred-cats-body");
         const rulesBody = document.getElementById("mira-pred-fault-body");
-        const policyBody = document.getElementById("mira-pred-confidence-body");
         const cards = d.cards || [];
-        if (strip) {
-            strip.innerHTML = "";
-            [
-                ["Assets Assessed", d.assets_assessed],
-                ["Assets With Risk Signals", d.scored_assets],
-                ["High Risk", cards.filter((c) => c.risk_level === "High").length],
-                ["Period", d.period || "Last 30 days"],
-            ].forEach(([label, value]) => {
-                const item = el("div", "mira-pred-kpi");
-                item.append(el("span", null, label));
-                item.append(el("strong", null, value == null ? "—" : String(value)));
-                strip.append(item);
-            });
-        }
         // Rule list is read verbatim from the backend's risk_rules.factors — this
         // is the single shared source (predictive_service.py's _RISK_SCORE_RULES);
         // never hand-type these numbers/labels here.
@@ -610,9 +584,6 @@
                   factors.map((r) => `<li>+${r.points} for ${escOv(r.label)}</li>`).join("") +
                   "</ul>"
                 : "<p class=\"mira-ov-muted\">Scoring rules unavailable.</p>";
-        }
-        if (policyBody) {
-            policyBody.innerHTML = `<p class="mira-ov-muted">${escOv(d.llm_policy || "AI summaries only explain prepared KPI and risk-card data.")}</p>`;
         }
         if (!body) return;
         body.innerHTML = "";
