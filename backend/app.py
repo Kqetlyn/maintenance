@@ -3,14 +3,19 @@ Standalone Maintenance Dashboard — Flask backend.
 Serves only the Maintenance page and its required API endpoints.
 """
 
-from datetime import datetime
-from flask import Flask, jsonify, redirect, send_from_directory, request
+from datetime import datetime, timedelta
+from functools import wraps
+from urllib.parse import urlparse
+from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, session, url_for
+from markupsafe import escape
 import os
+import secrets
 
 # ── SQLite database layer (Phase 1) ──────────────────────────────────────────
 # db.init_db() is called at startup to create data/dashboard.db and all tables
 # if they don't already exist. No existing Excel logic is removed.
 import db as _db
+import auth as _auth
 
 # ── Service imports ─────────────────────────────────────────────────────────────
 # The legacy maintenance overview / utility / equipment builders are no longer
@@ -42,9 +47,12 @@ from spare_parts_service import (
 # (/api/downtime?period=all_years&work_orders_only=1) and by spare_parts_service
 from downtime_service import (
     build_downtime_payload,
+    build_inactive_critical_machines_payload,
     build_mtbf_work_order_history_payload,
+    clear_work_order_runtime_caches,
     get_work_order_import_status,
     import_work_order_file,
+    get_last_import_stats,
 )
 try:
     from mira.api import mira_bp
@@ -63,6 +71,25 @@ ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
+app.config.update(
+    SECRET_KEY=os.environ.get("DASHBOARD_SECRET_KEY") or os.environ.get("SECRET_KEY") or secrets.token_hex(32),
+    PERMANENT_SESSION_LIFETIME=timedelta(minutes=int(os.environ.get("DASHBOARD_SESSION_TIMEOUT_MINUTES", "60"))),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+)
+if os.environ.get("DASHBOARD_COOKIE_SECURE", "").lower() in {"1", "true", "yes"}:
+    app.config["SESSION_COOKIE_SECURE"] = True
+if not (os.environ.get("DASHBOARD_SECRET_KEY") or os.environ.get("SECRET_KEY")):
+    print("[auth] WARNING: DASHBOARD_SECRET_KEY is not set; sessions will reset when the process restarts.")
+try:
+    _auth.ensure_users_table()
+    _seeded_users = _auth.seed_initial_users_from_env()
+    if not (os.environ.get("DASHBOARD_MANAGEMENT_PASSWORD") or os.environ.get("DASHBOARD_STAFF_PASSWORD")):
+        _seeded_users.extend(_auth.ensure_default_users("0000"))
+    if _seeded_users:
+        print(f"[auth] Created initial user(s): {', '.join(_seeded_users)}")
+except Exception as _auth_exc:
+    print(f"[auth] WARNING: could not initialise users table - {_auth_exc}")
 APP_VERSION = "2026-06-08-stabilise-1"
 _BACKEND_START = datetime.now()
 
@@ -84,9 +111,324 @@ try:
 except Exception:
     pass
 _CACHE_TTL = 600.0
+_CACHE_STALE_TTL = float(os.environ.get("MIRA_CACHE_STALE_TTL_SECONDS", "86400"))
+_PM_SCHEDULE_CACHE_SCHEMA = "pm-schedule-v2-no-duplicate-all"
 _BUILD_LOCKS = {}
 _BUILD_LOCKS_GUARD = _threading.Lock()
+_REFRESHING_KEYS = set()
+_REFRESHING_KEYS_GUARD = _threading.Lock()
 _REFRESH_TARGETS = []          # [(key, builder)] rebuilt periodically in the background
+
+
+_PUBLIC_PATHS = {"/login", "/access-denied"}
+_PUBLIC_STATIC_PREFIXES = ("/shared/assets/",)
+_PUBLIC_STATIC_EXTENSIONS = (".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".map")
+
+
+def _is_api_request():
+    return request.path.startswith("/api/")
+
+
+def _json_error(message, status=403):
+    return jsonify({"ok": False, "error": message, "message": message}), status
+
+
+def current_user():
+    user_id = session.get("user_id")
+    user = _auth.get_user_by_id(user_id) if user_id else None
+    if not user or not int(user.get("is_active") or 0):
+        session.clear()
+        return None
+    user.pop("password_hash", None)
+    user["permissions"] = sorted(_auth.get_user_permissions(user))
+    return user
+
+
+def current_role():
+    user = current_user()
+    return user.get("role") if user else None
+
+
+def login_required(view_func):
+    @wraps(view_func)
+    def wrapper(*args, **kwargs):
+        if not current_user():
+            if _is_api_request():
+                return _json_error("Login required.", 401)
+            return redirect(url_for("login", next=request.full_path.rstrip("?")))
+        return view_func(*args, **kwargs)
+    return wrapper
+
+
+def roles_required(roles):
+    allowed = {str(role).strip().lower() for role in roles}
+
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(*args, **kwargs):
+            user = current_user()
+            if not user:
+                if _is_api_request():
+                    return _json_error("Login required.", 401)
+                return redirect(url_for("login", next=request.full_path.rstrip("?")))
+            if user.get("role") not in allowed:
+                if _is_api_request():
+                    return _json_error("Access denied.", 403)
+                return redirect(url_for("access_denied", next=request.full_path.rstrip("?")))
+            return view_func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def role_required(role):
+    return roles_required([role])
+
+
+def permission_required(permission):
+    def decorator(view_func):
+        @wraps(view_func)
+        def wrapper(*args, **kwargs):
+            user = current_user()
+            if not user:
+                if _is_api_request():
+                    return _json_error("Login required.", 401)
+                return redirect(url_for("login", next=request.full_path.rstrip("?")))
+            if permission not in set(user.get("permissions") or []):
+                if _is_api_request():
+                    return _json_error("Access denied.", 403)
+                return redirect(url_for("access_denied", next=request.full_path.rstrip("?")))
+            return view_func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def _requested_dashboard_view(default="mira_overview"):
+    return (request.args.get("view") or default or "").strip().lower()
+
+
+def _is_safe_local_next(target):
+    if not target:
+        return False
+    parsed = urlparse(target)
+    return not parsed.scheme and not parsed.netloc and target.startswith("/")
+
+
+def _permission_for_dashboard_view(view):
+    view = (view or "").strip().lower()
+    if view == "overview":
+        return "mira_overview"
+    if view == "pm_schedule":
+        return "pm_schedule"
+    if view == "equipment":
+        return "utility"
+    if view in {"mira_overview", "spare_parts", "downtime", "analysis", "utility"}:
+        return view
+    return "mira_overview"
+
+
+def _permissions_for_path(path):
+    clean_path = (path or "/").split("?", 1)[0]
+    lower_path = clean_path.lower()
+
+    if lower_path in {"/", "/maintenance", "/maintenance/", "/maintenance/index.html"}:
+        if not str(request.args.get("view", "")).strip():
+            return set(_auth.VALID_PERMISSIONS)
+        return {_permission_for_dashboard_view(_requested_dashboard_view())}
+    if lower_path in {"/downtime", "/downtime/", "/downtime/index.html"}:
+        return {"downtime"}
+    if lower_path in {"/management/users", "/management/users/"}:
+        return {"manage_users"}
+    if lower_path == "/shared/navbar.html":
+        return set(_auth.VALID_PERMISSIONS)
+    if lower_path.endswith(".html"):
+        return {"mira_overview"}
+
+    if lower_path == "/api/auth/session":
+        return set(_auth.VALID_PERMISSIONS)
+    if lower_path == "/api/asset-list":
+        return {"pm_schedule", "downtime", "analysis", "mira_overview"}
+    if lower_path.startswith("/api/downtime"):
+        return {"downtime"}
+    if lower_path in {"/api/maintenance/pm-schedule", "/api/maintenance/pm-assets"}:
+        return {"pm_schedule"}
+    if lower_path.startswith("/api/maintenance/pm-schedule/"):
+        return {"pm_schedule"}
+    if lower_path in {
+        "/api/maintenance/summary",
+        "/api/maintenance/records",
+        "/api/maintenance/ttr-mttr",
+        "/api/maintenance/data-quality",
+    }:
+        return {"analysis", "downtime", "mira_overview"}
+    if lower_path == "/api/maintenance/critical-machines/inactive":
+        return {"downtime"}
+    if lower_path in {"/api/import/validate", "/api/import/last-result", "/api/import/quality-summary", "/api/import/repair-quality-flags"}:
+        return {"downtime"}
+    if lower_path in {"/api/page-sync/maintenance", "/api/page-sync/downtime"}:
+        return {"pm_schedule", "downtime", "mira_overview"}
+    if lower_path.startswith("/api/spare-parts"):
+        return {"spare_parts"}
+    if lower_path in {
+        "/api/maintenance/spare_parts",
+        "/api/maintenance/import-status",
+        "/api/maintenance/project_transactions_all",
+        "/api/maintenance/external_po",
+        "/api/maintenance/asset-parts-intelligence",
+    }:
+        return {"spare_parts"}
+    if lower_path == "/api/maintenance/project_transactions":
+        return {"spare_parts", "downtime"}
+    if lower_path.startswith("/api/maintenance/import/"):
+        return {"spare_parts"}
+    if lower_path.startswith("/api/mira"):
+        return {"mira_overview"}
+    if lower_path in {"/api/refresh-data", "/api/db/status", "/api/db/sync-asset-master"}:
+        return {"manage_users"}
+    if lower_path.startswith("/api/"):
+        return {"mira_overview"}
+
+    return set(_auth.VALID_PERMISSIONS)
+
+
+def _user_has_any_permission(user, permissions):
+    allowed = set(user.get("permissions") or [])
+    return bool(allowed.intersection(set(permissions or [])))
+
+
+def _is_public_request():
+    path = request.path
+    lower_path = path.lower()
+    if lower_path in _PUBLIC_PATHS:
+        return True
+    if lower_path.startswith(_PUBLIC_STATIC_PREFIXES):
+        return True
+    if lower_path.endswith(_PUBLIC_STATIC_EXTENSIONS) and not lower_path.endswith(".html"):
+        return True
+    return False
+
+
+def _default_page_for_role(role):
+    return "/?view=pm_schedule" if role == "public" else "/?view=mira_overview"
+
+
+def _default_page_for_user(user):
+    permissions = set((user or {}).get("permissions") or [])
+    for permission, target in (
+        ("mira_overview", "/?view=mira_overview"),
+        ("pm_schedule", "/?view=pm_schedule"),
+        ("downtime", "/?view=downtime"),
+        ("spare_parts", "/?view=spare_parts"),
+        ("analysis", "/?view=analysis"),
+        ("utility", "/?view=utility"),
+        ("manage_users", "/management/users"),
+    ):
+        if permission in permissions:
+            return target
+    return url_for("access_denied")
+
+
+def _can_access_next(target, user):
+    if not _is_safe_local_next(target):
+        return False
+    with app.test_request_context(target):
+        return _user_has_any_permission(user, _permissions_for_path(request.path))
+
+
+def _deny_for_request(message="Access denied."):
+    if _is_api_request():
+        return _json_error(message, 403)
+    return redirect(url_for("access_denied", next=request.full_path.rstrip("?")))
+
+
+@app.before_request
+def enforce_login_and_roles():
+    try:
+        _auth.ensure_users_table()
+    except Exception as exc:
+        if _is_api_request():
+            return _json_error(f"Authentication database unavailable: {exc}", 500)
+        raise
+
+    if _is_public_request():
+        return None
+
+    user = current_user()
+    if not user:
+        if _is_api_request():
+            return _json_error("Login required.", 401)
+        return redirect(url_for("login", next=request.full_path.rstrip("?")))
+
+    session.permanent = True
+    required_permissions = _permissions_for_path(request.path)
+    if not _user_has_any_permission(user, required_permissions):
+        return _deny_for_request()
+    return None
+
+
+def _inject_auth_context(html):
+    user = current_user() or {}
+    role = user.get("role") or ""
+    username = user.get("username") or ""
+    permissions = sorted(user.get("permissions") or [])
+    safe_role = str(escape(role))
+    safe_username = str(escape(username))
+    mira_config = "window.MIRA_CONFIG=Object.assign({},window.MIRA_CONFIG||{},{enabled:false});" if "mira_overview" not in permissions else ""
+    auth_script = (
+        "<script>"
+        f"window.DASHBOARD_AUTH={{username:{_json.dumps(username)},role:{_json.dumps(role)},permissions:{_json.dumps(permissions)}}};"
+        f"{mira_config}"
+        "</script>"
+        "<style>"
+        "[data-permission]:not(.permission-visible){display:none!important;}"
+        "</style>"
+    )
+    html = html.replace("</head>", f"{auth_script}\n</head>", 1)
+    html = html.replace("<body ", f"<body data-user-role=\"{safe_role}\" data-username=\"{safe_username}\" ", 1)
+    return html
+
+
+def _serve_html_with_auth(directory, filename):
+    path = os.path.join(directory, filename)
+    with open(path, "r", encoding="utf-8") as fh:
+        html = fh.read()
+    return app.response_class(_inject_auth_context(html), mimetype="text/html")
+
+
+def _navbar_html():
+    user = current_user() or {}
+    role = user.get("role") or ""
+    username = user.get("username") or ""
+    permissions = set(user.get("permissions") or [])
+    safe_username = str(escape(username))
+    safe_role = str(escape(role))
+    dashboard_href = _default_page_for_user(user)
+    nav_items = ""
+    if permissions.intersection({"mira_overview", "pm_schedule", "downtime", "spare_parts", "analysis", "utility"}):
+        nav_items += f"""
+    <div class="nav-item"><button class="nav-btn" data-nav-view="dashboard" onclick="location.href='{dashboard_href}'">Dashboard</button></div>
+"""
+    if "manage_users" in permissions:
+        nav_items += """
+    <div class="nav-item"><button class="nav-btn" data-nav-view="users" onclick="location.href='/management/users'">Users</button></div>
+"""
+    return f"""<header class="top-header">
+    <div class="brand">
+        <img src="/shared/assets/SATS_Logo.png" class="brand-logo" alt="SATS Logo">
+        <div class="pulse"></div>
+        <h1 class="brand-title">Monitoring System <span class="brand-subtitle">| Stage 2</span></h1>
+        <span class="brand-ai-note" title="This dashboard was built with AI assistance.">Made with AI</span>
+    </div>
+    <div id="clock" class="header-clock"></div>
+</header>
+
+<nav class="main-nav">
+{nav_items}
+    <div class="nav-spacer"></div>
+    <div class="nav-user" title="{safe_username}">{safe_username} <span>{safe_role}</span></div>
+    <form class="nav-logout-form" action="/logout" method="post">
+        <button class="nav-btn nav-logout-btn" type="submit">Logout</button>
+    </form>
+</nav>"""
 
 
 def _cache_path(key):
@@ -100,8 +442,12 @@ def _cache_fresh(path, ttl):
         return False
 
 
+def _env_truthy(name, default="0"):
+    return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _write_cache(key, builder):
-    gz = _gzip.compress(_json.dumps(builder(), default=str).encode("utf-8"), 5)
+    gz = _gzip.compress(_json.dumps(builder(), default=str, separators=(",", ":")).encode("utf-8"), 5)
     path = _cache_path(key)
     try:
         tmp = path + ".tmp"
@@ -113,14 +459,37 @@ def _write_cache(key, builder):
     return gz
 
 
-def _gzip_resp(gz, accepts_gzip):
+def _gzip_resp(gz, accepts_gzip, cache_state=None):
     if accepts_gzip:
         resp = app.response_class(gz, mimetype="application/json")
         resp.headers["Content-Encoding"] = "gzip"
         resp.headers["Content-Length"] = str(len(gz))
         resp.headers["Vary"] = "Accept-Encoding"
+        if cache_state:
+            resp.headers["X-Dashboard-Cache"] = cache_state
         return resp
-    return app.response_class(_gzip.decompress(gz), mimetype="application/json")
+    resp = app.response_class(_gzip.decompress(gz), mimetype="application/json")
+    if cache_state:
+        resp.headers["X-Dashboard-Cache"] = cache_state
+    return resp
+
+
+def _refresh_cache_async(key, builder):
+    with _REFRESHING_KEYS_GUARD:
+        if key in _REFRESHING_KEYS:
+            return
+        _REFRESHING_KEYS.add(key)
+
+    def run():
+        try:
+            _write_cache(key, builder)
+        except Exception as exc:
+            print(f"[cache] background refresh failed for {key}: {exc}")
+        finally:
+            with _REFRESHING_KEYS_GUARD:
+                _REFRESHING_KEYS.discard(key)
+
+    _threading.Thread(target=run, name="cache-refresh", daemon=True).start()
 
 
 def _cached_json(key, builder, ttl=_CACHE_TTL):
@@ -129,7 +498,15 @@ def _cached_json(key, builder, ttl=_CACHE_TTL):
     if _cache_fresh(path, ttl):
         try:
             with open(path, "rb") as fh:
-                return _gzip_resp(fh.read(), accepts)
+                return _gzip_resp(fh.read(), accepts, "hit")
+        except OSError:
+            pass
+    if _env_truthy("MIRA_SERVE_STALE_CACHE", "1") and _cache_fresh(path, _CACHE_STALE_TTL):
+        try:
+            with open(path, "rb") as fh:
+                gz = fh.read()
+            _refresh_cache_async(key, builder)
+            return _gzip_resp(gz, accepts, "stale")
         except OSError:
             pass
     # Single-flight: one build per key; concurrent requests wait and reuse it.
@@ -139,11 +516,11 @@ def _cached_json(key, builder, ttl=_CACHE_TTL):
         if _cache_fresh(path, ttl):
             try:
                 with open(path, "rb") as fh:
-                    return _gzip_resp(fh.read(), accepts)
+                    return _gzip_resp(fh.read(), accepts, "hit")
             except OSError:
                 pass
         gz = _write_cache(key, builder)
-    return _gzip_resp(gz, accepts)
+    return _gzip_resp(gz, accepts, "miss")
 
 
 def _register_refresh(key, builder):
@@ -151,13 +528,25 @@ def _register_refresh(key, builder):
 
 
 def _background_refresher():
-    """Rebuild the default heavy payloads on disk on a schedule (and once now), so
-    user requests always hit a warm cache instead of a cold build."""
+    """Optionally rebuild default heavy payloads on a schedule.
+
+    Disabled by default for deployed servers because these builds are CPU-heavy
+    and previously made first boot unusable. Set MIRA_ENABLE_CACHE_WARMER=1 to
+    enable scheduled warming, and MIRA_WARM_ON_STARTUP=1 to run it immediately.
+    """
+    if not _env_truthy("MIRA_ENABLE_CACHE_WARMER", "0"):
+        print("[cache] background warmer disabled (set MIRA_ENABLE_CACHE_WARMER=1 to enable).")
+        return
+
     def loop():
+        if not _env_truthy("MIRA_WARM_ON_STARTUP", "0"):
+            _time.sleep(max(60.0, _CACHE_TTL * 0.5))
         while True:
             for key, builder in list(_REFRESH_TARGETS):
                 try:
-                    _write_cache(key, builder)
+                    path = _cache_path(key)
+                    if not _cache_fresh(path, _CACHE_TTL):
+                        _write_cache(key, builder)
                 except Exception:
                     pass
             _time.sleep(max(60.0, _CACHE_TTL * 0.5))
@@ -180,6 +569,10 @@ def _invalidate_route_cache():
             getattr(importlib.import_module(mod), attr).clear()
         except Exception:
             pass
+    try:
+        clear_work_order_runtime_caches()
+    except Exception:
+        pass
 
 
 # A successful POST to any of these (edit/upload) invalidates the cache so the
@@ -187,6 +580,7 @@ def _invalidate_route_cache():
 _MUTATION_PREFIXES = (
     "/api/maintenance/pm-schedule/",
     "/api/downtime/import",
+    "/api/import/repair",
     "/api/maintenance/import",
     "/api/spare-parts/import",
 )
@@ -235,6 +629,113 @@ else:
     print(f"MIRA routes unavailable: {mira_import_error}")
 
 
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if current_user():
+        return redirect(_default_page_for_user(current_user()))
+
+    error = ""
+    next_url = request.args.get("next") or request.form.get("next") or ""
+    if request.method == "POST":
+        username = request.form.get("username", "")
+        password = request.form.get("password", "")
+        user = _auth.verify_credentials(username, password)
+        if user:
+            session.clear()
+            session.permanent = True
+            session["user_id"] = user["id"]
+            session["username"] = user["username"]
+            session["role"] = user["role"]
+            target = next_url if _can_access_next(next_url, user) else _default_page_for_user(user)
+            return redirect(target)
+        error = "Invalid username or password."
+
+    return render_template(
+        "login.html",
+        error=error,
+        next=next_url,
+        login_groups=_auth.list_active_users_by_role(),
+    )
+
+
+@app.route("/logout", methods=["GET", "POST"])
+def logout():
+    session.clear()
+    return redirect(url_for("login"))
+
+
+@app.route("/access-denied")
+@login_required
+def access_denied():
+    user = current_user() or {}
+    return render_template(
+        "access_denied.html",
+        role=user.get("role", ""),
+        home_url=_default_page_for_user(user),
+    ), 403
+
+
+@app.route("/api/auth/session")
+@login_required
+def auth_session():
+    user = current_user() or {}
+    return jsonify({
+        "authenticated": True,
+        "username": user.get("username"),
+        "role": user.get("role"),
+        "permissions": sorted(user.get("permissions") or []),
+        "sessionTimeoutMinutes": int(app.config["PERMANENT_SESSION_LIFETIME"].total_seconds() // 60),
+    })
+
+
+@app.route("/management/users", methods=["GET", "POST"])
+@permission_required("manage_users")
+def manage_users():
+    message = ""
+    error = ""
+    if request.method == "POST":
+        action = (request.form.get("action") or "").strip()
+        try:
+            if action == "create":
+                user = _auth.create_user(
+                    request.form.get("username", ""),
+                    request.form.get("password", ""),
+                    request.form.get("role", "public"),
+                    is_active=request.form.get("is_active") == "1",
+                )
+                message = f"Created {user['username']}."
+            elif action == "update":
+                user_id = request.form.get("user_id")
+                is_self = str(user_id) == str(session.get("user_id"))
+                is_active = True if is_self else request.form.get("is_active") == "1"
+                # A restricted user editing their own account can't demote themselves,
+                # which would otherwise lock them out of user management.
+                role = "restricted" if is_self else request.form.get("role", "public")
+                user = _auth.update_user(
+                    user_id,
+                    password=request.form.get("password", ""),
+                    role=role,
+                    is_active=is_active,
+                )
+                if is_self:
+                    session["role"] = user["role"]
+                    session["username"] = user["username"]
+                message = f"Updated {user['username']}."
+            else:
+                error = "Unknown user action."
+        except Exception as exc:
+            error = str(exc)
+
+    return render_template(
+        "manage_users.html",
+        users=_auth.list_users(),
+        role_labels=_auth.ROLE_LABELS,
+        message=message,
+        error=error,
+        current_user_id=session.get("user_id"),
+    )
+
+
 @app.route("/api/health")
 def api_health():
     """Lightweight liveness/readiness probe — never triggers a heavy load."""
@@ -271,7 +772,7 @@ def api_health():
         "ollama": {
             "enabled": ollama_enabled,
             "baseUrl": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
-            "model": os.environ.get("OLLAMA_MODEL", "qwen2.5:7b"),
+            "model": os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
         },
     })
 
@@ -321,26 +822,34 @@ def db_sync_asset_master():
 # ── Frontend routes ───────────────────────────────────────────────────────────
 
 @app.route("/")
+@login_required
 def root():
-    """Root URL serves the Maintenance page, defaulting to the Downtime view."""
+    """Root URL uses the login page as the default entry point."""
     if not str(request.args.get("view", "")).strip():
-        return redirect("/?view=downtime")
-    return send_from_directory(os.path.join(FRONTEND_DIR, "Maintenance"), "index.html")
+        return redirect(url_for("login"))
+    return _serve_html_with_auth(os.path.join(FRONTEND_DIR, "Maintenance"), "index.html")
 
 
 @app.route("/Downtime")
 @app.route("/Downtime/index.html")
+@login_required
 def downtime_root():
     """Downtime is part of the Maintenance page; embed mode still serves the HTML file."""
     embed_mode = str(request.args.get("embed", "")).strip().lower() in {"1", "true", "yes", "on"}
     if embed_mode:
-        return send_from_directory(os.path.join(FRONTEND_DIR, "Downtime"), "index.html")
+        return _serve_html_with_auth(os.path.join(FRONTEND_DIR, "Downtime"), "index.html")
     return redirect("/?view=downtime")
 
 
 @app.route("/<path:path>")
 def frontend_files(path):
     """Catch-all static file server for CSS, JS, shared assets, etc."""
+    normalised = path.replace("\\", "/").lstrip("/")
+    if normalised.lower() == "shared/navbar.html":
+        return app.response_class(_navbar_html(), mimetype="text/html")
+    if normalised.lower() in {"maintenance/index.html", "downtime/index.html"}:
+        root_dir = "Maintenance" if normalised.lower().startswith("maintenance/") else "Downtime"
+        return _serve_html_with_auth(os.path.join(FRONTEND_DIR, root_dir), "index.html")
     return send_from_directory(FRONTEND_DIR, path)
 
 
@@ -447,7 +956,7 @@ def downtime_data():
     stage = request.args.get("stage")
     work_orders_only = str(request.args.get("work_orders_only", "")).strip().lower() in {"1", "true", "yes", "on"}
     return _cached_json(
-        ("downtime", period, month, start, end, work_orders_only, stage),
+        ("downtime", "lean-v3", period, month, start, end, work_orders_only, stage),
         lambda: build_downtime_payload(period, month, start, end, work_orders_only=work_orders_only, stage=stage),
     )
 
@@ -455,6 +964,20 @@ def downtime_data():
 # ── Spare-parts views: Overview / Goods Received / Goods Issued ────────────────
 # Pluggable by import (files discovered in data/ by spare_parts_views) and cached
 # by filter params (the underlying parsers are cached by file signature).
+@app.route("/api/maintenance/critical-machines/inactive")
+def inactive_critical_machines_api():
+    period = request.args.get("period")
+    month = request.args.get("month")
+    start = request.args.get("start")
+    end = request.args.get("end")
+    stage = request.args.get("stage")
+    category = request.args.get("equipmentCategory") or request.args.get("category")
+    return _cached_json(
+        ("inactive-critical-machines", period, month, start, end, stage, category),
+        lambda: build_inactive_critical_machines_payload(period, month, start, end, stage=stage, category=category),
+    )
+
+
 def _spare_filters():
     return (
         request.args.get("stage"),
@@ -470,7 +993,7 @@ def spare_parts_overview():
     stage, category, year, month, financial_view = _spare_filters()
     import spare_parts_views as spv
     return _cached_json(
-        ("spare-overview", stage, category, year, month, financial_view),
+        ("spare-overview-v2", stage, category, year, month, financial_view),
         lambda: spv.build_overview(stage, category, year, month, financial_view),
     )
 
@@ -508,7 +1031,10 @@ def spare_parts_item_vendor_analysis():
 @app.route("/api/spare-parts/import-status")
 def spare_parts_import_status():
     import spare_parts_views as spv
-    return jsonify(spv.get_import_status())
+    import spare_po_service as sps
+    status = spv.get_import_status()
+    status.update(sps.get_import_status())
+    return jsonify(status)
 
 
 def _do_gen_po_import(stage):
@@ -550,33 +1076,6 @@ def spare_parts_import_inventory():
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
-@app.route("/api/spare-parts/import-gen-po", methods=["POST"])
-def spare_parts_import_gen_po():
-    """Multi-file Gen PO import. Stage may be given explicitly (form field `stage`)
-    or detected from each filename; undetectable files are reported, not guessed."""
-    import spare_parts_views as spv
-    uploads = request.files.getlist("file") or request.files.getlist("files")
-    if not uploads:
-        single = request.files.get("file")
-        uploads = [single] if single and single.filename else []
-    if not uploads:
-        return jsonify({"ok": False, "message": "No files uploaded."}), 400
-    forced_stage = (request.form.get("stage") or "").strip() or None
-    results, any_ok = [], False
-    for up in uploads:
-        if not up or not up.filename:
-            continue
-        stage = forced_stage or spv.detect_stage_from_name(up.filename)
-        if stage not in ("Stage 1", "Stage 2"):
-            results.append({"ok": False, "file_name": up.filename,
-                            "message": "Could not detect stage from filename — import via the Stage 1 / Stage 2 slot instead."})
-            continue
-        res = spv.import_gen_po(stage, up)
-        any_ok = any_ok or res.get("ok")
-        results.append(res)
-    return jsonify({"ok": any_ok, "results": results}), (200 if any_ok else 400)
-
-
 @app.route("/api/spare-parts/delivery-performance")
 def spare_parts_delivery_performance():
     stage, category, year, month, financial_view = _spare_filters()
@@ -585,6 +1084,39 @@ def spare_parts_delivery_performance():
         ("spare-delivery-perf", stage, category, year, month, financial_view),
         lambda: dps.build_delivery_performance(stage, category, year, month, financial_view),
     )
+
+
+@app.route("/api/spare-parts/po-spare")
+def spare_parts_po_spare():
+    import spare_po_service as sps
+    year  = request.args.get("year",  "").strip()
+    month = request.args.get("month", "").strip()
+    return _cached_json(
+        ("spare-po-spare", year, month),
+        lambda: sps.build_spare_po_payload(year=year, month=month),
+    )
+
+
+@app.route("/api/spare-parts/import-po-spare", methods=["POST"])
+def spare_parts_import_po_spare():
+    """Import PO Spare 24-26.csv (controlled spare PO base table)."""
+    import spare_po_service as sps
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "message": "No file uploaded."}), 400
+    result = sps.import_po_spare_file(upload)
+    return jsonify(result), (200 if result.get("ok") else 400)
+
+
+@app.route("/api/spare-parts/import-inventory-mapping", methods=["POST"])
+def spare_parts_import_inventory_mapping():
+    """Import On-hand list.xlsx as inventory item mapping (stock snapshot / lookup only)."""
+    import spare_po_service as sps
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "message": "No file uploaded."}), 400
+    result = sps.import_inventory_mapping_file(upload)
+    return jsonify(result), (200 if result.get("ok") else 400)
 
 
 @app.route("/api/spare-parts/procurement-reconciliation")
@@ -619,6 +1151,367 @@ def downtime_import_work_orders():
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
+@app.route("/api/import/validate", methods=["POST"])
+def import_validate():
+    """
+    Validate a work-order file (CSV, XLSX, XLS) before committing it to the DB.
+
+    Returns: is_powerbi, source_type, column_map, missing required columns,
+    found required columns, up to 3 sample mapped rows, total row count, and
+    a human-readable message. Does NOT save the file or write to the database.
+    """
+    import tempfile, os as _os
+    try:
+        import powerbi_adapter as _pbi
+        from downtime_service import read_work_order_source_file, WORK_ORDER_IMPORT_EXTENSIONS
+    except ImportError as exc:
+        return jsonify({"ok": False, "message": f"Import error: {exc}"}), 500
+
+    upload = request.files.get("file")
+    if not upload or not upload.filename:
+        return jsonify({"ok": False, "message": "No file uploaded."}), 400
+
+    filename = _os.path.basename(getattr(upload, "filename", "") or "")
+    ext = _os.path.splitext(filename)[1].lower()
+    if ext not in WORK_ORDER_IMPORT_EXTENSIONS:
+        return jsonify({
+            "ok": False,
+            "message": f"Unsupported file type '{ext}'. Upload a CSV, XLSX, or XLS file.",
+        }), 400
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+            tmp_path = tmp.name
+            upload.save(tmp_path)
+
+        try:
+            df = read_work_order_source_file(tmp_path)
+        finally:
+            try:
+                _os.remove(tmp_path)
+            except OSError:
+                pass
+
+        is_powerbi = _pbi.detect_powerbi_export(df)
+        source_type = "powerbi" if is_powerbi else "work_orders"
+        validation = _pbi.validate_powerbi_columns(df)
+
+        return jsonify({
+            "ok": validation["ok"],
+            "is_powerbi": is_powerbi,
+            "source_type": source_type,
+            "missing": validation["missing"],
+            "found": validation["found"],
+            "column_map": validation["column_map"],
+            "sample_rows": validation["sample_rows"],
+            "total_rows": validation["total_rows"],
+            "message": validation["message"],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": f"Validation failed: {exc}"}), 400
+
+
+@app.route("/api/import/last-result")
+def import_last_result():
+    """Return the stats from the most recent background DB import write."""
+    stats = get_last_import_stats()
+    if not stats:
+        return jsonify({"ok": False, "message": "No import has been run yet in this session."}), 200
+    return jsonify(stats)
+
+
+@app.route("/api/import/repair-quality-flags", methods=["POST"])
+def import_repair_quality_flags():
+    """
+    Re-evaluate and fix stored data_validity_status for Power BI records
+    that were imported before the 'Confirm' lifecycle fix or before
+    ActualStart/ActualEnd column aliases were recognised.
+    Clears the SQL work-order cache so the next page load reflects repairs.
+    """
+    try:
+        import db as _db
+        import downtime_service as _ds
+        result = _db.repair_powerbi_quality_flags()
+        _ds.clear_work_order_runtime_caches()
+        return jsonify({
+            "ok": True,
+            "repaired": result["repaired"],
+            "skipped": result["skipped"],
+            "message": f"Repaired {result['repaired']} record(s), skipped {result['skipped']}.",
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.route("/api/import/quality-summary")
+def import_quality_summary():
+    """Per-flag counts and source breakdown for the data quality card."""
+    try:
+        import db as _db
+        with _db.get_connection() as conn:
+            groups = conn.execute("""
+                SELECT
+                    source_type,
+                    source_file,
+                    data_validity_status,
+                    review_reason,
+                    COUNT(*) AS cnt
+                FROM work_orders
+                GROUP BY source_type, source_file, data_validity_status, review_reason
+                ORDER BY cnt DESC
+            """).fetchall()
+            last_ts = conn.execute(
+                "SELECT MAX(updated_at) FROM work_orders"
+            ).fetchone()[0]
+        return jsonify({
+            "ok": True,
+            "groups": [dict(r) for r in groups],
+            "last_updated": last_ts,
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.route("/api/maintenance/import-status")
+def maintenance_import_status():
+    """
+    Return the currently active Power BI full MR/WO batch info plus a count
+    of all historical batches. Used by the frontend to show import provenance.
+    """
+    try:
+        import db as _db
+        active = _db.get_active_powerbi_batch_info()
+        with _db.get_connection() as conn:
+            history = conn.execute(
+                """
+                SELECT batch_id, source_file, imported_at, is_active,
+                       total_rows, valid_rows, review_rows
+                FROM import_batches
+                WHERE source_type = 'POWERBI_FULL_MR_WO_EXPORT'
+                ORDER BY imported_at DESC
+                LIMIT 20
+                """
+            ).fetchall()
+        return jsonify({
+            "ok": True,
+            "active_batch": active,
+            "history": [dict(r) for r in history],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.route("/api/maintenance/summary")
+def maintenance_summary():
+    """
+    Aggregate summary for the active Power BI batch:
+    total rows, status breakdown, TTR/MTTR stats, data quality counts.
+    Falls back to a 404-style message when no active batch exists.
+    """
+    try:
+        import db as _db
+        batch_id = _db.get_active_powerbi_full_batch_id()
+        if not batch_id:
+            return jsonify({"ok": False, "message": "No active Power BI import batch found.", "batch_id": None}), 200
+
+        with _db.get_connection() as conn:
+            status_rows = conn.execute(
+                """
+                SELECT normalized_status, COUNT(*) AS cnt
+                FROM raw_powerbi_mr_wo_export
+                WHERE import_batch_id = ?
+                GROUP BY normalized_status
+                ORDER BY cnt DESC
+                """,
+                (batch_id,),
+            ).fetchall()
+
+            ttr_row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN ttr_hours IS NOT NULL THEN 1 ELSE 0 END) AS valid_ttr,
+                    ROUND(AVG(CASE WHEN ttr_hours IS NOT NULL AND ttr_hours >= 0 THEN ttr_hours END), 3) AS avg_ttr,
+                    ROUND(MIN(CASE WHEN ttr_hours IS NOT NULL AND ttr_hours >= 0 THEN ttr_hours END), 3) AS min_ttr,
+                    ROUND(MAX(CASE WHEN ttr_hours IS NOT NULL AND ttr_hours >= 0 THEN ttr_hours END), 3) AS max_ttr
+                FROM raw_powerbi_mr_wo_export
+                WHERE import_batch_id = ?
+                """,
+                (batch_id,),
+            ).fetchone()
+
+            dq_rows = conn.execute(
+                """
+                SELECT data_quality_flag, COUNT(*) AS cnt
+                FROM raw_powerbi_mr_wo_export
+                WHERE import_batch_id = ?
+                GROUP BY data_quality_flag
+                ORDER BY cnt DESC
+                """,
+                (batch_id,),
+            ).fetchall()
+
+        return jsonify({
+            "ok":            True,
+            "batch_id":      batch_id,
+            "status_counts": [dict(r) for r in status_rows],
+            "ttr_stats":     dict(ttr_row) if ttr_row else {},
+            "quality_counts": [dict(r) for r in dq_rows],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.route("/api/maintenance/records")
+def maintenance_records():
+    """
+    Return paginated records from the active Power BI batch.
+    Query params: page (1-based), page_size (default 200), status, quality_flag.
+    """
+    try:
+        import db as _db
+        batch_id = _db.get_active_powerbi_full_batch_id()
+        if not batch_id:
+            return jsonify({"ok": False, "message": "No active batch.", "records": []}), 200
+
+        page      = max(1, int(request.args.get("page", 1)))
+        page_size = min(500, max(1, int(request.args.get("page_size", 200))))
+        offset    = (page - 1) * page_size
+        status_f  = (request.args.get("status") or "").strip()
+        dq_f      = (request.args.get("quality_flag") or "").strip()
+
+        params: list = [batch_id]
+        where = ["import_batch_id = ?"]
+        if status_f:
+            where.append("normalized_status = ?")
+            params.append(status_f)
+        if dq_f:
+            where.append("data_quality_flag = ?")
+            params.append(dq_f)
+
+        sql = (
+            "SELECT * FROM raw_powerbi_mr_wo_export"
+            f" WHERE {' AND '.join(where)}"
+            " ORDER BY actual_start DESC"
+            f" LIMIT {page_size} OFFSET {offset}"
+        )
+        count_sql = (
+            "SELECT COUNT(*) FROM raw_powerbi_mr_wo_export"
+            f" WHERE {' AND '.join(where)}"
+        )
+        with _db.get_connection() as conn:
+            rows  = conn.execute(sql, params).fetchall()
+            total = conn.execute(count_sql, params).fetchone()[0]
+
+        return jsonify({
+            "ok":      True,
+            "batch_id": batch_id,
+            "page":    page,
+            "page_size": page_size,
+            "total":   total,
+            "records": [dict(r) for r in rows],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.route("/api/maintenance/ttr-mttr")
+def maintenance_ttr_mttr():
+    """
+    TTR/MTTR summary for the active Power BI batch.
+    Only rows with valid ttr_hours (>= 0, no invalid date sequence) are included.
+    Breakdown by normalized_status and asset_id.
+    """
+    try:
+        import db as _db
+        batch_id = _db.get_active_powerbi_full_batch_id()
+        if not batch_id:
+            return jsonify({"ok": False, "message": "No active batch.", "mttr_hours": None}), 200
+
+        with _db.get_connection() as conn:
+            overall = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS eligible_rows,
+                    ROUND(AVG(ttr_hours), 3) AS mttr_hours,
+                    ROUND(SUM(ttr_hours), 3) AS total_ttr_hours,
+                    SUM(CASE WHEN review_reason LIKE '%Invalid Date Sequence%' THEN 1 ELSE 0 END) AS excluded_bad_seq,
+                    SUM(CASE WHEN ttr_hours IS NULL THEN 1 ELSE 0 END) AS excluded_missing_dates
+                FROM raw_powerbi_mr_wo_export
+                WHERE import_batch_id = ? AND ttr_hours IS NOT NULL AND ttr_hours >= 0
+                """,
+                (batch_id,),
+            ).fetchone()
+
+            by_status = conn.execute(
+                """
+                SELECT normalized_status,
+                       COUNT(*) AS rows,
+                       ROUND(AVG(ttr_hours), 3) AS avg_ttr
+                FROM raw_powerbi_mr_wo_export
+                WHERE import_batch_id = ? AND ttr_hours IS NOT NULL AND ttr_hours >= 0
+                GROUP BY normalized_status
+                """,
+                (batch_id,),
+            ).fetchall()
+
+        return jsonify({
+            "ok":        True,
+            "batch_id":  batch_id,
+            "overall":   dict(overall) if overall else {},
+            "by_status": [dict(r) for r in by_status],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
+@app.route("/api/maintenance/data-quality")
+def maintenance_data_quality():
+    """
+    Data quality breakdown for the active Power BI batch.
+    Returns per-flag counts and a list of review rows (up to 250).
+    """
+    try:
+        import db as _db
+        batch_id = _db.get_active_powerbi_full_batch_id()
+        if not batch_id:
+            return jsonify({"ok": False, "message": "No active batch.", "flags": []}), 200
+
+        with _db.get_connection() as conn:
+            flag_counts = conn.execute(
+                """
+                SELECT data_quality_flag, COUNT(*) AS cnt
+                FROM raw_powerbi_mr_wo_export
+                WHERE import_batch_id = ?
+                GROUP BY data_quality_flag
+                ORDER BY cnt DESC
+                """,
+                (batch_id,),
+            ).fetchall()
+
+            review_rows = conn.execute(
+                """
+                SELECT request_id, work_order_id, asset_id, asset_name,
+                       request_state, actual_start, actual_end,
+                       ttr_hours, data_quality_flag, review_reason
+                FROM raw_powerbi_mr_wo_export
+                WHERE import_batch_id = ? AND data_quality_flag != 'Valid'
+                ORDER BY actual_start DESC
+                LIMIT 250
+                """,
+                (batch_id,),
+            ).fetchall()
+
+        return jsonify({
+            "ok":          True,
+            "batch_id":    batch_id,
+            "flag_counts": [dict(r) for r in flag_counts],
+            "review_rows": [dict(r) for r in review_rows],
+        })
+    except Exception as exc:
+        return jsonify({"ok": False, "message": str(exc)}), 500
+
+
 @app.route("/api/downtime/mtbf-history")
 def downtime_mtbf_history():
     return jsonify(build_mtbf_work_order_history_payload(stage=request.args.get("stage")))
@@ -635,9 +1528,27 @@ def get_page_last_synced(page_key):
     key = (page_key or "").strip().lower()
 
     if key == "maintenance":
-        return get_pm_schedule_last_synced() or get_maintenance_import_status().get("last_synced")
+        try:
+            freshness = _db.get_overview_freshness()
+            tables = freshness.get("tables") or {}
+            return (
+                (tables.get("pm_schedule") or {}).get("last_updated")
+                or get_pm_schedule_last_synced()
+                or get_maintenance_import_status().get("last_synced")
+            )
+        except Exception:
+            return get_pm_schedule_last_synced() or get_maintenance_import_status().get("last_synced")
 
     if key == "downtime":
+        try:
+            batch = _db.get_active_powerbi_batch_info()
+            if batch and batch.get("imported_at"):
+                return batch.get("imported_at")
+            status = _db.get_db_status()
+            if status.get("ok") and status.get("work_orders_last_updated"):
+                return status.get("work_orders_last_updated")
+        except Exception:
+            pass
         sources = get_work_order_import_status().get("sources") or []
         latest_source = max((source.get("last_modified") for source in sources if source.get("last_modified")), default=None)
         return latest_source or get_path_mtime_iso(os.path.join(DATA_DIR, ASSET_MASTER_RELATIVE_PATH))
@@ -657,7 +1568,7 @@ def maintenance_pm_schedule():
     year = request.args.get("year", type=int)
     month = request.args.get("month")
     return _cached_json(
-        ("pm-schedule", stage, year, month),
+        (_PM_SCHEDULE_CACHE_SCHEMA, "pm-schedule", stage, year, month),
         lambda: build_pm_schedule_payload(stage=stage, year=year, month=month),
     )
 
@@ -727,7 +1638,7 @@ def maintenance_pm_schedule_delete():
 
 @app.route("/api/maintenance/spare_parts")
 def maintenance_spare_parts():
-    return _cached_json(("spare-parts",), build_spare_parts_payload)
+    return _cached_json(("spare-parts", "browser-v3"), build_spare_parts_payload)
 
 
 @app.route("/api/maintenance/project_transactions")
@@ -763,35 +1674,12 @@ def maintenance_asset_parts_intelligence():
     ))
 
 
-@app.route("/api/maintenance/import-status")
-def maintenance_import_status():
-    return jsonify(get_maintenance_import_status())
-
-
-@app.route("/api/maintenance/import/spare-inventory", methods=["POST"])
-def maintenance_import_spare_inventory():
-    upload = request.files.get("file")
-    if not upload or not upload.filename:
-        return jsonify({"ok": False, "message": "No inventory file uploaded."}), 400
-    result = import_spare_inventory_file(upload)
-    return jsonify(result), (200 if result.get("ok") else 400)
-
-
 @app.route("/api/maintenance/import/external-po", methods=["POST"])
 def maintenance_import_external_po():
     upload = request.files.get("file")
     if not upload or not upload.filename:
         return jsonify({"ok": False, "message": "No external parts file uploaded."}), 400
     result = import_external_po_file(upload)
-    return jsonify(result), (200 if result.get("ok") else 400)
-
-
-@app.route("/api/maintenance/import/project-transactions", methods=["POST"])
-def maintenance_import_project_transactions():
-    upload = request.files.get("file")
-    if not upload or not upload.filename:
-        return jsonify({"ok": False, "message": "No project transactions file uploaded."}), 400
-    result = import_project_transactions_file(upload)
     return jsonify(result), (200 if result.get("ok") else 400)
 
 
@@ -829,10 +1717,12 @@ def _free_port(port):
 def _start_cache_warming():
     """Register the default heavy payloads and start the background refresher so
     user requests always hit a warm disk cache instead of a cold build."""
-    # Drop any cached responses from a previous run/code version so a restart
-    # always serves results built by the current code (the response cache survives
-    # restarts on disk, which otherwise serves stale results after a code change).
-    _invalidate_route_cache()
+    # Keep disk caches across restarts by default. Deleting and rebuilding every
+    # cache on boot made deployed servers spend their first minutes CPU-bound.
+    # Bump schema keys for code-incompatible cache changes, or set this env var
+    # for a one-off forced rebuild.
+    if _env_truthy("MIRA_CLEAR_CACHE_ON_STARTUP", "0"):
+        _invalidate_route_cache()
 
     # ── SQLite: init schema then sync Asset Master in a background thread ─────
     # init_db() is fast (no-op if tables exist). The asset sync runs in a daemon
@@ -855,6 +1745,7 @@ def _start_cache_warming():
     # Phase 4: sync current-year PM tasks to SQL in background so the first page
     # load of the day reads from SQL instead of re-parsing the heavy Excel files.
     def _startup_pm_sync():
+        _time.sleep(3)  # stagger: let asset-master write finish first
         try:
             from pm_schedule_service import _sync_pm_to_db_background
             _sync_pm_to_db_background()
@@ -865,6 +1756,7 @@ def _start_cache_warming():
 
     # Phase 5: sync spare parts records to SQL in background.
     def _startup_spare_sync():
+        _time.sleep(7)  # stagger: let asset-master and PM writes start first
         try:
             from spare_parts_service import request_spare_db_sync
             request_spare_db_sync()
@@ -875,7 +1767,7 @@ def _start_cache_warming():
     # ── end SQLite init ───────────────────────────────────────────────────────
 
     _register_refresh(("downtime", None, None, None, None, False, None), build_downtime_payload)
-    _register_refresh(("pm-schedule", "all", None, None), lambda: build_pm_schedule_payload(stage="all", year=None, month=None))
+    _register_refresh((_PM_SCHEDULE_CACHE_SCHEMA, "pm-schedule", "all", None, None), lambda: build_pm_schedule_payload(stage="all", year=None, month=None))
     # Spare parts is the slowest cold build (the all-years project-transactions
     # parse can take minutes) and its CPU-bound work holds the GIL, starving the
     # web server so it can't even return the fast "warming" placeholder. Keep it
@@ -889,6 +1781,11 @@ def _start_cache_warming():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5005))
+    if port == 5006:
+        raise SystemExit(
+            "ERROR: PORT=5006 is reserved for the standalone Downtime app.\n"
+            "The Maintenance app runs on 5005. Unset PORT or set PORT=5005."
+        )
     debug = os.environ.get("FLASK_DEBUG", "0") not in {"0", "false", "no"}
     # Only the first (parent) run frees the port; the reloader child must not.
     if not os.environ.get("WERKZEUG_RUN_MAIN"):
@@ -918,4 +1815,4 @@ if __name__ == "__main__":
             print("waitress not installed — using the Flask dev server. For production run: pip install waitress")
 
     print(f"Maintenance standalone server starting on http://localhost:{port}")
-    app.run(host="0.0.0.0", port=port, debug=debug)
+    app.run(host="0.0.0.0", port=port, debug=debug, threaded=True)

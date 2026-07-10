@@ -32,7 +32,7 @@ MIRA lives at **`backend/mira/`** (same structure, mapped onto the real layout):
 | `src/mira/services/` | `backend/mira/services/` (`kpi_query_service.py`) |
 | `src/mira/privacy/` | `backend/mira/privacy/` (`privacy_guard_service.py`) |
 | `src/mira/providers/` | `backend/mira/providers/` (`mock_provider.py`, `local_llm_stub.py`) |
-| `src/mira/modules/maintenance/` | `backend/mira/modules/maintenance/` (`assistant_service.py`) |
+| `src/mira/modules/maintenance/` | `backend/mira/modules/maintenance/` (reserved for controlled modules) |
 | `src/mira/reports/` | `backend/mira/reports/` (`report_draft_service.py`) |
 | `src/mira/components/` | *frontend* — planned `frontend/shared/mira/` (not in this backend step) |
 
@@ -106,9 +106,9 @@ python app.py
 #    then, in another shell:
 curl "http://localhost:5005/api/mira/health"
 curl "http://localhost:5005/api/mira/summary?stage=all&year=2026"
-curl -X POST "http://localhost:5005/api/mira/query" \
+curl -X POST "http://localhost:5005/api/mira/predictive" \
      -H "Content-Type: application/json" \
-     -d '{"question":"What is the MTTR this month?","filters":{"stage":"all","year":2026,"month":6}}'
+     -d '{"filters":{"stage":"all","year":2026,"period_mode":"ytd"}}'
 ```
 
 Restart the Flask backend after Python API/schema changes. The browser can load

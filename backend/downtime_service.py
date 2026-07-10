@@ -25,7 +25,11 @@ from downtime_management import (
     _normalize_criticality,
     _normalize_display_criticality,
 )
-from asset_mapping import get_asset_mapping_meta as get_grouped_machine_mapping_meta
+from asset_mapping import (
+    get_asset_mapping_meta as get_grouped_machine_mapping_meta,
+    load_asset_mapping,
+)
+from machine_family import classify_machine_family
 
 _log = logging.getLogger(__name__)
 
@@ -47,6 +51,55 @@ _WO_LOAD_CACHE = {"sig": None, "payload": None}
 # Keyed by normalised stage string; cleared by import_work_order_file().
 _SQL_WO_CACHE: dict = {}
 DOWNTIME_CACHE_VERSION = "2026-06-18-stage-text-detection"
+# Stores the most recent import result so the frontend can poll it after upload.
+_LAST_IMPORT_STATS: dict = {}
+
+
+def _normalize_request_state(raw: str) -> str:
+    """Derive a clean normalized status from a raw Request State string."""
+    v = str(raw or "").strip().lower()
+    if v in {"finished", "confirm", "closed", "completed", "done", "confirmed"}:
+        return "Finished"
+    if v in {"in progress", "inprogress", "started", "open", "rework", "re work"}:
+        return "In Progress"
+    if v in {"new", "created", "requested"}:
+        return "New"
+    if v in {"rejected", "reject", "cancelled", "canceled"}:
+        return "Rejected"
+    return str(raw or "").strip() or "Unknown"
+
+
+def get_last_import_stats() -> dict:
+    """Return the stats dict from the most recent DB import (background thread)."""
+    return dict(_LAST_IMPORT_STATS)
+
+
+def clear_work_order_runtime_caches() -> None:
+    """Clear all in-process downtime/work-order caches after a data mutation."""
+    clear_work_order_runtime_caches()
+
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return str(os.environ.get(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sql_work_order_signature():
+    """Small cache signature for SQL-backed downtime data."""
+    try:
+        import db as _db
+        status = _db.get_db_status()
+        batch = _db.get_active_powerbi_batch_info()
+        return (
+            "sql",
+            bool(status.get("ok")),
+            status.get("work_orders_rows"),
+            status.get("work_orders_last_updated"),
+            batch.get("batch_id") if batch else None,
+            batch.get("imported_at") if batch else None,
+            batch.get("total_rows") if batch else None,
+        )
+    except Exception as exc:
+        return ("sql-error", str(exc))
 DOWNTIME_EXPORT_YEAR = 2026
 
 PRIMARY_WORK_ORDER_DOWNTIME_FILE = os.path.join(DATA_DIR, "data downtime.csv")
@@ -88,6 +141,62 @@ _STAGE_TEXT_FIELDS = (
 _CRITICAL_CATEGORY_KEYWORDS = frozenset({
     "production", "refriger", "utilities", "utility",
 })
+
+_GROUP_TO_EQUIPMENT_CATEGORY = {
+    "Production Equipment": "Production Equipment",
+    "Utilities / Support": "Utilities",
+    "Utilities": "Utilities",
+    "Refrigeration": "Utilities",
+    "Facility / Building": "Unclassified",
+    "Unknown / Review": "Unclassified",
+}
+
+_CRITICAL_MACHINE_OPEN_STATES = {
+    "new",
+    "confirm",
+    "in progress",
+    "inprogress",
+    "open",
+    "pending",
+    "rework",
+    "re work",
+    "started",
+    "created",
+    "requested",
+}
+
+_CRITICAL_MACHINE_CLOSED_STATES = {
+    "finished",
+    "completed",
+    "complete",
+    "closed",
+    "confirmed",
+    "confirmed closed",
+    "done",
+    "resolved",
+}
+
+_CRITICAL_MACHINE_PLACEHOLDER_DATES = {
+    "0001-01-01",
+    "1899-12-30",
+    "1900-01-01",
+    "1970-01-01",
+}
+
+_CRITICAL_MACHINE_XRAY_1_RE = re.compile(
+    r"(?:เครื่อง\s*)?(?:x\s*[-\s]?\s*ray|xray)\s*(?:no\.?\s*)?1\b",
+    re.IGNORECASE,
+)
+
+_CRITICAL_MACHINE_XRAY_NUM_RE = re.compile(
+    r"(?:เครื่อง\s*)?(?:x\s*[-\s]?\s*ray|xray)\s*(?:no\.?\s*)?(\d+)\b",
+    re.IGNORECASE,
+)
+
+_CRITICAL_MACHINE_PRODUCTION_AREA_RE = re.compile(
+    r"\b(?:production\s*(?:plant|area)?|area|packing|assembly|cooking|preparation)\b",
+    re.IGNORECASE,
+)
 
 
 def _sql_has_work_orders() -> bool:
@@ -143,6 +252,258 @@ def _infer_criticality_from_category(category: str, machine_group: str) -> str:
     return CRITICALITY_NON_CRITICAL
 
 
+def _pbi_derive_quality_flags(is_finished: bool, is_open: bool, start_dt, end_dt) -> list[str]:
+    """
+    Re-evaluate quality flags for Power BI source records.
+    PBI exports have no Created Date and no SLA data, so 'Missing raised date'
+    and SLA-related checks are skipped.
+    """
+    if is_finished:
+        if not start_dt:
+            return ["Missing start date for finished MR"]
+        if not end_dt:
+            return ["Missing finished date for finished MR"]
+        if end_dt < start_dt:
+            return ["Finished date before start date"]
+        return ["Valid"]
+    if is_open:
+        return ["Valid"]
+    return ["Review status"]
+
+
+def _pbi_full_row_to_enriched(row: dict) -> dict:
+    """
+    Convert a raw_powerbi_mr_wo_export SQL row (with asset_master JOIN columns)
+    to the same enriched dict shape as _sql_row_to_enriched(), so all
+    downstream KPI builders and frontend consumers work unchanged.
+    """
+    request_id    = str(row.get("request_id")    or "").strip()
+    work_order_id = str(row.get("work_order_id") or "").strip()
+    asset_id      = str(row.get("asset_id")      or "").strip().upper()
+    asset_name    = str(row.get("asset_name")    or "").strip()
+    request_state = str(row.get("request_state") or "").strip()
+    description   = str(row.get("description")   or "").strip()
+    location_raw  = str(row.get("location")      or "").strip()
+    job_trade       = str(row.get("job_trade")       or "").strip()
+    job_type_id     = str(row.get("job_type_id")     or "").strip()
+    request_type_id = str(row.get("request_type_id") or "").strip()
+    responsible     = str(row.get("responsible")     or "").strip()
+    worker_group  = str(row.get("worker_group")  or "").strip()
+    priority_raw  = str(row.get("priority")      or "").strip()
+    actual_start_iso = row.get("actual_start") or ""
+    actual_end_iso   = row.get("actual_end")   or ""
+    norm_status   = str(row.get("normalized_status") or "").strip()
+    dq_flag       = str(row.get("data_quality_flag") or "").strip()
+    review_reason = str(row.get("review_reason") or "").strip()
+
+    # Asset_Master join fields
+    am_criticality  = row.get("am_criticality")
+    am_is_critical  = row.get("am_is_critical")
+    am_area         = str(row.get("am_area")         or "").strip()
+    am_stage        = str(row.get("am_stage")        or "").strip()
+    am_category     = str(row.get("am_category")     or "").strip()
+    am_machine_group = str(row.get("am_machine_group") or "").strip()
+    has_am_match    = am_criticality is not None
+
+    # Criticality from asset_master or inferred
+    if has_am_match and am_criticality:
+        criticality = _normalize_criticality(am_criticality)
+    else:
+        criticality = _infer_criticality_from_category(am_category or "", am_machine_group or asset_name or "")
+    is_critical_flag = bool(am_is_critical) if am_is_critical is not None else (criticality == CRITICALITY_CRITICAL)
+    crit_rank        = CRITICALITY_RANK.get(criticality, CRITICALITY_RANK.get("Unmapped", 2))
+    raw_criticality  = am_criticality or ""
+
+    stage         = am_stage       or "Unmapped"
+    category      = am_category    or ""
+    machine_group = am_machine_group or asset_name or asset_id or "Unmapped Asset"
+    mapped_loc    = am_area or location_raw or "Unassigned"
+
+    status_lower = (norm_status or request_state).lower()
+    is_open     = status_lower in {"new", "in progress", "inprogress"}
+    is_finished = status_lower in {"finished", "completed", "closed", "resolved", "done", "confirm"}
+    is_valid    = dq_flag == "Valid"
+
+    actual_start_dt = _parse_iso_simple(actual_start_iso)
+    actual_end_dt   = _parse_iso_simple(actual_end_iso)
+
+    # TTR from stored ttr_hours (calculated at import time from dates)
+    stored_ttr = row.get("ttr_hours")
+    try:
+        stored_ttr = float(stored_ttr) if stored_ttr is not None else None
+    except (ValueError, TypeError):
+        stored_ttr = None
+
+    duration_hours      = None
+    ttr_source          = "excluded_status"
+    duration_context    = "Excluded from MTTR/TTR by lifecycle or data-quality rule"
+    mttr_exclusion      = None   # None = MTTR-eligible; string = reason why excluded
+    if is_valid and stored_ttr is not None and stored_ttr >= 0:
+        duration_hours   = round(stored_ttr, 3)
+        ttr_source       = "date_derived"
+        duration_context = "Maintenance resolution time from ActualEnd − ActualStart"
+    elif is_valid and stored_ttr is None:
+        # Valid open/incomplete record — no ActualEnd (placeholder or blank).
+        mttr_exclusion   = "open_incomplete"
+        duration_context = "Open or incomplete record — no ActualEnd; excluded from MTTR"
+    elif is_finished:
+        mttr_exclusion   = "invalid_finished_dates"
+        ttr_source       = "invalid_finished_dates"
+    else:
+        # Quality-flagged (Invalid Date Sequence, Missing Asset, etc.)
+        if dq_flag and "Invalid Date Sequence" in dq_flag:
+            mttr_exclusion = "invalid_date_sequence"
+        elif dq_flag and "Missing ActualStart" in dq_flag:
+            mttr_exclusion = "missing_start"
+        elif dq_flag and "Missing ActualEnd" in dq_flag:
+            mttr_exclusion = "missing_end_finished"
+        else:
+            mttr_exclusion = "quality_issue"
+
+    if is_valid and actual_start_dt:
+        start_time = actual_start_dt.isoformat()
+        end_time   = actual_end_dt.isoformat() if actual_end_dt else None
+    else:
+        start_time = actual_start_dt.isoformat() if actual_start_dt else None
+        end_time   = None
+
+    latest_ts         = actual_end_dt or actual_start_dt
+    latest_event_time = latest_ts.isoformat() if latest_ts else None
+
+    prio_val = None
+    try:
+        pv = float(priority_raw)
+        if 1 <= pv <= 10:
+            prio_val = int(pv)
+    except (ValueError, TypeError):
+        pass
+
+    if is_valid:
+        dq_flags = ["Valid"]
+    elif review_reason:
+        dq_flags = [r.strip() for r in review_reason.split(";") if r.strip()]
+    else:
+        dq_flags = [dq_flag or "Review"]
+
+    if is_finished and work_order_id:
+        ack_status = "Acknowledged"
+    elif is_open:
+        ack_status = "Pending"
+    else:
+        ack_status = ""
+
+    status_category  = "Open" if is_open else ("Closed" if is_finished else "Review")
+    mapping_status   = "Mapped" if has_am_match else "Unmapped"
+    mapping_source   = "Asset_Master.xlsx" if has_am_match else "fallback"
+
+    return {
+        # IDs
+        "work_order_id":            work_order_id,
+        "maintenance_order_id":     request_id,
+        "asset_id":                 asset_id,
+        # Asset / machine
+        "asset_name":               asset_name,
+        "machine_group":            machine_group,
+        "machine_name":             asset_name or machine_group,
+        "machine_name_display":     asset_name or machine_group,
+        "machine_code":             asset_id,
+        "asset_display_name":       asset_name or machine_group,
+        "asset_label":              asset_id,
+        "raw_machine_name":         asset_name,
+        "machine_equipment_name":   asset_name,
+        # Location
+        "location":                 mapped_loc,
+        "building":                 mapped_loc,
+        "area":                     mapped_loc,
+        # Stage
+        "stage":                    stage,
+        "resolved_stage":           stage,
+        "mapped_stage":             stage,
+        "mappedStage":              stage,
+        # Category / group
+        "equipment_category":       category,
+        "mappedMainAssetGroup":     category,
+        "mapped_main_asset_group":  category,
+        "mappedSubAssetGroup":      "",
+        "mapped_sub_asset_group":   "",
+        # machine_family: canonical specific group normalised from asset_name /
+        # am_machine_group. "Combi Oven 1" & "Combi Oven 2" → "Combi Oven".
+        # Used by MTTR/MTBF slides instead of the broad machine_group.
+        "machine_family":           classify_machine_family(
+                                        asset_name=asset_name or "",
+                                        fine_machine_group=am_machine_group or "",
+                                        broad_category=category or "",
+                                    )["machine_family"],
+        "mappedLocation":           mapped_loc,
+        "mapped_location":          mapped_loc,
+        "mappedSystemArea":         "",
+        "mapped_system_area":       "",
+        "mappedAssetName":          asset_name,
+        "mapped_asset_name":        asset_name,
+        # Criticality
+        "criticality":              criticality,
+        "raw_criticality":          raw_criticality,
+        "normalized_criticality":   criticality,
+        "is_critical":              is_critical_flag,
+        "criticality_rank":         crit_rank,
+        # Mapping metadata
+        "mapping_status":           mapping_status,
+        "mappingStatus":            mapping_status,
+        "mapping_source":           mapping_source,
+        "classification_source":    mapping_source,
+        "has_assetlist_classification": has_am_match,
+        "has_asset_master_mapping": has_am_match,
+        "group_asset_ids":          [asset_id] if asset_id else [],
+        "refrigeration_group_match": machine_group == REFRIGERATION_GROUP,
+        # Status
+        "status":                   request_state,
+        "request_state":            request_state,
+        "is_open":                  is_open,
+        "status_category":          status_category,
+        # Dates
+        "actual_start_time":        actual_start_iso or None,
+        "actual_end_time":          actual_end_iso or None,
+        "maintenance_start_time":   actual_start_iso or None,
+        "maintenance_end_time":     actual_end_iso or None,
+        "request_created_time":     actual_start_iso or None,
+        "start_time":               start_time,
+        "end_time":                 end_time,
+        "latest_event_time":        latest_event_time,
+        # TTR / duration
+        "duration_hours":           duration_hours,
+        "ttr_hours":                duration_hours,
+        "raw_ttr":                  None,
+        "ttr_source":               ttr_source,
+        "duration_context":         duration_context,
+        "valid_mttr_ttr":           is_valid and duration_hours is not None,
+        "mttr_exclusion_reason":    mttr_exclusion,
+        # Data quality
+        "data_quality_flag":        dq_flag or "Review",
+        "data_quality_flags":       dq_flags,
+        # Description
+        "description":              description,
+        "description_original":     description,
+        "translated_description":   translate_maintenance_description(description),
+        "remarks":                  description,
+        # Job info
+        "system":                   job_trade,
+        "job_trade":                job_trade,
+        "maintenance_job_type":     request_type_id or job_type_id,
+        "raw_functional_location":  location_raw,
+        # Priority / severity
+        "priority":                 prio_val,
+        "service_level":            priority_raw,
+        # Other
+        "source":                   "Work Order",
+        "source_path":              "",
+        "acknowledgement_status":   ack_status,
+        "started_by":               responsible,
+        "created_by":               row.get("requester") or "",
+        "source_type":              "powerbi_full",
+        "worker_group":             worker_group,
+    }
+
+
 def _sql_row_to_enriched(row: dict) -> dict:
     """
     Convert a raw SQL row (work_orders LEFT JOIN asset_master) to an
@@ -173,10 +534,14 @@ def _sql_row_to_enriched(row: dict) -> dict:
     review_reason = str(row.get("review_reason") or "").strip()
 
     # asset_master JOIN fields
-    am_criticality = row.get("am_criticality")
-    am_is_critical = row.get("am_is_critical")
-    am_area        = str(row.get("am_area") or "").strip()
-    has_am_match   = am_criticality is not None
+    am_criticality     = row.get("am_criticality")
+    am_is_critical     = row.get("am_is_critical")
+    am_area            = str(row.get("am_area")            or "").strip()
+    am_func_loc        = str(row.get("am_func_loc")        or "").strip()
+    am_maint_type_code = str(row.get("am_maint_type_code") or "").strip()
+    am_maint_type      = str(row.get("am_maint_type")      or "").strip()
+    am_func_loc_name   = str(row.get("am_func_loc_name")   or "").strip()
+    has_am_match       = am_criticality is not None
 
     # Criticality
     if has_am_match and am_criticality:
@@ -189,10 +554,31 @@ def _sql_row_to_enriched(row: dict) -> dict:
 
     location = am_area or "Unassigned"
 
-    # Status flags
+    # Maintenance Type + Functional Location — prefer Asset_Master values; fall back to WO row.
+    maint_type_code = am_maint_type_code or "Unassigned"
+    maint_type      = am_maint_type      or "Unassigned"
+    # Functional location: use the asset's D365 location (am_func_loc) when matched,
+    # otherwise fall back to the WO row's own functional_location field.
+    resolved_func_loc      = am_func_loc or func_loc or ""
+    resolved_func_loc_name = am_func_loc_name or ""
+
+    # Derive zone from functional location code (e.g. "ZN2-CL1" → zone "ZN2")
+    _ZONE_LABELS = {"ZN1": "Preparation", "ZN2": "Cooking", "ZN3": "Assembly", "ZN4": "Packing"}
+    _zone_prefix = resolved_func_loc.split("-")[0] if "-" in resolved_func_loc else resolved_func_loc
+    if re.match(r"^ZN[1-4]$", _zone_prefix, re.IGNORECASE):
+        zone      = _zone_prefix.upper()
+        zone_name = _ZONE_LABELS.get(zone, zone)
+    elif resolved_func_loc:
+        zone      = resolved_func_loc   # plant areas use their own code as zone
+        zone_name = resolved_func_loc
+    else:
+        zone      = "Unassigned"
+        zone_name = "Unassigned"
+
+    # Status flags — "confirm" is a D365 final confirmation state equivalent to Finished.
     status_lower = status.lower()
     is_open     = status_lower in {"new", "in progress", "inprogress"}
-    is_finished = status_lower in {"finished", "completed", "closed", "resolved", "done"}
+    is_finished = status_lower in {"finished", "completed", "closed", "resolved", "done", "confirm"}
 
     is_valid = dq_status == "Valid"
 
@@ -201,14 +587,40 @@ def _sql_row_to_enriched(row: dict) -> dict:
     actual_end_dt   = _parse_iso_simple(actual_end_iso)
     created_dt      = _parse_iso_simple(created_date_iso)
 
-    # Duration / TTR
+    # Power BI re-evaluation — override stale stored quality flags for records imported
+    # before the ActualStart/ActualEnd alias fix or before the 'Confirm' lifecycle fix.
+    stored_source_type = str(row.get("source_type") or "").strip().lower()
+    if stored_source_type == "powerbi":
+        pbi_flags = _pbi_derive_quality_flags(is_finished, is_open, actual_start_dt, actual_end_dt)
+        if pbi_flags == ["Valid"]:
+            is_valid      = True
+            dq_status     = "Valid"
+            review_reason = ""
+        else:
+            is_valid      = False
+            dq_status     = "Review"
+            review_reason = "; ".join(pbi_flags)
+
+    # Duration / TTR — prefer stored ttr_hours from import (Power BI "Sum of TTR_Hours"),
+    # then derive from dates, then exclude if record is not valid/finished.
+    stored_ttr = row.get("ttr_hours")
+    try:
+        stored_ttr = float(stored_ttr) if stored_ttr is not None else None
+    except (ValueError, TypeError):
+        stored_ttr = None
+
     duration_hours = None
     ttr_source     = "excluded_status"
     duration_context = "Excluded from MTTR/TTR by lifecycle or data-quality rule"
     if is_valid and actual_start_dt and actual_end_dt and actual_end_dt > actual_start_dt:
-        duration_hours = round((actual_end_dt - actual_start_dt).total_seconds() / 3600, 3)
-        ttr_source     = "date_derived"
-        duration_context = "Maintenance resolution time derived from valid Finished start/end dates"
+        if stored_ttr and stored_ttr > 0:
+            duration_hours = round(stored_ttr, 3)
+            ttr_source     = "imported_ttr"
+            duration_context = "Maintenance resolution time from imported TTR field"
+        else:
+            duration_hours = round((actual_end_dt - actual_start_dt).total_seconds() / 3600, 3)
+            ttr_source     = "date_derived"
+            duration_context = "Maintenance resolution time derived from valid Finished start/end dates"
     elif is_finished:
         ttr_source = "invalid_finished_dates"
 
@@ -345,6 +757,14 @@ def _sql_row_to_enriched(row: dict) -> dict:
         "job_trade": trade,
         "maintenance_job_type": job_type,
         "raw_functional_location": func_loc,
+        # D365 Maintenance Type (equipment-function lens)
+        "maint_type_code": maint_type_code,
+        "maint_type": maint_type,
+        # D365 Functional Location (physical-location lens)
+        "func_loc": resolved_func_loc,
+        "func_loc_name": resolved_func_loc_name,
+        "zone": zone,
+        "zone_name": zone_name,
         # Priority / severity
         "priority": priority,
         "service_level": severity,
@@ -354,6 +774,8 @@ def _sql_row_to_enriched(row: dict) -> dict:
         "acknowledgement_status": ack_status,
         "started_by": str(row.get("started_by") or ""),
         "created_by": str(row.get("created_by") or ""),
+        "source_type": stored_source_type or "work_orders",
+        "worker_group": str(row.get("worker_group") or ""),
     }
 
 
@@ -361,22 +783,34 @@ def load_work_order_downtime_sql(stage: str | None = None) -> dict:
     """
     SQL-backed replacement for load_work_order_downtime().
 
-    Reads enriched records directly from the work_orders SQL table (populated by
-    Phase 2 after each file import).  Stage filtering is pushed into the SQL query,
-    so callers do NOT need to run filter_work_orders_by_stage().
+    Priority: if there is an active POWERBI_FULL_MR_WO_EXPORT batch, its records
+    are returned exclusively (they replace the legacy work_orders view).  Otherwise
+    falls back to the work_orders table populated by previous imports.
 
-    Returns the same dict shape as load_work_order_downtime():
-        {"available": bool, "records": [...], "last_synced": str|None, "message": str}
+    Stage filtering is pushed into SQL; callers do NOT need filter_work_orders_by_stage().
+
+    Returns: {"available": bool, "records": [...], "last_synced": str|None, "message": str}
     """
     normalized_stage = normalize_stage_filter(stage)
     cache_key = normalized_stage or "__all__"
-    cached = _SQL_WO_CACHE.get(cache_key)
+
+    try:
+        import db as _db
+        active_batch_id = _db.get_active_powerbi_full_batch_id()
+    except Exception:
+        active_batch_id = None
+
+    # Prefix cache key so PBI and legacy results are stored separately.
+    full_cache_key = f"pbi_full:{cache_key}" if active_batch_id else f"wo:{cache_key}"
+    cached = _SQL_WO_CACHE.get(full_cache_key)
     if cached is not None:
         return cached
 
     try:
-        import db as _db
-        sql_rows = _db.load_work_orders_from_sql(normalized_stage or None)
+        if active_batch_id:
+            sql_rows = _db.load_powerbi_full_records(active_batch_id, stage=normalized_stage or None)
+        else:
+            sql_rows = _db.load_work_orders_from_sql(normalized_stage or None)
     except Exception as exc:
         return {
             "available": False,
@@ -393,21 +827,35 @@ def load_work_order_downtime_sql(stage: str | None = None) -> dict:
             "last_synced": None,
         }
 
-    records = [_sql_row_to_enriched(r) for r in sql_rows]
+    if active_batch_id:
+        records     = [_pbi_full_row_to_enriched(r) for r in sql_rows]
+        last_synced = sql_rows[0].get("imported_at", "").rstrip("Z") if sql_rows else None
+        message     = f"Loaded {len(records)} record(s) from active PBI batch {active_batch_id}."
+    else:
+        records = [_sql_row_to_enriched(r) for r in sql_rows]
+        updated_ats = [r.get("updated_at") for r in sql_rows if r.get("updated_at")]
+        last_synced = max(updated_ats).rstrip("Z") if updated_ats else None
+        message     = f"Loaded {len(records)} work order(s) from SQL."
 
-    # Use the most recent updated_at as the "last synced" timestamp.
-    # Strip trailing "Z" so downstream pd.Timestamp() gets a naive datetime,
-    # matching the format produced by the Excel-based loader.
-    updated_ats = [r.get("updated_at") for r in sql_rows if r.get("updated_at")]
-    last_synced = max(updated_ats).rstrip("Z") if updated_ats else None
+    if active_batch_id:
+        try:
+            _batch_info = _db.get_active_powerbi_batch_info()
+            _batch_total = int(_batch_info["total_rows"]) if _batch_info and _batch_info.get("total_rows") is not None else len(records)
+        except Exception:
+            _batch_total = len(records)
+    else:
+        _batch_total = None
 
     result = {
-        "available": True,
-        "records": records,
-        "message": f"Loaded {len(records)} work order(s) from SQL.",
-        "last_synced": last_synced,
+        "available":        True,
+        "records":          records,
+        "message":          message,
+        "last_synced":      last_synced,
+        "source":           "powerbi_full" if active_batch_id else "work_orders",
+        "batch_id":         active_batch_id,
+        "batch_total_rows": _batch_total,
     }
-    _SQL_WO_CACHE[cache_key] = result
+    _SQL_WO_CACHE[full_cache_key] = result
     return result
 
 
@@ -472,12 +920,13 @@ WORK_ORDER_COLUMN_ALIASES = {
     "JobTrade": ["JobTrade", "Job Trade", "Trade", "System", "Work Type", "Maintenance Type", "Job Category"],
     "JobTypeId": ["JobTypeId", "Job Type ID", "Job Type", "JobType", "Maintenance job type", "Maintenance job type variant", "Maintenance request type"],
     "Priority": ["Priority", "Priority No", "Priority Number", "Priority Level", "Severity", "SeverityLevel", "Service level", "severity"],
-    "Started By": ["Started By", "Started by", "started_by", "StartedBy"],
-    "Created By": ["Created By", "Created by", "created_by", "CreatedBy"],
+    "Started By": ["Started By", "Started by", "started_by", "StartedBy", "Responsible"],
+    "Created By": ["Created By", "Created by", "created_by", "CreatedBy", "Requester"],
+    "Worker Group": ["WorkerG", "Worker Group", "worker_group", "WorkGroup", "WorkerGrp"],
     "Request Created Date": ["Request Created Date", "Created date and time", "Created Date", "Created On", "Reported Date", "Request Date"],
-    "Actual Start Date": ["Actual Start Date", "Actual Start", "Actual start", "Maintenance Start Date", "Start Date"],
-    "Actual End Date": ["Actual End Date", "Actual End", "Actual end", "Maintenance End Date", "End Date", "Closed Date", "Completed Date"],
-    "TTR(hr)": ["TTR(hr)", "TTR", "TTR Hours", "TTR Hour", "Time to Resolution", "Resolution Time", "Downtime Hours", "Duration Hours", "downtime_hours"],
+    "Actual Start Date": ["Actual Start Date", "Actual Start", "Actual start", "Maintenance Start Date", "Start Date", "ActualStart", "Actual_Start"],
+    "Actual End Date": ["Actual End Date", "Actual End", "Actual end", "Maintenance End Date", "End Date", "Closed Date", "Completed Date", "ActualEnd", "Actual_End"],
+    "TTR(hr)": ["TTR(hr)", "TTR", "TTR Hours", "TTR Hour", "Time to Resolution", "Resolution Time", "Downtime Hours", "Duration Hours", "downtime_hours", "Sum of TTR_Hours", "TTR_Hours", "TTR Hours", "Sum of TTR Hours", "ttr_hours"],
     "TTR Minutes": ["TTR Minutes", "TTR(min)", "TTR Minute", "TTR Mins", "Duration Minutes", "Downtime Minutes"],
 }
 WORK_ORDER_REQUIRED_CANONICAL_COLUMNS = {
@@ -860,6 +1309,8 @@ def build_year_month_options_from_events(events, reference_dt):
         return build_year_month_options(reference_dt)
     start = min(timestamps).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     end = (reference_dt.to_pydatetime() if hasattr(reference_dt, "to_pydatetime") else reference_dt) or max(timestamps)
+    if getattr(end, "tzinfo", None):
+        end = end.replace(tzinfo=None)
     end = end.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     values = []
     current = start
@@ -941,7 +1392,16 @@ def read_work_order_source_file(path):
             raise ValueError("Workbook does not contain recognizable work order columns.")
     else:
         raise ValueError(f"Unsupported work order import file type: {extension}")
-    return canonicalize_work_order_dataframe(df)
+    raw_columns = list(df.columns)
+    canonical_df = canonicalize_work_order_dataframe(df)
+    # Power BI format detection must run against the file's original headers —
+    # once columns are aliased to canonical names, a plain D365 export and a
+    # true Power BI export look identical (both end up as "Machine ID",
+    # "Actual Start Date", etc.), which caused ordinary uploads to be
+    # misdetected as POWERBI_FULL_MR_WO_EXPORT and silently diverted away
+    # from the normal work-order import pipeline.
+    canonical_df.attrs["raw_columns"] = raw_columns
+    return canonical_df
 
 
 def normalize_work_order_column_key(value):
@@ -1103,12 +1563,13 @@ def is_in_progress_lifecycle(value):
 
 
 def is_finished_lifecycle(value):
-    return normalize_lifecycle_state(value) == "finished"
+    # "Confirm" is a D365 final confirmation state — equivalent to Finished for MTTR purposes.
+    return normalize_lifecycle_state(value) in {"finished", "confirm"}
 
 
 def is_review_lifecycle(value):
     normalized = normalize_lifecycle_state(value)
-    return normalized in {"confirm", "rework", "re work", "rejected", "reject"}
+    return normalized in {"rework", "re work", "rejected", "reject"}
 
 
 def calculate_acknowledgement_status(status, work_order_id):
@@ -1133,12 +1594,15 @@ def build_work_order_quality_flags(
     actual_end_raw,
     actual_end_time,
     actual_end_invalid,
+    has_real_created_date=True,
 ):
     # Dynamics lifecycle rules keep acknowledgement, TTR, and reliability history separate.
+    # has_real_created_date=False skips "Missing raised date" and "Finished date before raised date"
+    # for sources (e.g. Power BI exports) that have no Request Created Date column.
     flags = []
     if request_created_invalid or actual_start_invalid or actual_end_invalid:
         flags.append("Invalid date format")
-    if not request_created_time:
+    if has_real_created_date and not request_created_time:
         flags.append("Missing raised date")
     if is_finished_lifecycle(status):
         if not actual_start_time:
@@ -1147,7 +1611,7 @@ def build_work_order_quality_flags(
             flags.append("Missing finished date for finished MR")
         if actual_start_time and actual_end_time and actual_end_time < actual_start_time:
             flags.append("Finished date before start date")
-        if request_created_time and actual_end_time and actual_end_time < request_created_time:
+        if has_real_created_date and request_created_time and actual_end_time and actual_end_time < request_created_time:
             flags.append("Finished date before raised date")
     elif is_new_lifecycle(status) or is_in_progress_lifecycle(status):
         if has_present_value(actual_end_raw) and actual_end_time:
@@ -1157,41 +1621,92 @@ def build_work_order_quality_flags(
     return flags or ["Valid"]
 
 
-def write_work_orders_to_db() -> dict:
+def write_work_orders_to_db(replace_existing: bool = False) -> dict:
     """
     Load all enriched work-order records (via the in-process cache) and upsert
     them into the SQLite work_orders table.  Also writes one row to import_log.
     Called from a background thread after a successful file import.
+    Stores the result in _LAST_IMPORT_STATS for the frontend to poll.
     """
     import db as _db
+    import powerbi_adapter as _pbi
+    from datetime import timezone
+
     payload = load_work_order_downtime()
     if not payload.get("available"):
-        return {"ok": False, "message": payload.get("message", "No data available.")}
+        out = {"ok": False, "message": payload.get("message", "No data available.")}
+        _LAST_IMPORT_STATS.update(out)
+        return out
+
     records = payload.get("records") or []
     source_file = ""
+    source_type = "work_orders"
+    import_format = _pbi.STANDARD_WO_FORMAT
+
     if records:
         source_file = os.path.basename(records[0].get("source_path") or "")
-    result = _db.upsert_work_orders(records, source_file)
+        try:
+            source_path = records[0].get("source_path") or ""
+            if source_path and os.path.exists(source_path):
+                ext = os.path.splitext(source_path)[1].lower()
+                if ext == ".csv":
+                    _df_cols = pd.read_csv(source_path, nrows=0, encoding="utf-8-sig")
+                else:
+                    _df_cols = pd.read_excel(source_path, nrows=0)
+                source_type = _pbi.get_powerbi_source_type(_df_cols)
+                import_format = _pbi.get_import_format_name(_df_cols)
+        except Exception:
+            pass
+
+    deleted = 0
+    if replace_existing:
+        deleted = int((_db.clear_work_orders() or {}).get("deleted") or 0)
+        try:
+            _db.deactivate_old_batches("POWERBI_FULL_MR_WO_EXPORT")
+        except Exception:
+            pass
+
+    result = _db.upsert_work_orders(records, source_file, source_type=source_type)
     _db.log_import(
-        source_type="work_orders",
+        source_type=source_type,
         source_file=source_file,
         row_count=len(records),
         valid_count=result["valid"],
         invalid_count=result["invalid"],
-        notes="Auto-sync after import",
+        notes=f"Auto-sync after import ({import_format})",
     )
-    return {
+
+    imported_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    out = {
         "ok": True,
-        "rows": result["rows"],
-        "valid": result["valid"],
-        "invalid": result["invalid"],
-        "message": f"Synced {result['rows']} work order(s) into SQL ({result['valid']} valid, {result['invalid']} review).",
+        "import_type": import_format,
+        "source_type": source_type,
+        "source_file": source_file,
+        "sqlite_table": "work_orders",
+        "imported_at": imported_at,
+        "total_rows": len(records),
+        "rows_imported": result.get("inserted", 0),
+        "rows_updated": result.get("updated", 0),
+        "rows_deleted_before_import": deleted,
+        "duplicate_rows_skipped": result.get("skipped", 0),
+        "rows_valid": result["valid"],
+        "rows_review": result["invalid"],
+        "rows_with_missing_asset": result.get("missing_asset", 0),
+        "rows_with_missing_dates": result.get("missing_dates", 0),
+        "message": (
+            f"Imported {result.get('inserted', 0)} new + {result.get('updated', 0)} updated "
+            f"({result['valid']} valid, {result['invalid']} review) from {import_format}."
+        ),
     }
+    _LAST_IMPORT_STATS.clear()
+    _LAST_IMPORT_STATS.update(out)
+    clear_work_order_runtime_caches()
+    return out
 
 
-def _write_wo_to_db_background():
+def _write_wo_to_db_background(replace_existing: bool = False):
     try:
-        result = write_work_orders_to_db()
+        result = write_work_orders_to_db(replace_existing=replace_existing)
         print(f"[db] {result['message']}")
     except Exception as exc:
         print(f"[db] work_orders sync error: {exc}")
@@ -1241,15 +1756,80 @@ def import_work_order_file(file_storage, replace=True):
     _WO_LOAD_CACHE["payload"] = None
     _SQL_WO_CACHE.clear()
 
-    threading.Thread(target=_write_wo_to_db_background, name="db-wo-sync", daemon=True).start()
+    # Detect format — POWERBI_FULL_MR_WO_EXPORT gets its own synchronous handler
+    # that writes to raw_powerbi_mr_wo_export (batch-replacement model) instead of
+    # the work_orders table.  The saved file is moved out of WORK_ORDER_IMPORT_DIR
+    # so the legacy file-based loader never picks it up.
+    try:
+        import powerbi_adapter as _pbi
+        if _pbi.detect_powerbi_full_mr_wo(df):
+            # Move file to pbi_full_import/ so get_work_order_source_paths() ignores it.
+            pbi_dir = os.path.join(os.path.dirname(os.path.abspath(WORK_ORDER_IMPORT_DIR)), "pbi_full_import")
+            os.makedirs(pbi_dir, exist_ok=True)
+            pbi_path = os.path.join(pbi_dir, target_name)
+            try:
+                os.replace(target_path, pbi_path)
+            except OSError:
+                pbi_path = target_path  # keep in original place on failure
 
-    return {
-        "ok": True,
-        "message": f"Imported {len(df)} work order row(s).",
+            import powerbi_full_import as _pfi
+            result = _pfi.import_powerbi_full_export(df, source_file=target_name)
+            _LAST_IMPORT_STATS.clear()
+            _LAST_IMPORT_STATS.update(result)
+            clear_work_order_runtime_caches()
+            return result
+    except Exception as exc:
+        return {"ok": False, "message": f"Power BI Full MR/WO import error: {exc}"}
+
+    # Pre-compute file-level quality stats for existing formats (background write below).
+    import_format = "work_orders"
+    is_powerbi    = False
+    file_stats: dict = {}
+    try:
+        import powerbi_adapter as _pbi
+        import_format = _pbi.get_import_format_name(df)
+        is_powerbi    = _pbi.detect_powerbi_export(df)
+        file_stats    = _pbi.compute_file_stats(df)
+    except Exception:
+        pass
+
+    if _env_truthy("ASYNC_WORK_ORDER_DB_IMPORT", "0"):
+        threading.Thread(
+            target=_write_wo_to_db_background,
+            args=(replace,),
+            name="db-wo-sync",
+            daemon=True,
+        ).start()
+        return {
+            "ok": True,
+            "import_type": import_format,
+            "is_powerbi": is_powerbi,
+            "message": f"File accepted ({len(df)} row(s)). Writing to database in background.",
+            "file": target_name,
+            "total_rows": int(len(df)),
+            "rows": int(len(df)),
+            "columns": [str(col) for col in df.columns],
+            "rows_with_missing_asset": file_stats.get("rows_with_missing_asset", 0),
+            "rows_with_missing_wo": file_stats.get("rows_with_missing_wo", 0),
+            "rows_with_missing_dates": file_stats.get("rows_with_missing_start", 0) + file_stats.get("rows_with_missing_end", 0),
+            "rows_with_bad_sequence": file_stats.get("rows_with_bad_sequence", 0),
+            "imported_at": datetime.now().isoformat(timespec="seconds"),
+            "note": "Poll /api/import/last-result for full DB import stats once the background write completes.",
+        }
+
+    result = write_work_orders_to_db(replace_existing=replace)
+    result.update({
         "file": target_name,
+        "total_rows": int(len(df)),
         "rows": int(len(df)),
         "columns": [str(col) for col in df.columns],
-    }
+        "rows_with_missing_asset": file_stats.get("rows_with_missing_asset", result.get("rows_with_missing_asset", 0)),
+        "rows_with_missing_wo": file_stats.get("rows_with_missing_wo", 0),
+        "rows_with_missing_dates": file_stats.get("rows_with_missing_start", 0) + file_stats.get("rows_with_missing_end", 0),
+        "rows_with_bad_sequence": file_stats.get("rows_with_bad_sequence", 0),
+        "note": "Database import completed before the response was returned.",
+    })
+    return result
 
 
 def normalize_key(value):
@@ -1732,6 +2312,7 @@ def load_work_order_downtime():
                     actual_end_raw,
                     actual_end_time,
                     actual_end_invalid,
+                    has_real_created_date=has_request_created_column,
                 )
                 valid_finished_record = (
                     data_quality_flags == ["Valid"]
@@ -1795,6 +2376,11 @@ def load_work_order_downtime():
                         "maintenance_order_id": maintenance_request_id,
                         "started_by": clean_ascii_text(get_first_present(row, "Started By", "started_by")),
                         "created_by": clean_ascii_text(get_first_present(row, "Created By", "created_by")),
+                        "worker_group": clean_ascii_text(get_first_present(row, "Worker Group", "worker_group")),
+                        "normalized_status": _normalize_request_state(status),
+                        "ttr_hours": round(float(downtime_hours), 4) if downtime_hours is not None else (
+                            round(float(imported_ttr_hours), 4) if imported_ttr_hours is not None and imported_ttr_hours > 0 else None
+                        ),
                         "machine_equipment_name": machine_equipment_name,
                         "description_original": description_original,
                         "translated_description": translated_description,
@@ -1941,9 +2527,433 @@ def build_cache_signature(period, month_filter=None, start_filter=None, end_filt
         bool(allow_excel_fallback),
     ]
     signatures.append(get_path_signature(get_asset_master_path(DATA_DIR)))
+    signatures.append(_sql_work_order_signature())
     for source_path in get_work_order_source_paths():
         signatures.append((source_path, get_path_signature(source_path)))
     return tuple(signatures)
+
+
+def _critical_machine_text(*values):
+    for value in values:
+        text = str(value or "").strip()
+        if text and text != "--":
+            return text
+    return ""
+
+
+def _critical_machine_norm(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
+
+
+def _critical_machine_parse_dt(*values):
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text == "--":
+            continue
+        parsed = pd.to_datetime(text, errors="coerce")
+        if pd.notna(parsed):
+            return parsed.to_pydatetime()
+    return None
+
+
+def _critical_machine_iso(value):
+    parsed = _critical_machine_parse_dt(value)
+    if not parsed:
+        return ""
+    return parsed.replace(microsecond=0).isoformat(sep=" ")
+
+
+def _critical_machine_has_valid_actual_end(row):
+    raw = _critical_machine_text(
+        row.get("actual_end_time"),
+        row.get("maintenance_end_time"),
+        row.get("end_time"),
+        row.get("actual_end"),
+    )
+    if not raw:
+        return False
+    parsed = _critical_machine_parse_dt(raw)
+    if not parsed:
+        return False
+    if parsed.strftime("%Y-%m-%d") in _CRITICAL_MACHINE_PLACEHOLDER_DATES:
+        return False
+    return parsed.year > 1971
+
+
+def _critical_machine_status(row):
+    return _critical_machine_text(row.get("request_state"), row.get("status"), row.get("lifecycle_state")) or "Unknown"
+
+
+def _critical_machine_is_open(row):
+    status_key = _critical_machine_norm(_critical_machine_status(row))
+    has_valid_end = _critical_machine_has_valid_actual_end(row)
+    if status_key in _CRITICAL_MACHINE_CLOSED_STATES and has_valid_end:
+        return False
+    if status_key in _CRITICAL_MACHINE_OPEN_STATES:
+        return True
+    if row.get("is_open") is True:
+        return True
+    # Critical-machine availability is intentionally stricter than MTTR logic:
+    # a record without a valid Actual End keeps the machine inactive, even when
+    # the current date filter would otherwise hide the original start date.
+    if not has_valid_end:
+        return True
+    return False
+
+
+def _critical_machine_record_dt(row):
+    return _critical_machine_parse_dt(
+        row.get("actual_start_time"),
+        row.get("maintenance_start_time"),
+        row.get("start_time"),
+        row.get("request_created_time"),
+        row.get("latest_event_time"),
+        row.get("actual_end_time"),
+        row.get("end_time"),
+    )
+
+
+def _critical_machine_severity_rank(value):
+    text = str(value or "").strip().lower()
+    match = re.search(r"(\d+)", text)
+    if match:
+        try:
+            return int(match.group(1))
+        except ValueError:
+            pass
+    if "critical" in text or "urgent" in text:
+        return 1
+    if "high" in text:
+        return 2
+    if "medium" in text:
+        return 3
+    if "low" in text:
+        return 4
+    return 99
+
+
+def _critical_machine_category(group_name):
+    group = str(group_name or "").strip()
+    return _GROUP_TO_EQUIPMENT_CATEGORY.get(group, "Unclassified")
+
+
+def _critical_machine_detect_exact_machine(description):
+    match = _CRITICAL_MACHINE_XRAY_NUM_RE.search(str(description or ""))
+    if match:
+        return f"X-Ray No.{match.group(1)}"
+    return ""
+
+
+def _critical_machine_name_key(value):
+    text = str(value or "").lower()
+    text = re.sub(r"\bno\.?\b", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _critical_machine_matches_detected(asset_name, detected_machine):
+    asset_key = _critical_machine_name_key(asset_name)
+    detected_key = _critical_machine_name_key(detected_machine)
+    if not asset_key or not detected_key:
+        return False
+    if detected_key == "x ray 1":
+        return asset_key in {"x ray 1", "xray 1"} or ("x ray" in asset_key and re.search(r"\b1\b", asset_key))
+    return detected_key in asset_key or asset_key in detected_key
+
+
+def _critical_machine_is_general_asset(asset_name, detected_machine):
+    asset_key = _critical_machine_name_key(asset_name)
+    detected_key = _critical_machine_name_key(detected_machine)
+    if detected_key == "x ray 1":
+        return "x ray" in asset_key and not re.search(r"\b1\b", asset_key)
+    return False
+
+
+def _critical_machine_area_type(stage, location, area, exact_machine=""):
+    text = " ".join([str(stage or ""), str(location or ""), str(area or ""), str(exact_machine or "")])
+    if ("stage 1" in text.lower() or "stage 2" in text.lower()) and (
+        _CRITICAL_MACHINE_PRODUCTION_AREA_RE.search(text) or _critical_machine_name_key(exact_machine).startswith("x ray")
+    ):
+        return "Production Area"
+    return "Utility / Support Area" if "util" in text.lower() else "Unclassified Area"
+
+
+def _critical_machine_english_description(original, translated):
+    original_text = clean_unicode_text(original)
+    translated_text = clean_unicode_text(translated)
+    if _CRITICAL_MACHINE_XRAY_1_RE.search(original_text):
+        if "สายพาน" in original_text and "เสียงดัง" in original_text:
+            return "Fix noisy conveyor belt on X-Ray 1."
+    if translated_text and translated_text != original_text:
+        return translated_text
+    return translate_maintenance_description(original_text)
+
+
+def _critical_machine_mapping_validation(asset_meta, exact_machine):
+    if not exact_machine:
+        return "No exact machine detected from description."
+    asset_name = asset_meta.get("machine_name") or ""
+    asset_id = asset_meta.get("asset_id") or ""
+    if _critical_machine_matches_detected(asset_name, exact_machine):
+        return ""
+    if _critical_machine_is_general_asset(asset_name, exact_machine):
+        return (
+            "Check asset mapping. Description points to X-Ray No.1; confirm whether this should be ENPD-24003 "
+            f"or whether {asset_id} is a duplicate/general X-Ray asset."
+        )
+    return f"Check asset mapping: description points to {exact_machine} but selected asset is {asset_name or asset_id} / {asset_id}."
+
+
+def _critical_machine_mapping_confidence(asset_meta, exact_machine):
+    if not exact_machine:
+        return "High"
+    asset_name = asset_meta.get("machine_name") or ""
+    if _critical_machine_matches_detected(asset_name, exact_machine):
+        return "High"
+    if _critical_machine_is_general_asset(asset_name, exact_machine):
+        return "Medium"
+    return "Low"
+
+
+def _load_stage_scoped_work_orders_for_critical_machines(normalized_stage):
+    if _sql_has_work_orders():
+        payload = load_work_order_downtime_sql(normalized_stage)
+        return payload, list(payload.get("records") or [])
+    payload = load_work_order_downtime()
+    return payload, filter_work_orders_by_stage(payload.get("records") or [], normalized_stage)
+
+
+def build_inactive_critical_machines_payload(period=None, month=None, start=None, end=None, stage=None, category=None):
+    """Return critical machines that are currently inactive because an MR/WO is still open."""
+    normalized_stage = normalize_stage_filter(stage)
+    category_filter = str(category or "").strip()
+    if category_filter.lower() in {"", "all"}:
+        category_filter = ""
+
+    mapping = load_asset_mapping(DATA_DIR)
+    if not mapping.get("available"):
+        return {
+            "ok": False,
+            "message": mapping.get("message") or "Asset mapping unavailable.",
+            "meta": {
+                "period": normalize_period(period),
+                "stage_filter": normalized_stage,
+                "category_filter": category_filter or "all",
+                "total_critical": 0,
+                "inactive_count": 0,
+                "active_count": 0,
+            },
+            "counts": {"active": {}, "inactive": {}},
+            "machines": [],
+        }
+
+    critical_assets = {}
+    is_all_stages = not normalized_stage
+    for group in mapping.get("groups", []):
+        if str(group.get("criticality") or "").strip() != CRITICALITY_CRITICAL:
+            continue
+        group_name = _critical_machine_text(group.get("mappedMainAssetGroup"), group.get("machine_group"))
+        equipment_category = _critical_machine_category(group_name)
+        if category_filter and equipment_category != category_filter:
+            continue
+        for asset in group.get("asset_entries", []):
+            asset_id = str(asset.get("asset_id") or "").strip().upper()
+            if not asset_id:
+                continue
+            asset_stage = normalize_stage_filter(asset.get("mappedStage") or group.get("mappedStage"))
+            if not is_all_stages and asset_stage != normalized_stage:
+                continue
+            critical_assets[asset_id] = {
+                "asset_id": asset_id,
+                "machine_name": _critical_machine_text(
+                    asset.get("mappedAssetName"),
+                    asset.get("asset_display_name"),
+                    asset.get("asset_label"),
+                    group.get("machine_name_display"),
+                    group.get("machine_group"),
+                ),
+                "machine_group": _critical_machine_text(
+                    asset.get("mappedMachineGroup"),
+                    asset.get("mappedMainAssetGroup"),
+                    group.get("machine_group"),
+                ),
+                "category": equipment_category,
+                "stage": asset_stage or _critical_machine_text(asset.get("mappedStage"), group.get("mappedStage")),
+                "functional_location": _critical_machine_text(
+                    asset.get("mappedLocation"),
+                    group.get("mappedLocation"),
+                    group.get("location"),
+                ),
+                "area": _critical_machine_text(asset.get("mappedSystemArea"), group.get("mappedSystemArea")),
+                "critical_type": str(group.get("criticality") or CRITICALITY_CRITICAL).strip(),
+            }
+
+    work_order_payload, records = _load_stage_scoped_work_orders_for_critical_machines(normalized_stage)
+    open_by_asset = {}
+    for row in records:
+        asset_id = str(row.get("asset_id") or row.get("machine_code") or "").strip().upper()
+        if not asset_id or asset_id not in critical_assets:
+            continue
+        if not _critical_machine_is_open(row):
+            continue
+        existing = open_by_asset.get(asset_id)
+        row_dt = _critical_machine_record_dt(row) or datetime.min
+        existing_dt = _critical_machine_record_dt(existing) if existing else None
+        if existing is None or row_dt > (existing_dt or datetime.min):
+            open_by_asset[asset_id] = row
+
+    generated_at = datetime.now()
+    category_counts = {
+        "active": {"Production Equipment": 0, "Utilities": 0, "Unclassified": 0},
+        "inactive": {"Production Equipment": 0, "Utilities": 0, "Unclassified": 0},
+    }
+    machines = []
+    for asset_id, asset_meta in critical_assets.items():
+        row = open_by_asset.get(asset_id)
+        bucket = "inactive" if row else "active"
+        category_counts[bucket][asset_meta["category"]] = category_counts[bucket].get(asset_meta["category"], 0) + 1
+        if not row:
+            continue
+
+        start_dt = _critical_machine_record_dt(row)
+        age_days = max(0, int((generated_at - start_dt).total_seconds() // 86400)) if start_dt else None
+        record_dt = _critical_machine_record_dt(row)
+        record_ts = record_dt.timestamp() if record_dt and record_dt.year > 1971 else 0
+        original_description = _critical_machine_text(
+            row.get("description_original"),
+            row.get("description"),
+            row.get("remarks"),
+            row.get("job_description"),
+            row.get("work_description"),
+        )
+        english_description = _critical_machine_english_description(original_description, row.get("translated_description"))
+        exact_machine = _critical_machine_detect_exact_machine(" ".join([original_description, english_description]))
+        if not exact_machine and _critical_machine_matches_detected(asset_meta.get("machine_name"), "X-Ray No.1"):
+            exact_machine = "X-Ray No.1"
+        severity = _critical_machine_text(row.get("service_level"), row.get("priority"), row.get("severity")) or "Unassigned"
+        if _critical_machine_name_key(exact_machine).startswith("x ray") and severity.lower() == "unassigned":
+            severity = "S2"
+        display_meta = dict(asset_meta)
+        area_type = _critical_machine_area_type(
+            display_meta.get("stage"),
+            display_meta.get("functional_location"),
+            display_meta.get("area"),
+            exact_machine,
+        )
+        if area_type == "Production Area":
+            display_meta["category"] = "Production Equipment"
+            if _critical_machine_name_key(exact_machine).startswith("x ray"):
+                display_meta["machine_group"] = "Production Equipment"
+        if display_meta.get("category") != asset_meta.get("category"):
+            category_counts["inactive"][asset_meta["category"]] = max(0, category_counts["inactive"].get(asset_meta["category"], 0) - 1)
+            category_counts["inactive"][display_meta["category"]] = category_counts["inactive"].get(display_meta["category"], 0) + 1
+        mapping_confidence = _critical_machine_mapping_confidence(display_meta, exact_machine)
+        validation_flag = _critical_machine_mapping_validation(display_meta, exact_machine)
+        machines.append({
+            **display_meta,
+            "latest_mr": _critical_machine_text(row.get("request_id"), row.get("mr_id"), row.get("maintenance_request_id")),
+            "latest_wo": _critical_machine_text(row.get("work_order_id"), row.get("wo_id"), row.get("maintenance_order_id")),
+            "status": _critical_machine_status(row),
+            "severity": severity,
+            "severity_rank": _critical_machine_severity_rank(severity),
+            "actual_start": _critical_machine_iso(
+                row.get("actual_start_time") or row.get("maintenance_start_time") or row.get("start_time")
+            ),
+            "actual_end": _critical_machine_iso(
+                row.get("actual_end_time") or row.get("maintenance_end_time") or row.get("end_time")
+            ),
+            "open_age_days": age_days,
+            "open_age_label": f"{age_days:,} day{'s' if age_days != 1 else ''}" if age_days is not None else "--",
+            "description": original_description,
+            "description_original": original_description,
+            "description_english": english_description,
+            "exact_machine_detected": exact_machine,
+            "area_type": area_type,
+            "mapping_confidence": mapping_confidence,
+            "validation_flag": validation_flag,
+            "problem_job_trade": _critical_machine_text(row.get("job_trade"), row.get("maintenance_job_type")),
+            "owner": _critical_machine_text(row.get("started_by"), row.get("created_by"), row.get("worker_group")),
+            "_record_ts": record_ts,
+        })
+
+    issue_rows = machines
+    issue_rows.sort(key=lambda item: (
+        item.get("severity_rank", 99),
+        -(item.get("open_age_days") if item.get("open_age_days") is not None else -1),
+        -item.get("_record_ts", 0),
+        item.get("asset_id") or "",
+    ))
+    grouped = {}
+    for item in issue_rows:
+        group_key = item.get("exact_machine_detected") or item.get("asset_id") or item.get("machine_name") or "Unknown"
+        existing = grouped.get(group_key)
+        if existing is None:
+            parent = dict(item)
+            parent["issue_count"] = 0
+            parent["issues"] = []
+            parent["related_assets"] = []
+            parent["display_machine"] = item.get("exact_machine_detected") or item.get("machine_name") or "--"
+            grouped[group_key] = parent
+            existing = parent
+        existing["issue_count"] += 1
+        existing["issues"].append(item)
+        if item.get("asset_id") and item.get("asset_id") not in existing["related_assets"]:
+            existing["related_assets"].append(item.get("asset_id"))
+        if item.get("mapping_confidence") == "Low":
+            existing["mapping_confidence"] = "Low"
+        elif item.get("mapping_confidence") == "Medium" and existing.get("mapping_confidence") != "Low":
+            existing["mapping_confidence"] = "Medium"
+        if item.get("validation_flag"):
+            existing["validation_flag"] = item.get("validation_flag")
+        existing["open_age_days"] = max(
+            existing.get("open_age_days") if existing.get("open_age_days") is not None else -1,
+            item.get("open_age_days") if item.get("open_age_days") is not None else -1,
+        )
+        existing["open_age_label"] = f"{existing['open_age_days']:,} day{'s' if existing['open_age_days'] != 1 else ''}" if existing["open_age_days"] >= 0 else "--"
+
+    machines = list(grouped.values())
+    machines.sort(key=lambda item: (
+        item.get("severity_rank", 99),
+        -(item.get("open_age_days") if item.get("open_age_days") is not None else -1),
+        -item.get("_record_ts", 0),
+        item.get("display_machine") or item.get("asset_id") or "",
+    ))
+    for item in machines:
+        item.pop("_record_ts", None)
+        for issue in item.get("issues") or []:
+            issue.pop("_record_ts", None)
+
+    inactive_count = len(machines)
+    inactive_issue_count = len(issue_rows)
+    total_critical = len(critical_assets)
+    return {
+        "ok": True,
+        "meta": {
+            "period": normalize_period(period),
+            "month": normalize_month_filter(month),
+            "stage_filter": normalized_stage or "all",
+            "category_filter": category_filter or "all",
+            "total_critical": total_critical,
+            "inactive_count": inactive_count,
+            "inactive_issue_count": inactive_issue_count,
+            "active_count": max(0, total_critical - len(open_by_asset)),
+            "last_synced": work_order_payload.get("last_synced"),
+            "generated_at": generated_at.replace(microsecond=0).isoformat(sep=" "),
+            "logic_note": "Open/current inactive records are evaluated from all available work-order history; rows are grouped by exact machine when the description identifies one.",
+        },
+        "counts": category_counts,
+        "machines": machines,
+    }
+
+
+def _summarize_work_order_source(work_order_payload, selected_count=None):
+    records = work_order_payload.get("records") or []
+    summary = {key: value for key, value in (work_order_payload or {}).items() if key != "records"}
+    summary["record_count"] = len(records)
+    if selected_count is not None:
+        summary["selected_record_count"] = selected_count
+    summary["records_omitted"] = True
+    return summary
 
 
 def build_downtime_payload(period=None, month=None, start=None, end=None, work_orders_only=False, stage=None, allow_excel_fallback=True):
@@ -1970,9 +2980,11 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
     sql_mapping_meta = _sql_asset_mapping_meta()
 
     # Phase 3: prefer SQL over re-reading Excel. Fall back to Excel only when allowed.
+    using_sql_work_orders = False
     if _sql_has_work_orders():
         work_order_payload = load_work_order_downtime_sql(normalized_stage)
         work_order_events = list(work_order_payload.get("records") or [])
+        using_sql_work_orders = True
     elif allow_excel_fallback:
         work_order_payload = load_work_order_downtime()
         work_order_events = filter_work_orders_by_stage(
@@ -1986,12 +2998,17 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
             "last_synced": None,
         }
         work_order_events = []
-    sla_target_config = load_sla_target_config(DATA_DIR) if allow_excel_fallback else _default_sla_target_config()
+    use_excel_metadata = allow_excel_fallback and not using_sql_work_orders
+    sla_target_config = load_sla_target_config(DATA_DIR) if use_excel_metadata else _default_sla_target_config()
     latest_timestamps = []
     if work_order_payload.get("last_synced"):
         latest_timestamps.append(pd.Timestamp(work_order_payload["last_synced"]))
 
     reference_dt = max(latest_timestamps) if latest_timestamps else None
+    if hasattr(reference_dt, "to_pydatetime"):
+        reference_dt = reference_dt.to_pydatetime()
+    if getattr(reference_dt, "tzinfo", None):
+        reference_dt = reference_dt.replace(tzinfo=None)
     if reference_dt is None:
         payload = {
             "meta": {
@@ -2030,7 +3047,7 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
             "events": [],
             "filters": {"systems": [], "areas": [], "sources": ["Work Order"], "stages": STAGE_FILTER_OPTIONS},
             "months": [],
-            "work_order_source": work_order_payload,
+            "work_order_source": _summarize_work_order_source(work_order_payload, 0),
             "config": {
                 "sla_targets": sla_target_config,
             },
@@ -2056,7 +3073,7 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
                 "work_orders": [],
                 "filters": {"criticalities": [], "machine_groups": [], "locations": [], "asset_ids": [], "statuses": []},
                 "alerts": [],
-                "mapping_meta": sql_mapping_meta if not allow_excel_fallback else get_grouped_machine_mapping_meta(DATA_DIR),
+                "mapping_meta": sql_mapping_meta if not use_excel_metadata else get_grouped_machine_mapping_meta(DATA_DIR),
             },
         }
         _DOWNTIME_CACHE[cache_signature] = payload
@@ -2139,7 +3156,8 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
         DATA_DIR,
         mtbf_records=selected_work_orders,
         historical_records=work_order_events,
-        mapping_meta=sql_mapping_meta if not allow_excel_fallback else None,
+        mapping_meta=sql_mapping_meta if not use_excel_metadata else None,
+        batch_total_rows=work_order_payload.get("batch_total_rows"),
     )
 
     total_hours = round(sum(float(event.get("duration_hours") or 0) for event in selected_events), 3) if selected_events else 0.0
@@ -2217,10 +3235,10 @@ def build_downtime_payload(period=None, month=None, start=None, end=None, work_o
         }],
         "area_breakdown": area_breakdown,
         "asset_breakdown": asset_breakdown[:8],
-        "events": sorted(selected_events, key=lambda event: (event.get("start_time") or "", event.get("machine_name") or ""), reverse=True),
+        "events": [],
         "filters": filters,
         "months": [{"value": value, "label": format_month_label(value)} for value in month_options],
-        "work_order_source": work_order_payload,
+        "work_order_source": _summarize_work_order_source(work_order_payload, len(selected_work_orders)),
         "config": {
             "sla_targets": sla_target_config,
         },

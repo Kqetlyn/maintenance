@@ -59,6 +59,7 @@ document.addEventListener('DOMContentLoaded', () => {
             btn.classList.add('active');
         }
     });
+    highlightViewNavButtons();
 
     // Handles Dropdown highlighting
     document.querySelectorAll('.dropdown-menu a').forEach(link => {
@@ -79,7 +80,16 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     initializeSyncCard();
+    window.setTimeout(highlightViewNavButtons, 150);
 });
+
+function highlightViewNavButtons() {
+    const path = window.location.pathname.toLowerCase();
+    const activeView = path.startsWith('/management/users') ? 'users' : 'dashboard';
+    document.querySelectorAll('.nav-btn[data-nav-view]').forEach(btn => {
+        btn.classList.toggle('active', (btn.dataset.navView || '').toLowerCase() === activeView);
+    });
+}
 
 function initializeSyncCard() {
     const pageKey = document.body?.dataset?.syncPage;

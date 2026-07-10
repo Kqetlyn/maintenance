@@ -18,7 +18,6 @@
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="stylesheet" href="/Maintenance/style.css?v=20260623-grgi-layout-1">
     <link rel="stylesheet" href="/shared/mira/mira-overview.css?v=20260623-dq-merged-1">
-    <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260620-chat-router-1">
 
 </head>
 <body data-sync-page="maintenance">
@@ -28,10 +27,10 @@
         <header class="dash-header">
             <div class="header-copy">
                 <h1 id="maintenance-page-title">Overview</h1>
-                <p class="subtitle" id="maintenance-page-subtitle">AI-assisted daily summary for PM schedule, downtime, and spare parts.</p>
+                <p class="subtitle" id="maintenance-page-subtitle">Controlled maintenance risk cards built from verified dashboard data.</p>
             </div>
             <div class="header-actions">
-                <button type="button" id="refresh-data-btn" class="refresh-data-btn" title="Clear cached results and reload the latest data files (use after dropping in updated source files).">
+                <button type="button" id="refresh-data-btn" class="refresh-data-btn" data-permission="manage_users" title="Clear cached results and reload the latest data files (use after dropping in updated source files).">
                     <span class="refresh-data-icon" aria-hidden="true">⟳</span>
                     <span class="refresh-data-label">Refresh data</span>
                 </button>
@@ -39,9 +38,9 @@
         </header>
 
         <section class="card-shell view-toggle maintenance-tab-toggle">
-            <button type="button" class="toggle-btn active" data-view-tab="mira_overview">MIRA Overview</button>
+            <button type="button" class="toggle-btn active" data-view-tab="mira_overview" data-permission="mira_overview">Predictive Insights</button>
             <button type="button" class="toggle-btn" data-view-tab="overview">PM Schedule</button>
-            <button type="button" class="toggle-btn" data-view-tab="spare_parts">Spare Parts</button>
+            <button type="button" class="toggle-btn" data-view-tab="spare_parts" data-permission="spare_parts">Spare Parts</button>
             <button type="button" class="toggle-btn" data-view-tab="downtime">Downtime</button>
         </section>
 
@@ -1599,12 +1598,12 @@
             .catch(err => console.error(err));
     </script>
     <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
-    <script src="/shared/mira/mira-overview.js?v=20260625-ov-export-2" defer></script>
+    <script src="/shared/mira/mira-overview.js?v=20260625-ppt-fix-v1" defer></script>
     <script src="/Maintenance/script.js?v=20260622-inv-value-1" defer></script>
     <script src="/Maintenance/spare-parts-mgmt.js?v=20260623-grgi-layout-1" defer></script>
     <script src="/Maintenance/pm-schedule.js?v=20260622-alert-banner-1" defer></script>
-    <script src="/shared/mira/mira-chat.js?v=20260620-chat-router-1" defer></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js" defer></script>
 
     <!-- Part Usage by Asset — detail modal -->
     <div id="pau-modal" class="pau-modal-overlay" hidden>

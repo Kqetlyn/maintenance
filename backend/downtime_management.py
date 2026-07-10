@@ -12,6 +12,7 @@ from asset_mapping import (
     group_to_category,
     MACHINE_GROUPS,
 )
+from machine_family import classify_machine_family
 
 CRITICALITY_CRITICAL = "Critical"
 CRITICALITY_NON_CRITICAL = "Non-Critical / Facility"
@@ -247,6 +248,15 @@ def enrich_work_order_records(records, data_dir):
             # machine group instead of falling back to job_trade buckets.
             "mappedMachineGroup": classified.get("mappedMachineGroup") or classified.get("asset_machine_group") or "",
             "asset_machine_group": classified.get("mappedMachineGroup") or classified.get("asset_machine_group") or "",
+            # machine_family: canonical specific group name derived from asset_name /
+            # mappedMachineGroup via keyword rules.  Normalises unit suffixes
+            # ("Combi Oven 1", "Combi Oven 2" → "Combi Oven") so MTTR / MTBF
+            # slide groups by family, not by broad category.
+            "machine_family": classify_machine_family(
+                asset_name=machine_name or "",
+                fine_machine_group=classified.get("mappedMachineGroup") or classified.get("asset_machine_group") or "",
+                broad_category=classified.get("mappedMainAssetGroup") or machine_group or "",
+            )["machine_family"],
             "mappedSubAssetGroup": classified.get("mappedSubAssetGroup") or classified.get("mapped_sub_asset_group") or "",
             "mappedLocation": classified.get("mappedLocation") or classified.get("mapped_location") or classified.get("location") or "",
             "mappedSystemArea": classified.get("mappedSystemArea") or classified.get("mapped_system_area") or "",
@@ -606,7 +616,13 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
         asset_row = {
             "asset_id": asset_id,
             "asset_name": latest_item.get("asset_display_name") or latest_item.get("machine_name") or asset_id,
-            "machine_group": latest_item.get("machine_group") or latest_item.get("machine_name_display") or asset_id,
+            "machine_group": (
+                latest_item.get("machine_family")
+                or latest_item.get("mappedMachineGroup")
+                or latest_item.get("machine_group")
+                or latest_item.get("machine_name_display")
+                or asset_id
+            ),
             "criticality": latest_item.get("criticality") or CRITICALITY_NON_CRITICAL,
             "raw_criticality": latest_item["raw_criticality"] if "raw_criticality" in latest_item else latest_item.get("criticality", ""),
             "normalized_criticality": latest_item.get("normalized_criticality") or latest_item.get("criticality") or CRITICALITY_NON_CRITICAL,
@@ -941,6 +957,7 @@ def build_management_downtime_payload(
     mtbf_records=None,
     historical_records=None,
     mapping_meta=None,
+    batch_total_rows=None,
 ):
     period_floor = period_start or _resolve_year_floor(period_start, period_end)
     work_order_ids = [
@@ -1000,6 +1017,19 @@ def build_management_downtime_payload(
     attention_record_count = sum(1 for row in rows if row.get("requires_attention"))
     overall_mttr = round(total_hours / valid_ttr_count, 3) if valid_ttr_count else None
 
+    # Status counts keyed by raw request_state (preserved for PBI full imports).
+    status_counts: dict[str, int] = {}
+    open_excluded_count   = 0
+    invalid_date_excluded = 0
+    for row in rows:
+        st = str(row.get("request_state") or row.get("status") or "Unknown").strip()
+        status_counts[st] = status_counts.get(st, 0) + 1
+        excl = row.get("mttr_exclusion_reason") or ""
+        if excl == "open_incomplete":
+            open_excluded_count += 1
+        elif excl == "invalid_date_sequence":
+            invalid_date_excluded += 1
+
     criticality_totals = {
         label: {"criticality": label, "criticality_rank": CRITICALITY_RANK[label], "total_downtime_hours": 0.0, "work_order_count": 0, "open_work_orders": 0}
         for label in CRITICALITY_ORDER
@@ -1029,7 +1059,18 @@ def build_management_downtime_payload(
         location_row["total_downtime_hours"] += effective_hours
         location_row["work_order_count"] += 1
 
-        group_name = row.get("machine_group") or row.get("machine_name_display") or row.get("asset_id") or "Unmapped Asset"
+        # Group by machine_family (specific, e.g. "Combi Oven") rather than
+        # the broad machine_group (e.g. "Production Equipment").
+        group_name = (
+            row.get("machine_family")
+            or row.get("mappedMachineGroup")
+            or row.get("asset_machine_group")
+            or row.get("machine_group")
+            or row.get("machine_name_display")
+            or row.get("asset_id")
+            or "Unmapped Asset"
+        )
+        machine_category = row.get("equipment_category") or row.get("mappedMainAssetGroup") or row.get("machine_group") or ""
         group_key = f"{group_name}__{location_key}"
         group_row = machine_group_map.setdefault(
             group_key,
@@ -1037,6 +1078,7 @@ def build_management_downtime_payload(
                 "criticality": criticality,
                 "criticality_rank": CRITICALITY_RANK.get(criticality, CRITICALITY_RANK["Unmapped"]),
                 "machine_group": group_name,
+                "machine_category": machine_category,
                 "machine_name_display": row.get("machine_name_display") or group_name,
                 "location": location_key,
                 "building": location_key,
@@ -1288,10 +1330,15 @@ def build_management_downtime_payload(
         "total_downtime_hours": total_hours,
         "total_ttr_logged_hours": total_hours,
         "total_work_orders": work_order_count,
+        "batch_total_rows": batch_total_rows if batch_total_rows is not None else work_order_count,
         "valid_ttr_work_orders": valid_ttr_count,
+        "excluded_from_mttr_count": invalid_ttr_count,
+        "open_excluded_from_mttr_count": open_excluded_count,
+        "invalid_date_excluded_from_mttr_count": invalid_date_excluded,
         "invalid_missing_ttr_count": invalid_ttr_count,
         "requires_attention_count": attention_record_count,
         "overall_mttr_hours": overall_mttr,
+        "status_counts": status_counts,
         "critical_downtime_hours": round(sum(row["total_downtime_hours"] for row in criticality_rows if row["criticality"] == "Critical"), 3),
         "non_critical_facility_downtime_hours": round(
             sum(row["total_downtime_hours"] for row in criticality_rows if row["criticality"] == CRITICALITY_NON_CRITICAL),

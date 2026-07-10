@@ -279,11 +279,13 @@
         ];
         refs.summaryLine.forEach(l => compactSummary.append(l));
 
-        // Data Quality & Daily Action Alerts — merged into status card
+        // Daily Action Alerts (the Data Quality summary card that used to sit next
+        // to this was removed — its chips just duplicated what "View Data
+        // Quality" on individual alert rows already links to).
         const dqAlertsSection = el("div", "mira-ov-action-section");
 
         const dqHead = el("div", "mira-ov-dq-section-head");
-        dqHead.append(el("div", "mira-ov-mini-label", "Data Quality & Daily Action Alerts"));
+        dqHead.append(el("div", "mira-ov-mini-label", "Daily Action Alerts"));
         const dqHeadRight = el("div", "mira-ov-daily-status");
         refs.verdictBadge = el("span", "mira-ov-status-badge", "Loading");
         refs.verdictScope = el("span", "mira-ov-verdict-scope", "");
@@ -291,18 +293,7 @@
         dqHead.append(dqHeadRight);
         dqAlertsSection.append(dqHead);
 
-        const dqGrid = el("div", "mira-ov-daily-grid");
-
-        const dqCard = el("div", "mira-ov-daily-card");
-        dqCard.append(el("div", "mira-ov-sub-card-title", "Data Quality"));
-        refs.dataQualityChips = el("div", "mira-ov-dq-chip-grid");
-        refs.dataQualityChips.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-chips\"></div>";
-        dqCard.append(refs.dataQualityChips);
-        dqCard.append(el("p", "mira-ov-dq-note",
-            "These issues may affect machine-level trend, PM compliance, and predictive analysis accuracy."));
-        const dqActions = el("div", "mira-ov-daily-actions");
-        dqActions.append(buildNavButton("View Data Quality", "data_quality"));
-        dqCard.append(dqActions);
+        const dqGrid = el("div", "mira-ov-daily-grid mira-ov-daily-grid-single");
 
         const alertsCard = el("div", "mira-ov-daily-card mira-ov-daily-alert-card");
         alertsCard.append(el("div", "mira-ov-sub-card-title", "Daily Action Alerts"));
@@ -313,7 +304,7 @@
         refs.dailyAlerts.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-chips\"></div>";
         alertsCard.append(refs.dailyAlerts);
 
-        dqGrid.append(dqCard, alertsCard);
+        dqGrid.append(alertsCard);
         dqAlertsSection.append(dqGrid);
         dqAlertsSection.append(el("p", "mira-ov-disclaimer",
             "AI-detected issues are for review only. Technician/Engineer verification is required before any action. MIRA does not assign severity."));
@@ -352,22 +343,30 @@
         const pm = data.pm_schedule || {};
         const dt = data.downtime_summary || {};
         const actionItems = (pres && pres.action_items) || [];
+        const carryOver = num(dt.carry_over_open_mr) || num(dt.opening_backlog_count) || 0;
+        const activeWorkload = (num(wo.open) || 0) + carryOver;
 
-        // Line 1: Main concern
+        // Line 1: Main concern (PM=0 gets a data-review note, not "0% compliance")
         let concern = "";
         if (status.tone === "critical") concern = "Main concern: " + (status.level || "Critical issues flagged");
         else if ((wo.open || 0) > 20) concern = "Main concern: " + fmt(wo.open) + " open MRs outstanding";
+        else if (num(pm.compliance_pct) === 0) concern = "Main concern: PM completion records require verification";
         else if (num(pm.compliance_pct) !== null && pm.compliance_pct < 70) concern = "Main concern: PM compliance at " + fmt(pm.compliance_pct) + "%";
-        else if ((dt.carry_over_open_mr || dt.opening_backlog_count || 0) > 30) concern = "Main concern: " + fmt(dt.carry_over_open_mr || dt.opening_backlog_count) + " carry-over MRs unresolved";
+        else if (carryOver > 30) concern = "Main concern: " + fmt(carryOver) + " carry-over MRs unresolved";
         else concern = "Status: " + (status.level || "Monitoring");
         refs.summaryLine[0].textContent = concern;
         refs.summaryLine[0].className = "mira-ov-summary-line mira-ov-sl-concern";
 
-        // Line 2: Key reason
+        // Line 2: Active workload (open + carry-over)
         let reason = "";
-        if ((pm.overdue || 0) > 0 && (wo.open || 0) > 0) reason = "Key: " + fmt(wo.open) + " open MR + " + fmt(pm.overdue) + " overdue PM";
-        else if (dt.top_functional_location_name) reason = "Key area: " + dt.top_functional_location_name;
-        else reason = "Closure rate: " + fmt(wo.closure_rate_pct || dt.closure_rate_pct) + "%";
+        if (activeWorkload > 0) {
+            reason = "Active workload: " + fmt(activeWorkload) + " MR";
+            if ((num(wo.open) || 0) > 0 && carryOver > 0) reason += " (" + fmt(wo.open) + " open + " + fmt(carryOver) + " carry-over)";
+        } else if (dt.top_functional_location_name) {
+            reason = "Key area: " + dt.top_functional_location_name;
+        } else {
+            reason = "Closure rate: " + fmt(wo.closure_rate_pct || dt.closure_rate_pct) + "%";
+        }
         refs.summaryLine[1].textContent = reason;
         refs.summaryLine[1].className = "mira-ov-summary-line mira-ov-sl-reason";
 
@@ -400,26 +399,34 @@
         });
     }
 
-    // ── § 2  Compact KPI row (PM / Downtime / Spare Parts) ───────────────────
+    // ── § 2  Maintenance Risk Snapshot (3 risk-action cards) ────────────────
     function buildKpiRow() {
         const sec = el("section", "mira-ov-kpi-row-section");
-        sec.append(el("div", "mira-ov-section-label", "Management KPI Overview"));
+        sec.append(el("div", "mira-ov-section-label", "Maintenance Risk Snapshot"));
         const grid = el("div", "mira-ov-kpi-row");
-        [["PM Schedule", "pm", "teal", "PM"], ["Downtime", "downtime", "orange", "DT"], ["Spare Parts", "spare", "blue", "SP"]]
-            .forEach(([title, key, accent, icon]) => {
-                const card = el("section", `mira-ov-kpi-card mira-ov-accent-${accent}`);
-                const head = el("div", "mira-ov-kpi-head");
-                const badge = el("span", "mira-ov-health-badge mira-ov-health-unknown");
-                badge.id = `mira-ov-health-${key}`;
-                head.append(el("div", "mira-ov-kpi-title", title), badge, el("span", "mira-ov-card-icon", icon));
-                card.append(head);
-                const body = el("div", "mira-ov-kpi-body"); body.id = `mira-ov-kpi-${key}`;
-                body.append(el("p", "mira-ov-muted", "Loading…"));
-                // Hidden duplicate IDs (kept for renderSection compatibility with detail IDs)
-                const shadow = el("div"); shadow.id = `mira-ov-detail-${key}`; shadow.hidden = true;
-                card.append(body, shadow);
-                grid.append(card);
-            });
+
+        // Card definitions: [displayTitle, bodyKey, accent, navTarget, navLabel]
+        // bodyKey drives mira-ov-kpi-{key} IDs used by renderSection()
+        const cardDefs = [
+            ["Maintenance Workload Risk",      "downtime", "orange", "downtime",  "Review Open MR"],
+            ["PM / Data Reliability Review",   "pm",       "teal",   "pm",        "Verify PM Records"],
+            ["Spare Parts / Procurement Risk", "spare",    "blue",   "spare",     "Review Spare Parts"],
+        ];
+        cardDefs.forEach(([title, key, accent, navTarget, navLabel]) => {
+            const card = el("section", `mira-ov-kpi-card mira-ov-accent-${accent}`);
+            const head = el("div", "mira-ov-kpi-head");
+            const healthBadge = el("span", "mira-ov-health-badge mira-ov-health-unknown");
+            healthBadge.id = `mira-ov-health-${key}`;
+            head.append(el("div", "mira-ov-kpi-title", title), healthBadge);
+            card.append(head);
+            const body = el("div", "mira-ov-kpi-body"); body.id = `mira-ov-kpi-${key}`;
+            body.append(el("p", "mira-ov-muted", "Loading…"));
+            const shadow = el("div"); shadow.id = `mira-ov-detail-${key}`; shadow.hidden = true;
+            const footer = el("div", "mira-ov-kpi-footer");
+            footer.append(buildNavButton(navLabel, navTarget));
+            card.append(body, shadow, footer);
+            grid.append(card);
+        });
         sec.append(grid);
         const strip = el("div", "mira-ov-kpi-alert-strip");
         strip.id = "mira-ov-kpi-alert-strip";
@@ -432,14 +439,14 @@
 
     function buildPredictiveSection() {
         const sec = el("section", "mira-ov-pred-section");
-        sec.append(el("div", "mira-ov-section-label", "Recurring Machine Issue Forecast"));
+        sec.append(el("div", "mira-ov-section-label", "Predictive Maintenance Insights"));
         sec.append(el("p", "mira-ov-pred-subtitle",
-            "Evidence-based recurrence forecasts by specific machine, derived from repeated MR patterns, MTBF signals, and available spare-parts history."));
+            "Rule-based risk cards from verified WO/MR history, MTBF movement, criticality, aged open work orders, and linked spare-part consumption."));
         const kpiStrip = el("div", "mira-pred-kpi-strip");
         kpiStrip.id = "mira-pred-kpi-strip";
         sec.append(kpiStrip);
         sec.append(el("p", "mira-ov-disclaimer",
-            "AI-classified for review only. MIRA does not assign severity. Forecasts are based on available MR, asset, spare-part, and purchase history."));
+            "Calculated risk is shown first. AI wording is limited to short summaries of the structured card data; no open-ended chat is used."));
         const catsWrap = el("div", "mira-pred-cats-wrap");
         catsWrap.id = "mira-pred-cats-body";
         catsWrap.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-lg\" style=\"height:120px\"></div>";
@@ -447,21 +454,78 @@
         const bottomRow = el("div", "mira-pred-bottom-row");
         const card2 = el("div", "mira-ov-pred-card");
         card2.id = "mira-pred-card2";
-        card2.append(el("div", "mira-ov-pred-card-title", "Dominant Fault Pattern"));
+        card2.append(el("div", "mira-ov-pred-card-title", "Scoring Rules"));
         const card2Body = el("div");
         card2Body.id = "mira-pred-fault-body";
         card2Body.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-md\"></div>";
         card2.append(card2Body);
         const card4 = el("div", "mira-ov-pred-card mira-ov-pred-card-confidence");
         card4.id = "mira-pred-card4";
-        card4.append(el("div", "mira-ov-pred-card-title", "Data Confidence"));
+        card4.append(el("div", "mira-ov-pred-card-title", "AI Use Policy"));
         const card4Body = el("div");
         card4Body.id = "mira-pred-confidence-body";
         card4Body.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-sm\"></div>";
         card4.append(card4Body);
         bottomRow.append(card2, card4);
         sec.append(bottomRow);
+
+        const footnote = el("p", "mira-pred-methodology-footnote");
+        footnote.append(document.createTextNode(
+            "Risk scores from 0–10 are calculated from verified maintenance indicators. AI-generated summaries explain the calculated results and do not determine the score. "
+        ));
+        const methodologyLink = el("button", "mira-pred-methodology-link", "Risk score methodology");
+        methodologyLink.type = "button";
+        methodologyLink.addEventListener("click", _openRiskMethodologyModal);
+        footnote.append(methodologyLink);
+        sec.append(footnote);
         return sec;
+    }
+
+    // ── Risk score methodology modal ─────────────────────────────────────────
+    // Reads the same risk_rules.factors the page's "Scoring Rules" card and the
+    // drawer's Overview tab already use — one shared source, never re-typed.
+    let _methodologyModalEl = null;
+    function _ensureMethodologyModal() {
+        if (_methodologyModalEl) return;
+        const overlay = el("div", "mira-pred-methodology-overlay");
+        overlay.addEventListener("click", (e) => { if (e.target === overlay) _closeRiskMethodologyModal(); });
+        const modal = el("div", "mira-pred-methodology-modal");
+        const head = el("div", "mira-pred-methodology-head");
+        head.append(el("span", null, "Risk Score Methodology"));
+        const closeBtn = el("button", "mira-pred-drawer-close", "×");
+        closeBtn.type = "button";
+        closeBtn.setAttribute("aria-label", "Close");
+        closeBtn.addEventListener("click", _closeRiskMethodologyModal);
+        head.append(closeBtn);
+        const body = el("div", "mira-pred-methodology-body");
+        body.id = "mira-pred-methodology-body";
+        modal.append(head, body);
+        overlay.append(modal);
+        document.body.appendChild(overlay);
+        _methodologyModalEl = overlay;
+    }
+    function _openRiskMethodologyModal() {
+        _ensureMethodologyModal();
+        const body = document.getElementById("mira-pred-methodology-body");
+        body.innerHTML = "";
+        const rules = (predictiveLatestPayload && predictiveLatestPayload.risk_rules) || {};
+        const factors = rules.factors || [];
+        const levels = rules.levels || {};
+        body.append(el("p", "mira-ov-muted", "Every asset starts at 0. Each triggered factor below adds its points; the total maps to a risk level."));
+        factors.forEach((r) => {
+            const row = el("div", "mira-pred-methodology-row");
+            row.append(el("strong", null, `+${r.points} — ${r.label}`));
+            row.append(el("p", null, r.description || ""));
+            body.append(row);
+        });
+        const levelsRow = el("div", "mira-pred-methodology-row");
+        levelsRow.append(el("strong", null, "Risk levels"));
+        levelsRow.append(el("p", null, Object.entries(levels).map(([range, label]) => `${range} = ${label}`).join("   ·   ") || "Not available"));
+        body.append(levelsRow);
+        _methodologyModalEl.classList.add("mira-pred-methodology-open");
+    }
+    function _closeRiskMethodologyModal() {
+        if (_methodologyModalEl) _methodologyModalEl.classList.remove("mira-pred-methodology-open");
     }
 
     let predictiveAbort = null;
@@ -493,9 +557,705 @@
 
     function renderPredictive(d) {
         if (!d) return;
+        if (Array.isArray(d.cards)) {
+            _renderPredRiskCards(d);
+            return;
+        }
         _renderPredCategories(d);
         _renderPredFault(d);
         _renderPredConfidence(d);
+    }
+
+    function _riskTone(level) {
+        const text = String(level || "").toLowerCase();
+        if (text === "high") return "high";
+        if (text === "medium") return "medium";
+        return "low";
+    }
+
+    // Per-session cache for "View Details" fetches, keyed by asset id/name.
+    // Cleared whenever the page reloads predictive data (filters changed), since
+    // a stale detail from a different filter scope would be misleading.
+    let _assetDetailCache = new Map();
+
+    function _renderPredRiskCards(d) {
+        predictiveLatestPayload = d;
+        _assetDetailCache = new Map();
+        const strip = document.getElementById("mira-pred-kpi-strip");
+        const body = document.getElementById("mira-pred-cats-body");
+        const rulesBody = document.getElementById("mira-pred-fault-body");
+        const policyBody = document.getElementById("mira-pred-confidence-body");
+        const cards = d.cards || [];
+        if (strip) {
+            strip.innerHTML = "";
+            [
+                ["Assets Assessed", d.assets_assessed],
+                ["Assets With Risk Signals", d.scored_assets],
+                ["High Risk", cards.filter((c) => c.risk_level === "High").length],
+                ["Period", d.period || "Last 30 days"],
+            ].forEach(([label, value]) => {
+                const item = el("div", "mira-pred-kpi");
+                item.append(el("span", null, label));
+                item.append(el("strong", null, value == null ? "—" : String(value)));
+                strip.append(item);
+            });
+        }
+        // Rule list is read verbatim from the backend's risk_rules.factors — this
+        // is the single shared source (predictive_service.py's _RISK_SCORE_RULES);
+        // never hand-type these numbers/labels here.
+        if (rulesBody) {
+            const factors = (d.risk_rules && d.risk_rules.factors) || [];
+            rulesBody.innerHTML = factors.length
+                ? "<ul class=\"mira-pred-rule-list\">" +
+                  factors.map((r) => `<li>+${r.points} for ${escOv(r.label)}</li>`).join("") +
+                  "</ul>"
+                : "<p class=\"mira-ov-muted\">Scoring rules unavailable.</p>";
+        }
+        if (policyBody) {
+            policyBody.innerHTML = `<p class="mira-ov-muted">${escOv(d.llm_policy || "AI summaries only explain prepared KPI and risk-card data.")}</p>`;
+        }
+        if (!body) return;
+        body.innerHTML = "";
+        if (!cards.length) {
+            body.append(el("p", "mira-ov-muted", "No predictive risk signals met the scoring threshold for the selected period."));
+            return;
+        }
+        const grid = el("div", "mira-pred-risk-grid");
+        cards.forEach((card) => {
+            const tone = _riskTone(card.risk_level);
+            const item = el("article", "mira-pred-risk-card mira-pred-risk-" + tone);
+            const head = el("div", "mira-pred-risk-head");
+            const title = el("div");
+            title.append(el("h3", null, card.asset_name || "Unknown asset"));
+            title.append(el("p", "mira-ov-muted", card.machine_group || "Unknown machine group"));
+            const badge = el("span", "mira-ov-risk-badge mira-ov-risk-" + tone, `${card.risk_level || "Low"} · ${card.risk_score || 0}`);
+            head.append(title, badge);
+            item.append(head);
+
+            const signals = el("div", "mira-pred-risk-block");
+            signals.append(el("div", "mira-pred-risk-block-title", "Risk Score"));
+            const sigList = el("ul", "mira-pred-risk-list");
+            (card.main_signals || []).slice(0, 3).forEach((signal) => {
+                sigList.append(el("li", null, `${signal.label || signal} (+${signal.points || 0})`));
+            });
+            signals.append(sigList);
+            item.append(signals);
+
+            const viewBtn = el("button", "mira-pred-view-details-btn", "View details →");
+            viewBtn.type = "button";
+            viewBtn.addEventListener("click", () => _openAssetDetailDrawer(card));
+            item.append(viewBtn);
+            grid.append(item);
+        });
+        body.append(grid);
+    }
+
+    // ── "View Details" drill-down drawer ─────────────────────────────────────
+    // Reuses _ensureForecastDrawer()'s overlay/close-button shell (built for the
+    // older, now-dead forecast pipeline) — same visual language, new content.
+    const _ASSET_DETAIL_TABS = [
+        ["overview", "Overview"],
+        ["work_orders", "Work Orders"],
+        ["spare_parts", "Spare Parts"],
+        ["trends", "Trends"],
+        ["recommendations", "Recommendations"],
+    ];
+
+    function _fetchAssetPredictiveDetail(card) {
+        const cacheKey = card.asset_id || card.asset_name;
+        if (_assetDetailCache.has(cacheKey)) return _assetDetailCache.get(cacheKey);
+        const qs = new URLSearchParams();
+        Object.entries(currentFilters()).forEach(([k, v]) => {
+            if (v !== null && v !== undefined && v !== "") qs.set(k, v);
+        });
+        const detailUrl = `${API}/predictive/assets/${encodeURIComponent(cacheKey)}/details?${qs.toString()}`;
+        const req = fetchJsonWithTimeout(
+            detailUrl,
+            { method: "GET", cache: "no-store" },
+            // The spare-parts lookup this pulls in can be slow on a cold cache
+            // (first request after a server restart) — generous timeout so a
+            // one-time slow build doesn't look like a broken drawer.
+            60000
+        ).promise.then((json) => (json && json.data) || null);
+        // Don't cache a rejected promise — a transient failure shouldn't
+        // permanently poison this asset for the rest of the session.
+        req.catch(() => _assetDetailCache.delete(cacheKey));
+        _assetDetailCache.set(cacheKey, req);
+        return req;
+    }
+
+    function _openAssetDetailDrawer(card) {
+        _ensureForecastDrawer();
+        _forecastDrawerTitleEl.textContent = card.asset_name || "Asset detail";
+        _forecastDrawerBodyEl.innerHTML = "";
+        _forecastDrawerBodyEl.scrollTop = 0;
+        _forecastDrawerBodyEl.classList.add("mira-pred-detail-body");
+
+        const tone = _riskTone(card.risk_level);
+        const header = el("div", "mira-pred-detail-header");
+        const headTop = el("div", "mira-pred-detail-header-top");
+        const nameBlock = el("div");
+        nameBlock.append(el("h3", null, card.asset_name || "Unknown asset"));
+        nameBlock.append(el("p", "mira-ov-muted", card.machine_group || "Unknown machine group"));
+        headTop.append(nameBlock, el("span", "mira-ov-risk-badge mira-ov-risk-" + tone, `${card.risk_level || "Low"} · ${card.risk_score || 0}/10`));
+        header.append(headTop);
+
+        const metaRow = el("div", "mira-pred-detail-header-meta");
+        const criticalNow = (card.main_signals || []).some((s) => s.label === "Asset marked critical");
+        [
+            ["Critical asset", criticalNow ? "Yes" : "No"],
+            ["Status", "Loading…"],
+            ["Last updated", "—"],
+        ].forEach(([label, value]) => {
+            const chip = el("div", "mira-pred-detail-meta-chip");
+            chip.append(el("span", null, label), el("strong", null, value));
+            metaRow.append(chip);
+        });
+        header.append(metaRow);
+        _forecastDrawerBodyEl.append(header);
+
+        const tabNav = el("div", "mira-pred-detail-tabs");
+        tabNav.setAttribute("role", "tablist");
+        const panels = el("div", "mira-pred-detail-panels");
+        const panelEls = {};
+        _ASSET_DETAIL_TABS.forEach(([key, label], idx) => {
+            const btn = el("button", "mira-pred-detail-tab" + (idx === 0 ? " active" : ""), label);
+            btn.type = "button";
+            btn.setAttribute("role", "tab");
+            btn.dataset.detailTab = key;
+            btn.addEventListener("click", () => {
+                tabNav.querySelectorAll(".mira-pred-detail-tab").forEach((b) => b.classList.toggle("active", b === btn));
+                Object.entries(panelEls).forEach(([k, p]) => p.classList.toggle("mira-pred-detail-panel-active", k === key));
+            });
+            tabNav.append(btn);
+            const panel = el("div", "mira-pred-detail-panel" + (idx === 0 ? " mira-pred-detail-panel-active" : ""));
+            panel.dataset.detailPanel = key;
+            panel.append(el("div", "mira-ov-skeleton mira-sk-line mira-sk-lg"));
+            panelEls[key] = panel;
+            panels.append(panel);
+        });
+        _forecastDrawerBodyEl.append(tabNav, panels);
+        _forecastDrawerEl.classList.add("mira-pred-drawer-open");
+
+        // Overview renders immediately from data already on `card` (no fetch
+        // needed for this part), then upgrades in place once the detail call
+        // resolves. Other tabs render a real (not fake) "not available yet"
+        // state from the same response, per the drill-down's phased rollout.
+        panelEls.overview.innerHTML = "";
+        panelEls.overview.append(_buildAssetOverviewTab(card, null));
+
+        _fetchAssetPredictiveDetail(card).then((detail) => {
+            if (!_forecastDrawerEl.classList.contains("mira-pred-drawer-open")) return; // closed meanwhile
+            const statusChip = metaRow.children[1]?.querySelector("strong");
+            const updatedChip = metaRow.children[2]?.querySelector("strong");
+            if (statusChip) statusChip.textContent = (detail && detail.asset && detail.asset.status) || "Not available";
+            if (updatedChip) updatedChip.textContent = (detail && detail.last_updated) || "Not available";
+            panelEls.overview.innerHTML = "";
+            panelEls.overview.append(_buildAssetOverviewTab(card, detail));
+
+            panelEls.work_orders.innerHTML = "";
+            panelEls.work_orders.append(
+                detail && detail.work_orders
+                    ? _buildAssetWorkOrdersTab(card, detail.work_orders)
+                    : _buildAssetPlaceholderTab("Work Orders", null)
+            );
+            panelEls.spare_parts.innerHTML = "";
+            panelEls.spare_parts.append(
+                detail && detail.spare_parts
+                    ? _buildAssetSparePartsTab(detail.spare_parts)
+                    : _buildAssetPlaceholderTab("Spare Parts", null)
+            );
+            panelEls.trends.innerHTML = "";
+            panelEls.trends.append(
+                detail && detail.trends
+                    ? _buildAssetTrendsTab(detail.trends)
+                    : _buildAssetPlaceholderTab("Trends", null)
+            );
+            panelEls.recommendations.innerHTML = "";
+            panelEls.recommendations.append(
+                detail && detail.recommendations
+                    ? _buildAssetRecommendationsTab(detail.recommendations)
+                    : _buildAssetPlaceholderTab("Recommendations", null)
+            );
+
+            // AI Insight loads separately (own endpoint, own timeout) so a slow
+            // or unavailable LLM never blocks the rest of the drawer — the
+            // Overview tab already shows the rule-based fallback immediately.
+            if (detail) _fetchAssetAiInsight(card).then((insight) => {
+                if (!insight) return;
+                const aiBody = _forecastDrawerBodyEl.querySelector('[data-ai-insight-body]');
+                if (aiBody) aiBody.textContent = insight;
+            }).catch(() => {});
+        }).catch(() => {
+            if (!_forecastDrawerEl.classList.contains("mira-pred-drawer-open")) return; // closed meanwhile
+            // Reset the chips stuck on "Loading…" and show a real error state on
+            // every tab rather than leaving them spinning forever.
+            const statusChip = metaRow.children[1]?.querySelector("strong");
+            const updatedChip = metaRow.children[2]?.querySelector("strong");
+            if (statusChip) statusChip.textContent = "Unavailable";
+            if (updatedChip) updatedChip.textContent = "Unavailable";
+            panelEls.overview.innerHTML = "";
+            panelEls.overview.append(el("p", "mira-ov-muted", "Could not load full asset detail. Showing what's available from the risk card."));
+            panelEls.overview.append(_buildAssetOverviewTab(card, null));
+            ["work_orders", "spare_parts", "trends", "recommendations"].forEach((key) => {
+                panelEls[key].innerHTML = "";
+                panelEls[key].append(_buildAssetPlaceholderTab(_ASSET_DETAIL_TABS.find(([k]) => k === key)[1], null));
+            });
+        });
+    }
+
+    function _fetchAssetAiInsight(card) {
+        const cacheKey = "ai:" + (card.asset_id || card.asset_name);
+        if (_assetDetailCache.has(cacheKey)) return _assetDetailCache.get(cacheKey);
+        const qs = new URLSearchParams();
+        Object.entries(currentFilters()).forEach(([k, v]) => {
+            if (v !== null && v !== undefined && v !== "") qs.set(k, v);
+        });
+        const req = fetchJsonWithTimeout(
+            `${API}/predictive/assets/${encodeURIComponent(card.asset_id || card.asset_name)}/ai-insight?${qs.toString()}`,
+            { method: "GET", cache: "no-store" },
+            12000
+        ).promise.then((json) => (json && json.ai_insight) || null);
+        _assetDetailCache.set(cacheKey, req);
+        return req;
+    }
+
+    // ── Work Orders tab ──────────────────────────────────────────────────────
+    function _buildAssetWorkOrdersTab(card, rows) {
+        const wrap = el("div", "mira-pred-wo-tab");
+        if (!rows.length) {
+            const empty = el("div", "mira-pred-detail-empty");
+            empty.append(el("p", "mira-ov-muted", "No work order history for this asset."));
+            wrap.append(empty);
+            return wrap;
+        }
+
+        const state = { range: "12m", type: "all", status: "all", customFrom: "", customTo: "" };
+        const toolbar = el("div", "mira-pred-wo-toolbar");
+
+        const rangeSel = el("select", "mira-pred-wo-filter");
+        [["30d", "Last 30 days"], ["90d", "Last 90 days"], ["12m", "Last 12 months"], ["custom", "Custom range"], ["all", "All history"]]
+            .forEach(([val, label]) => { const o = el("option", null, label); o.value = val; rangeSel.append(o); });
+        rangeSel.value = state.range;
+
+        const customWrap = el("span", "mira-pred-wo-custom hidden");
+        const fromInput = el("input"); fromInput.type = "date";
+        const toInput = el("input"); toInput.type = "date";
+        customWrap.append(fromInput, el("span", null, "–"), toInput);
+
+        const typeSel = el("select", "mira-pred-wo-filter");
+        [["all", "Corrective + Preventive"], ["Corrective", "Corrective only"], ["Preventive", "Preventive only"]]
+            .forEach(([val, label]) => { const o = el("option", null, label); o.value = val; typeSel.append(o); });
+
+        const statusSel = el("select", "mira-pred-wo-filter");
+        [["all", "Open + Closed"], ["open", "Open only"], ["closed", "Closed only"]]
+            .forEach(([val, label]) => { const o = el("option", null, label); o.value = val; statusSel.append(o); });
+
+        const exportBtn = el("button", "mira-pred-wo-export", "Export XLSX");
+        exportBtn.type = "button";
+
+        toolbar.append(rangeSel, customWrap, typeSel, statusSel, exportBtn);
+        wrap.append(toolbar);
+
+        const countLine = el("p", "mira-ov-muted mira-pred-wo-count");
+        wrap.append(countLine);
+
+        const tableWrap = el("div", "mira-pred-wo-table-wrap");
+        wrap.append(tableWrap);
+
+        function filtered() {
+            const now = new Date();
+            let from = null;
+            if (state.range === "30d") from = new Date(now.getTime() - 30 * 86400000);
+            else if (state.range === "90d") from = new Date(now.getTime() - 90 * 86400000);
+            else if (state.range === "12m") from = new Date(now.getTime() - 365 * 86400000);
+            else if (state.range === "custom" && state.customFrom) from = new Date(state.customFrom);
+            const to = state.range === "custom" && state.customTo ? new Date(state.customTo) : null;
+
+            return rows.filter((r) => {
+                if (from || to) {
+                    if (!r.date) return false;
+                    const d = new Date(r.date);
+                    if (from && d < from) return false;
+                    if (to && d > to) return false;
+                }
+                if (state.type !== "all" && r.type !== state.type) return false;
+                if (state.status === "open" && !r.is_open) return false;
+                if (state.status === "closed" && r.is_open) return false;
+                return true;
+            });
+        }
+
+        function renderTable() {
+            const list = filtered(); // already sorted newest-first by the backend
+            countLine.textContent = `${list.length.toLocaleString()} of ${rows.length.toLocaleString()} work orders`;
+            tableWrap.innerHTML = "";
+            if (!list.length) {
+                tableWrap.append(el("p", "mira-ov-muted", "No work orders match the current filters."));
+                return;
+            }
+            const table = el("table", "mira-pred-wo-table");
+            table.innerHTML = "<thead><tr>"
+                + ["Date", "MR / WO", "Type", "Issue Category", "Status", "Severity", "Downtime (h)", "Owner", ""]
+                    .map((h) => `<th>${escOv(h)}</th>`).join("")
+                + "</tr></thead>";
+            const tbody = el("tbody");
+            list.slice(0, 300).forEach((r) => {
+                const tr = el("tr");
+                // Stacked on separate lines (not "A / B" on one line) so long
+                // WO/MR numbers wrap at the natural break instead of splitting
+                // mid-digit-string when the column is narrow.
+                const numberText = [r.wo_number, r.mr_number].filter(Boolean).map(escOv).join("<br>") || "—";
+                tr.innerHTML = [
+                    r.date || "—",
+                    numberText,
+                    r.type,
+                    escOv(r.issue_category || "—"),
+                    r.status,
+                    escOv(r.severity != null ? String(r.severity) : "—"),
+                    r.downtime_hours != null ? r.downtime_hours.toLocaleString() : "—",
+                    escOv(r.owner || "—"),
+                    "",
+                ].map((v, i) => (i === 8 ? "<td></td>" : `<td>${v}</td>`)).join("");
+                const expandBtn = el("button", "mira-pred-wo-expand", "▾");
+                expandBtn.type = "button";
+                expandBtn.title = "View details";
+                tr.lastElementChild.append(expandBtn);
+                tbody.append(tr);
+
+                const detailRow = el("tr", "mira-pred-wo-detail-row hidden");
+                const detailCell = el("td");
+                detailCell.colSpan = 9;
+                detailCell.append(
+                    _drawerKV("Original description", r.description || "Not available"),
+                    _drawerKV("Cleaned description", r.cleaned_description || "Not available"),
+                    _drawerKV("Actual start", r.actual_start || "Not available"),
+                    _drawerKV("Actual end", r.actual_end || "Not available"),
+                );
+                detailRow.append(detailCell);
+                tbody.append(detailRow);
+                expandBtn.addEventListener("click", () => detailRow.classList.toggle("hidden"));
+            });
+            table.append(tbody);
+            tableWrap.append(table);
+            if (list.length > 300) {
+                tableWrap.append(el("p", "mira-ov-muted", `Showing the first 300 of ${list.length.toLocaleString()} matching records — narrow the filters to see more precisely.`));
+            }
+        }
+
+        rangeSel.addEventListener("change", () => {
+            state.range = rangeSel.value;
+            customWrap.classList.toggle("hidden", state.range !== "custom");
+            renderTable();
+        });
+        fromInput.addEventListener("change", () => { state.customFrom = fromInput.value; renderTable(); });
+        toInput.addEventListener("change", () => { state.customTo = toInput.value; renderTable(); });
+        typeSel.addEventListener("change", () => { state.type = typeSel.value; renderTable(); });
+        statusSel.addEventListener("change", () => { state.status = statusSel.value; renderTable(); });
+        exportBtn.addEventListener("click", () => _exportAssetWorkOrders(card, filtered()));
+
+        renderTable();
+        return wrap;
+    }
+
+    function _exportAssetWorkOrders(card, rows) {
+        if (typeof XLSX === "undefined") {
+            window.alert("Export library did not load. Check your connection and try again.");
+            return;
+        }
+        const headers = ["Date", "WO Number", "MR Number", "Type", "Issue Category", "Original Description",
+            "Cleaned Description", "Status", "Severity", "Actual Start", "Actual End", "Downtime (hours)", "Owner"];
+        const aoa = [headers].concat(rows.map((r) => [
+            r.date || "", r.wo_number || "", r.mr_number || "", r.type || "", r.issue_category || "",
+            r.description || "", r.cleaned_description || "", r.status || "", r.severity != null ? r.severity : "",
+            r.actual_start || "", r.actual_end || "", r.downtime_hours != null ? r.downtime_hours : "", r.owner || "",
+        ]));
+        const ws = XLSX.utils.aoa_to_sheet(aoa);
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, "WO-MR History");
+        const safeName = String(card.asset_name || "asset").replace(/[^a-z0-9]+/gi, "_").slice(0, 40);
+        const stamp = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+        XLSX.writeFile(wb, `WO-MR_${safeName}_${stamp}.xlsx`);
+    }
+
+    // ── Spare Parts tab ───────────────────────────────────────────────────────
+    const _STOCK_STATUS_TONE = {
+        "Out of Stock": "high", "Below Minimum": "medium", "At Minimum": "medium",
+        "Available": "low", "Unknown": "neutral",
+    };
+
+    function _buildAssetSparePartsTab(sp) {
+        const wrap = el("div", "mira-pred-sp-tab");
+        if (!sp.has_mapping) {
+            const empty = el("div", "mira-pred-detail-empty");
+            empty.append(el("p", "mira-ov-muted", sp.no_mapping_message || "No validated spare-part mapping is available for this asset."));
+            wrap.append(empty);
+            return wrap;
+        }
+
+        if (sp.readiness) {
+            const readySec = _drawerSection("Spare Part Readiness");
+            const r = sp.readiness;
+            readySec.append(_drawerKV("Likely required for", r.likely_required_for || "Not available"));
+            readySec.append(_drawerKV("Parts available", r.parts_available == null ? "Unknown" : (r.parts_available ? "Yes" : "No")));
+            readySec.append(_drawerKV("Replenishment may be needed", r.replenishment_may_be_needed == null ? "Unknown" : (r.replenishment_may_be_needed ? "Yes" : "No")));
+            if (r.low_stock_parts && r.low_stock_parts.length) {
+                readySec.append(_drawerKV("Low-stock parts", r.low_stock_parts.join(", ")));
+            }
+            wrap.append(readySec);
+        }
+
+        if (sp.on_hand && sp.on_hand.length) {
+            const invSec = _drawerSection("On-Hand Inventory");
+            const table = el("table", "mira-pred-sp-table");
+            table.innerHTML = "<thead><tr>" + ["Part", "Item Code", "On Hand", "Min", "Max", "On Order", "Status"].map((h) => `<th>${escOv(h)}</th>`).join("") + "</tr></thead>";
+            const tbody = el("tbody");
+            sp.on_hand.forEach((row) => {
+                const tone = _STOCK_STATUS_TONE[row.stock_status] || "neutral";
+                const tr = el("tr");
+                tr.innerHTML = [
+                    escOv(row.part_name || "—"), escOv(row.item_code || "—"),
+                    row.on_hand != null ? row.on_hand : "—", row.min_stock != null ? row.min_stock : "—",
+                    row.max_stock != null ? row.max_stock : "—", row.on_order != null ? row.on_order : "—",
+                    `<span class="mira-ov-risk-badge mira-ov-risk-${tone}">${escOv(row.stock_status)}</span>`,
+                ].map((v) => `<td>${v}</td>`).join("");
+                tbody.append(tr);
+            });
+            table.append(tbody);
+            invSec.append(table);
+            wrap.append(invSec);
+        }
+
+        const fromPurchase = sp.usage_source === "purchase_records";
+        const usageSec = _drawerSection(fromPurchase ? "Usage (from Gen PO purchase records)" : "Usage");
+        if (fromPurchase) {
+            usageSec.append(el("p", "mira-ov-muted", "No store-issue transactions found for this asset — figures below are purchase quantities from Gen PO, not confirmed consumption."));
+        }
+        usageSec.append(_drawerKV(fromPurchase ? "Purchased in last 30 days" : "Used in last 30 days", sp.usage_last_30_days != null ? sp.usage_last_30_days : "Not available"));
+        usageSec.append(_drawerKV(fromPurchase ? "Purchased in last 90 days" : "Used in last 90 days", sp.usage_last_90_days != null ? sp.usage_last_90_days : "Not available"));
+        usageSec.append(_drawerKV(fromPurchase ? "Last purchase date" : "Last issued date", sp.last_issued_date || "Not available"));
+        wrap.append(usageSec);
+
+        if (sp.transactions && sp.transactions.length) {
+            const txSec = _drawerSection(`Recent Transactions (${sp.transactions.length})`);
+            const table = el("table", "mira-pred-sp-table");
+            table.innerHTML = "<thead><tr>" + ["Date", "Part", "Qty", "Value"].map((h) => `<th>${escOv(h)}</th>`).join("") + "</tr></thead>";
+            const tbody = el("tbody");
+            sp.transactions.slice(0, 20).forEach((t) => {
+                const tr = el("tr");
+                tr.innerHTML = [t.date || "—", escOv(t.part_name || "—"), t.quantity != null ? t.quantity : "—", t.value != null ? t.value : "—"]
+                    .map((v) => `<td>${v}</td>`).join("");
+                tbody.append(tr);
+            });
+            table.append(tbody);
+            txSec.append(table);
+            wrap.append(txSec);
+        }
+
+        if (sp.data_gaps && sp.data_gaps.length) {
+            const gapsSec = _drawerSection("Data Notes");
+            gapsSec.append(el("p", "mira-ov-muted", sp.data_gaps.join(" ")));
+            wrap.append(gapsSec);
+        }
+
+        return wrap;
+    }
+
+    // ── Trends tab ────────────────────────────────────────────────────────────
+    function _buildAssetTrendsTab(trends) {
+        const wrap = el("div", "mira-pred-trends-tab");
+        const hasMonthly = trends.monthly && trends.monthly.some((m) => m.total_count > 0);
+        if (!hasMonthly) {
+            const empty = el("div", "mira-pred-detail-empty");
+            empty.append(el("p", "mira-ov-muted", "Not enough history to plot trends for this asset."));
+            wrap.append(empty);
+            return wrap;
+        }
+
+        const pvc = trends.preventive_vs_corrective || { preventive: 0, corrective: 0 };
+        const pvcTotal = pvc.preventive + pvc.corrective;
+        const pvcSec = _drawerSection("Preventive vs Corrective (12 months)");
+        if (pvcTotal > 0) {
+            const bar = el("div", "mira-pred-pvc-bar");
+            const prevPct = Math.round((pvc.preventive / pvcTotal) * 100);
+            const prevSeg = el("div", "mira-pred-pvc-seg mira-pred-pvc-preventive");
+            prevSeg.style.width = prevPct + "%";
+            prevSeg.title = `Preventive: ${pvc.preventive} (${prevPct}%)`;
+            const corrSeg = el("div", "mira-pred-pvc-seg mira-pred-pvc-corrective");
+            corrSeg.style.width = (100 - prevPct) + "%";
+            corrSeg.title = `Corrective: ${pvc.corrective} (${100 - prevPct}%)`;
+            bar.append(prevSeg, corrSeg);
+            pvcSec.append(bar);
+            pvcSec.append(_drawerKV("Preventive", `${pvc.preventive} (${prevPct}%)`));
+            pvcSec.append(_drawerKV("Corrective", `${pvc.corrective} (${100 - prevPct}%)`));
+        } else {
+            pvcSec.append(el("p", "mira-ov-muted", "Not available"));
+        }
+        wrap.append(pvcSec);
+
+        const chartsSec = _drawerSection("Monthly Corrective WO Count");
+        const canvas1 = document.createElement("canvas");
+        canvas1.className = "mira-pred-trend-canvas";
+        chartsSec.append(canvas1);
+        wrap.append(chartsSec);
+
+        const mtbfSec = _drawerSection("MTBF Trend (days)");
+        const mtbfHasData = (trends.mtbf_trend || []).some((m) => m.mtbf_days != null);
+        if (mtbfHasData) {
+            const canvas2 = document.createElement("canvas");
+            canvas2.className = "mira-pred-trend-canvas";
+            mtbfSec.append(canvas2);
+        } else {
+            mtbfSec.append(el("p", "mira-ov-muted", "Not enough clean intervals for a reliable MTBF trend."));
+        }
+        wrap.append(mtbfSec);
+
+        // Charts render after the panel is in the DOM (canvas needs real layout
+        // dimensions) — defer one frame.
+        window.requestAnimationFrame(() => {
+            if (typeof Chart === "undefined") return;
+            const labels = trends.monthly.map((m) => m.month);
+            new Chart(canvas1, {
+                type: "bar",
+                data: { labels, datasets: [{ label: "Corrective WOs", data: trends.monthly.map((m) => m.corrective_count), backgroundColor: "#dc2626" }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, ticks: { precision: 0 } } } },
+            });
+            if (mtbfHasData) {
+                const canvas2 = mtbfSec.querySelector("canvas");
+                new Chart(canvas2, {
+                    type: "line",
+                    data: { labels: trends.mtbf_trend.map((m) => m.month), datasets: [{ label: "MTBF (days)", data: trends.mtbf_trend.map((m) => m.mtbf_days), borderColor: "#2563eb", backgroundColor: "rgba(37,99,235,0.1)", spanGaps: true, tension: 0.25 }] },
+                    options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } } },
+                });
+            }
+        });
+
+        return wrap;
+    }
+
+    // ── Recommendations tab ──────────────────────────────────────────────────
+    function _buildAssetRecommendationsTab(rec) {
+        const wrap = el("div", "mira-pred-rec-tab");
+        const tone = _riskTone(rec.priority);
+
+        const prioSec = _drawerSection("Priority");
+        prioSec.append(el("span", "mira-ov-risk-badge mira-ov-risk-" + tone, rec.priority || "Low"));
+        wrap.append(prioSec);
+
+        const evSec = _drawerSection("Main Evidence");
+        if (rec.evidence && rec.evidence.length) {
+            const ul = el("ul", "mira-pred-risk-list");
+            rec.evidence.forEach((e) => ul.append(el("li", null, e)));
+            evSec.append(ul);
+        } else {
+            evSec.append(el("p", "mira-ov-muted", "Not available"));
+        }
+        wrap.append(evSec);
+
+        const actSec = _drawerSection("Recommended Engineering Review");
+        const ul2 = el("ul", "mira-pred-risk-list");
+        (rec.recommended_actions || []).forEach((a) => ul2.append(el("li", null, a)));
+        actSec.append(ul2);
+        wrap.append(actSec);
+
+        const followSec = _drawerSection("Follow-Up");
+        followSec.append(_drawerKV("PM follow-up", rec.pm_follow_up || "Not available"));
+        followSec.append(_drawerKV("Open WO follow-up", rec.open_wo_follow_up || "Not available"));
+        followSec.append(_drawerKV(
+            "Spare-parts readiness",
+            rec.spare_parts_readiness
+                ? (rec.spare_parts_readiness.parts_available == null ? "Unknown" : (rec.spare_parts_readiness.parts_available ? "Available" : "Replenishment may be needed"))
+                : "No validated spare-part mapping is available for this asset."
+        ));
+        followSec.append(_drawerKV("Potential production concern", rec.potential_production_concern ? "Yes" : "No"));
+        wrap.append(followSec);
+
+        return wrap;
+    }
+
+    function _buildAssetPlaceholderTab(label, data) {
+        const wrap = el("div", "mira-pred-detail-empty");
+        if (data) {
+            // Populated in a later phase of this feature — structural container
+            // is already wired to real data once that phase lands.
+            wrap.append(el("p", "mira-ov-muted", `${label} data is available but not yet rendered here.`));
+        } else {
+            wrap.append(el("p", "mira-ov-muted", `${label} isn't available for this asset yet.`));
+        }
+        return wrap;
+    }
+
+    function _buildAssetOverviewTab(card, detail) {
+        const wrap = el("div");
+
+        // A. Risk Score Breakdown
+        const scoreSec = _drawerSection(`Risk Score: ${card.risk_score || 0} / 10`);
+        const contributors = (detail && detail.risk && detail.risk.contributors) || card.main_signals || [];
+        contributors.forEach((s) => {
+            let valueText = "";
+            if (s.value && typeof s.value === "object") {
+                valueText = Object.entries(s.value).map(([k, v]) => `${k.replace(/_/g, " ")}: ${v}`).join(", ");
+            } else if (s.value !== undefined && s.value !== true) {
+                valueText = String(s.value);
+            }
+            scoreSec.append(_drawerKV(`${s.label} (+${s.points})`, valueText || "—"));
+        });
+        const otherIndicators = (detail && detail.risk && detail.risk.other_assessed_indicators) || [];
+        if (otherIndicators.length) {
+            const details = document.createElement("details");
+            details.className = "mira-pred-other-details";
+            const summary = document.createElement("summary");
+            summary.textContent = `Other assessed indicators (${otherIndicators.length})`;
+            details.append(summary);
+            otherIndicators.forEach((r) => {
+                details.append(_drawerKV(r.label, "not triggered"));
+            });
+            scoreSec.append(details);
+        }
+        wrap.append(scoreSec);
+
+        // B. Latest Maintenance Pattern
+        const pattern = (detail && detail.patterns) || card.latest_recurring_issue_pattern || {};
+        const patternSec = _drawerSection("Latest Maintenance Pattern");
+        patternSec.append(_drawerKV("Recurring issue category", pattern.issue || "Not available"));
+        patternSec.append(_drawerKV("Similar cases", pattern.count != null ? pattern.count : "Not available"));
+        patternSec.append(_drawerKV("Latest observed date", pattern.latest_date || "Not available"));
+        patternSec.append(_drawerKV("Description", pattern.latest_description || "Not available"));
+        wrap.append(patternSec);
+
+        // C. Current Maintenance Status
+        const statusSec = _drawerSection("Current Maintenance Status");
+        const ms = (detail && detail.maintenance_status) || {};
+        const openStatus = card.open_wo_status || {};
+        statusSec.append(_drawerKV("Open WO count", ms.open_wo_count != null ? ms.open_wo_count : (openStatus.count != null ? openStatus.count : "Not available")));
+        statusSec.append(_drawerKV("Oldest open WO age (days)", ms.oldest_open_wo_days != null ? ms.oldest_open_wo_days : (openStatus.oldest_age_days != null ? openStatus.oldest_age_days : "Not available")));
+        statusSec.append(_drawerKV("Latest PM date", ms.latest_pm_date || "Not available"));
+        statusSec.append(_drawerKV("Next PM due date", ms.next_pm_date || "Not available"));
+        statusSec.append(_drawerKV("PM overdue", ms.pm_overdue == null ? "Not available" : (ms.pm_overdue ? "Yes" : "No")));
+        statusSec.append(_drawerKV("MTTR (hours)", ms.mttr_hours != null ? ms.mttr_hours : "Not available"));
+        statusSec.append(_drawerKV("Current MTBF (days)", ms.mtbf_days != null ? ms.mtbf_days : "Not available"));
+        statusSec.append(_drawerKV(
+            "MTBF vs previous period",
+            ms.mtbf_changed_vs_previous_period && ms.mtbf_change_detail
+                ? `decreased (${ms.mtbf_change_detail.current_days}d vs ${ms.mtbf_change_detail.previous_days}d)`
+                : "Not available"
+        ));
+        wrap.append(statusSec);
+
+        // D. AI Insight — lands in a later phase; real not-yet-available state,
+        // not a fake summary.
+        const aiSec = _drawerSection("AI Insight");
+        const aiBody = el("p", detail && detail.ai_insight ? null : "mira-ov-muted");
+        aiBody.dataset.aiInsightBody = "true";
+        aiBody.textContent = (detail && detail.ai_insight) || (
+            card.suggested_maintenance_action
+                ? `Suggested action: ${card.suggested_maintenance_action}`
+                : "AI-generated insight isn't available for this asset yet."
+        );
+        aiSec.append(aiBody);
+        wrap.append(aiSec);
+
+        return wrap;
     }
 
     function _trendIcon(trend) {
@@ -754,66 +1514,109 @@
     }
 
     function _buildPredictiveWordingInput(m) {
-        var domCnt = m.dominant_count || m.mr_count || 0;
-        var total = m.mr_count || domCnt || 0;
-        var pct = total ? Math.round((Number(domCnt || 0) / Number(total || 1)) * 100) + "%" : "";
-        var parts = (m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts || [])
-            .slice(0, 5)
-            .map(_partDisplayName)
-            .filter(Boolean);
+        var domCnt = m.history_issue_count || m.dominant_count || 0;
+        var total = m.history_mr_count || m.mr_count || domCnt || 0;
+        var spareParts = m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts || [];
+        var rawSparePartsForTranslation = spareParts.slice(0, 5)
+            .map(function(p) { return { originalName: _partDisplayName(p) }; })
+            .filter(function(p) { return p.originalName && p.originalName !== "Spare part"; });
         return {
             machine: _forecastMachineName(m),
             selectedIssue: _forecastIssueLabel(m),
             mrCount: domCnt,
             totalMachineMr: total,
-            percentage: pct,
             latestOccurrence: m.cluster_last_occurrence || m.last_occurrence || null,
+            nextLikelyWindow: m.likely_recurrence_label || m.recurrence_gauge || null,
             medianInterval: m.recurrence_interval_days != null ? String(m.recurrence_interval_days) + " days" : null,
             relatedKeywords: uniqueStrings(m.symptom_keywords || []).slice(0, 8),
             likelyCause: m.likely_cause_candidate || "",
-            sparePartsToPrepare: parts,
             stockDecision: _forecastStockDecisionText(m),
+            rawSparePartsForTranslation: rawSparePartsForTranslation,
         };
+    }
+
+    function _naturalList(items, conjunction) {
+        if (!items || !items.length) return "";
+        if (items.length === 1) return items[0];
+        return items.slice(0, -1).join(", ") + ", " + (conjunction || "and") + " " + items[items.length - 1];
     }
 
     function _fallbackPredictiveWording(m) {
         var data = _buildPredictiveWordingInput(m);
-        var bits = [data.machine + " has repeated " + data.selectedIssue + " records"];
-        if (data.mrCount && data.totalMachineMr) bits.push("appearing in " + data.mrCount + " of " + data.totalMachineMr + " MR records");
-        if (data.percentage) bits.push("(" + data.percentage + ")");
-        if (data.latestOccurrence) bits.push("latest case " + _formatPredictiveDate(data.latestOccurrence));
-        if (data.relatedKeywords.length) bits.push("keywords: " + data.relatedKeywords.slice(0, 5).join(", "));
-        var action = data.likelyCause || ("Inspect the machine area related to " + data.selectedIssue + ".");
-        if (data.sparePartsToPrepare.length) action += " Prepare: " + data.sparePartsToPrepare.join(", ") + ".";
-        action += " " + data.stockDecision;
+        var issueLabel = data.selectedIssue.toLowerCase().replace(/[.]+$/, "");
+        var summary = data.machine + " is showing a recurring " + issueLabel + ".";
+        if (data.mrCount && data.totalMachineMr) {
+            summary += " This issue appeared in " + data.mrCount + " of " + data.totalMachineMr + " MR records";
+            if (data.latestOccurrence) summary += ", with the latest occurrence on " + _formatPredictiveDate(data.latestOccurrence);
+            summary += ".";
+        } else if (data.latestOccurrence) {
+            summary += " The latest occurrence was on " + _formatPredictiveDate(data.latestOccurrence) + ".";
+        }
+        if (data.nextLikelyWindow && !/not enough|insufficient|monitor/i.test(data.nextLikelyWindow)) {
+            summary += " Based on the recorded intervals, the next likely occurrence is " + data.nextLikelyWindow.toLowerCase() + ".";
+        }
+        if (data.relatedKeywords.length) {
+            var kws = data.relatedKeywords.slice(0, 3);
+            var kwStr = _naturalList(kws, "and");
+            var kwLower = data.relatedKeywords.join(" ").toLowerCase();
+            var damageTypes = ["wear"];
+            if (/leak|water|fluid|oil|wet|drip/.test(kwLower)) damageTypes.push("leakage");
+            if (/block|clog|jam|stuck/.test(kwLower)) damageTypes.push("blockage");
+            if (/rust|corrode|oxidiz/.test(kwLower)) damageTypes.push("corrosion");
+            damageTypes.push("damage");
+            var damageStr = _naturalList(damageTypes.slice(0, 3), "or");
+            summary += " Repeated keywords include " + kwStr + ", suggesting possible " + damageStr + " in related components.";
+        }
+        var inspectLine = data.likelyCause
+            ? "Inspect " + data.likelyCause + "."
+            : "Inspect the area related to " + issueLabel + " for leakage, looseness, or wear.";
+        var action = [
+            inspectLine,
+            "Prepare the related spare parts listed below before the next repair.",
+            data.stockDecision || "Check store quantity first. If stock is unavailable or below minimum, raise a purchase request using Gen PO vendor/price history as reference.",
+        ].join("\n\n");
         return {
-            faultPatternSummary: bits.join(". ") + ".",
-            suggestedAction: action,
-            technicianNote: "Technician/Engineer verification required before action.",
+            faultPatternSummary: summary,
+            recommendedAction: action,
+            technicianNote: "Please verify the actual condition onsite before repair. Gen PO history should only be used to support vendor or purchase review, not as final confirmation of store availability.",
+            translatedSpareParts: [],
         };
+    }
+
+    function _renderWordingText(container, text) {
+        container.innerHTML = "";
+        if (!text || text === "—") { container.textContent = "—"; return; }
+        var paras = String(text).split(/\n\n+/);
+        if (paras.length <= 1) { container.textContent = text; return; }
+        paras.forEach(function(para) {
+            var p = document.createElement("p");
+            p.className = "mira-pred-wording-para";
+            p.textContent = para.trim();
+            container.appendChild(p);
+        });
     }
 
     function _buildWordingBlock(label, text) {
         var block = el("div", "mira-pred-detail-block mira-pred-wording-block");
         block.append(el("div", "mira-pred-detail-label", label));
-        block.append(el("div", "mira-pred-detail-value", text || "—"));
+        var valueEl = el("div", "mira-pred-detail-value");
+        _renderWordingText(valueEl, text || "—");
+        block.append(valueEl);
         return block;
     }
 
     function _buildPredictiveWordingSection(m) {
         var fallback = _fallbackPredictiveWording(m);
-        var section = _drawerSection("Fault Pattern Summary");
+        var section = _drawerSection("Suggested Maintenance Action");
         section.classList.add("mira-pred-wording-section");
         var grid = el("div", "mira-pred-wording-grid");
         var summary = _buildWordingBlock("Fault Pattern Summary", fallback.faultPatternSummary);
-        var action = _buildWordingBlock("Suggested Action", fallback.suggestedAction);
-        var note = _buildWordingBlock("Technician Note", fallback.technicianNote);
-        grid.append(summary, action, note);
+        var action = _buildWordingBlock("Suggested Action", fallback.recommendedAction);
+        grid.append(summary, action);
         section.append(grid);
         section._wordingNodes = {
             summary: summary.querySelector(".mira-pred-detail-value"),
             action: action.querySelector(".mira-pred-detail-value"),
-            note: note.querySelector(".mira-pred-detail-value"),
         };
         return section;
     }
@@ -829,18 +1632,35 @@
         ].join("|");
     }
 
-    function _applyPredictiveWording(section, wording) {
-        if (!section || !section._wordingNodes || !wording) return;
-        section._wordingNodes.summary.textContent = wording.faultPatternSummary || section._wordingNodes.summary.textContent;
-        section._wordingNodes.action.textContent = wording.suggestedAction || section._wordingNodes.action.textContent;
-        section._wordingNodes.note.textContent = wording.technicianNote || "Technician/Engineer verification required before action.";
+    function _applySpareKitTranslations(spareKitEl, translatedParts) {
+        if (!spareKitEl || !translatedParts || !translatedParts.length) return;
+        var map = {};
+        translatedParts.forEach(function(t) { if (t.originalName) map[t.originalName.trim()] = t; });
+        spareKitEl.querySelectorAll("[data-spare-orig]").forEach(function(engEl) {
+            var t = map[(engEl.dataset.spareOrig || "").trim()];
+            if (!t) return;
+            engEl.textContent = "English: " + (t.englishName || "Translation to verify");
+            if ((t.translationConfidence || "low") === "low") engEl.classList.add("mira-pred-trans-unverified");
+            else engEl.classList.remove("mira-pred-trans-unverified");
+        });
     }
 
-    function _requestPredictiveWording(m, section) {
+    function _applyPredictiveWording(section, wording, spareKitEl) {
+        if (!section || !section._wordingNodes || !wording) return;
+        var nodes = section._wordingNodes;
+        if (wording.faultPatternSummary) nodes.summary.textContent = wording.faultPatternSummary;
+        var actionText = wording.recommendedAction || wording.suggestedAction;
+        if (actionText) _renderWordingText(nodes.action, actionText);
+        if (spareKitEl && wording.translatedSpareParts && wording.translatedSpareParts.length) {
+            _applySpareKitTranslations(spareKitEl, wording.translatedSpareParts);
+        }
+    }
+
+    function _requestPredictiveWording(m, section, spareKitEl) {
         var key = _predictiveWordingCacheKey(m);
         section.dataset.wordingKey = key;
         if (predictiveWordingCache[key]) {
-            _applyPredictiveWording(section, predictiveWordingCache[key]);
+            _applyPredictiveWording(section, predictiveWordingCache[key], spareKitEl);
             return;
         }
         var request = fetchJsonWithTimeout(`${API}/predictive-wording`, {
@@ -857,7 +1677,7 @@
                 var wording = json && json.wording;
                 if (!wording || section.dataset.wordingKey !== key) return;
                 predictiveWordingCache[key] = wording;
-                _applyPredictiveWording(section, wording);
+                _applyPredictiveWording(section, wording, spareKitEl);
             })
             .catch(function() {
                 debugLog("predictive-wording:fallback", { key: key });
@@ -878,8 +1698,8 @@
         if (dueLbl && !/not enough history|insufficient/i.test(dueLbl)) {
             recRows.push(["Recurrence timing", dueLbl]);
         }
-        if (m.recurrence_interval_n != null && m.dominant_count != null) {
-            recRows.push(["Based on", m.recurrence_interval_n + " intervals from " + m.dominant_count + " cluster records"]);
+        if (m.recurrence_interval_n != null && (m.history_issue_count != null || m.dominant_count != null)) {
+            recRows.push(["Based on", m.recurrence_interval_n + " intervals from " + (m.history_issue_count || m.dominant_count) + " matching history MRs"]);
         }
         if (recRows.length) {
             var recDetail = el("div", "mira-pred-recurrence-detail");
@@ -1059,7 +1879,7 @@
         var wrap = el("div", "mira-pred-drawer-content");
         var timing = m.timing || {};
 
-        // 1. Forecast Summary
+        // ── 1. Forecast Summary ──────────────────────────────────────────────
         var secSum = _drawerSection("Forecast Summary");
         var dueLabel = m.likely_recurrence_label || m.recurrence_gauge || "Not enough history";
         secSum.append(_drawerKV("Next Likely Window", dueLabel));
@@ -1076,24 +1896,7 @@
         secSum.append(confKV);
         wrap.append(secSum);
 
-        // 2. Issue Signature
-        var issueCluster = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
-        var secIssue = _drawerSection("Issue Signature");
-        var pillWrap = el("div", "mira-pred-drawer-issue-pill-wrap");
-        pillWrap.append(el("span", "mira-pred-issue-pill " + _issuePillClass(issueCluster), issueCluster));
-        secIssue.append(pillWrap);
-        var proof = (m.issue && m.issue.proof) || "";
-        if (proof) secIssue.append(el("p", "mira-pred-drawer-proof", proof));
-        var symptomTerms = uniqueStrings(m.symptom_keywords || []).slice(0, 8);
-        if (symptomTerms.length) {
-            secIssue.append(el("div", "mira-pred-inline-label", "Related keywords"));
-            var chips = el("div", "mira-pred-chip-row");
-            symptomTerms.forEach(function(t) { chips.append(el("span", "mira-pred-issue-chip", t)); });
-            secIssue.append(chips);
-        }
-        wrap.append(secIssue);
-
-        // 3. Evidence Summary
+        // ── 2. Evidence Summary ──────────────────────────────────────────────
         var secEv = _drawerSection("Evidence Summary");
         var evRows = [];
         var clusterDate = m.cluster_last_occurrence || m.last_occurrence;
@@ -1117,12 +1920,35 @@
         secEv.append(evTbl);
         wrap.append(secEv);
 
-        // 4. Optional wording layer (Ollama if available; rule-based fallback immediately)
-        var wordingSection = _buildPredictiveWordingSection(m);
-        wrap.append(wordingSection);
-        window.setTimeout(function() { _requestPredictiveWording(m, wordingSection); }, 0);
+        // ── 3. Issue Signature ───────────────────────────────────────────────
+        var issueCluster = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
+        var secIssue = _drawerSection("Issue Signature");
+        var pillWrap = el("div", "mira-pred-drawer-issue-pill-wrap");
+        pillWrap.append(el("span", "mira-pred-issue-pill " + _issuePillClass(issueCluster), issueCluster));
+        secIssue.append(pillWrap);
+        if (m.pattern_type) {
+            var ptClass = "mira-pred-pattern-type";
+            if (/corrective|breakdown/i.test(m.pattern_type)) ptClass += " mira-pred-pattern-corrective";
+            else if (/preventive|routine/i.test(m.pattern_type)) ptClass += " mira-pred-pattern-preventive";
+            var ptText = m.pattern_type;
+            if (m.history_issue_count != null && m.history_mr_count != null) {
+                ptText += " \xb7 " + m.history_issue_count + " of " + m.history_mr_count + " history MRs";
+            }
+            if (m.recurring_pct != null) ptText += " \xb7 " + m.recurring_pct + "%";
+            secIssue.append(el("div", ptClass, ptText));
+        }
+        var proof = (m.issue && m.issue.proof) || m.matched_wording || m.latest_issue_description || "";
+        if (proof) secIssue.append(el("p", "mira-pred-drawer-proof", proof));
+        var symptomTerms = uniqueStrings(m.symptom_keywords || []).slice(0, 8);
+        if (symptomTerms.length) {
+            secIssue.append(el("div", "mira-pred-inline-label", "Related keywords"));
+            var chips = el("div", "mira-pred-chip-row");
+            symptomTerms.forEach(function(t) { chips.append(el("span", "mira-pred-issue-chip", t)); });
+            secIssue.append(chips);
+        }
+        wrap.append(secIssue);
 
-        // 4. Likely Cause Candidate
+        // ── 4. Likely Cause Candidate ────────────────────────────────────────
         if (m.likely_cause_candidate) {
             var secCause = _drawerSection("Likely Cause Candidate");
             secCause.append(el("p", "mira-pred-cause-copy", m.likely_cause_candidate));
@@ -1130,33 +1956,78 @@
             wrap.append(secCause);
         }
 
-        // 5. Spare-Part Signal
-        var secSpare = _drawerSection("Spare-Part Signal");
-        var spareStatusRow = el("div", "mira-pred-drawer-spare-status");
-        var stockStatus = m.stock_status || "Unknown";
-        spareStatusRow.append(_buildStockBadge(stockStatus));
-        if (m.spare_lead && m.spare_lead.item_label) {
-            spareStatusRow.append(el("span", "mira-pred-drawer-spare-name", m.spare_lead.item_label));
-        } else if (!m.spare_available) {
-            spareStatusRow.append(el("span", "mira-pred-detail-muted", "No spare-part support found in records."));
+        // ── 5. Spare Parts to Prepare ────────────────────────────────────────
+        var spareKitListEl = null;
+        var _allSpares = (m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts || []);
+        if (!_allSpares.length) _allSpares = m.spare_kit || [];
+
+        var secSpare = _drawerSection("Spare Parts to Prepare");
+        if (!_allSpares.length) {
+            var spareStatusRow = el("div", "mira-pred-drawer-spare-status");
+            spareStatusRow.append(_buildStockBadge(m.stock_status || "Unknown"));
+            if (!m.spare_available) {
+                spareStatusRow.append(el("span", "mira-pred-detail-muted", "No spare-part support found in records."));
+            }
+            secSpare.append(spareStatusRow);
+        } else {
+            spareKitListEl = el("div", "mira-pred-spare-kit-list");
+            _allSpares.slice(0, 5).forEach(function(p, idx) {
+                var origName = _partDisplayName(p);
+                var hasThai = /[฀-๿]/.test(origName);
+                var itemCode = _partItemCode(p);
+                var item = el("div", "mira-pred-spare-kit-item");
+                var nameRow = el("div", "mira-pred-spare-kit-name");
+                nameRow.append(el("span", "mira-pred-spare-kit-idx", (idx + 1) + "."));
+                nameRow.append(document.createTextNode(itemCode ? origName + " \xb7 " + itemCode : origName));
+                item.append(nameRow);
+                if (hasThai || (typeof p === "object" && p && p.english_name)) {
+                    var engEl = el("div", "mira-pred-spare-kit-eng");
+                    engEl.dataset.spareOrig = origName;
+                    engEl.textContent = (typeof p === "object" && p && p.english_name)
+                        ? "English: " + p.english_name
+                        : "English: Translation to verify";
+                    item.append(engEl);
+                }
+                var metaRow = el("div", "mira-pred-spare-kit-meta");
+                if (typeof p === "object" && p && p.match_reason) {
+                    metaRow.append(el("span", "mira-pred-spare-kit-reason", "Reason: " + p.match_reason));
+                }
+                metaRow.append(_buildStockBadge(
+                    typeof p === "object" && p ? (p.stock_status || "Verify manually") : "Verify manually"
+                ));
+                if (typeof p === "object" && p && p.purchase_recommendation) {
+                    metaRow.append(el("span", "mira-pred-spare-kit-action", p.purchase_recommendation));
+                }
+                item.append(metaRow);
+                spareKitListEl.append(item);
+            });
+            if (_allSpares.length > 5) {
+                var moreD = document.createElement("details");
+                moreD.className = "mira-pred-other-details";
+                moreD.append(el("summary", null, "View all related parts (" + _allSpares.length + ")"));
+                _allSpares.slice(5).forEach(function(p) {
+                    moreD.append(el("div", "mira-pred-other-detail-line",
+                        _partDisplayName(p) + (typeof p === "object" && p && p.stock_status ? " — " + p.stock_status : "")));
+                });
+                spareKitListEl.append(moreD);
+            }
+            secSpare.append(spareKitListEl);
         }
-        secSpare.append(spareStatusRow);
-        var spareKit = m.spare_kit || [];
-        if (spareKit.length) {
-            secSpare.append(el("div", "mira-pred-inline-label", "Spare family"));
-            var kitChips = el("div", "mira-pred-chip-row");
-            spareKit.slice(0, 5).forEach(function(s) { kitChips.append(el("span", "mira-pred-issue-chip", _partDisplayName(s))); });
-            secSpare.append(kitChips);
-        }
+        secSpare.append(el("p", "mira-pred-nextdue-basis", "Technician/Engineer verification required before action."));
         wrap.append(secSpare);
 
-        // 6. Recent Examples (max 3, "Show full MR history" for the rest)
+        // ── 6. Suggested Maintenance Action (rule-based; Ollama polishes async) ──
+        var wordingSection = _buildPredictiveWordingSection(m);
+        wrap.append(wordingSection);
+        _requestPredictiveWording(m, wordingSection, spareKitListEl);
+
+        // ── 7. Recent Examples ───────────────────────────────────────────────
         var allEvidence = m.issue_evidence || [];
         if (allEvidence.length) {
             var secEx = _drawerSection("Recent Examples");
             var exTbl = document.createElement("table");
             exTbl.className = "mira-pred-issue-ev-tbl";
-            var exBody = document.createElement("tbody");
+            var exBody2 = document.createElement("tbody");
             allEvidence.slice(0, 3).forEach(function(e) {
                 var tr = document.createElement("tr");
                 tr.appendChild(el("td", "mira-pred-issue-ev-ref", e.mr_id || e.wo_id || "—"));
@@ -1165,9 +2036,9 @@
                 descCell.className = "mira-pred-issue-ev-desc";
                 descCell.textContent = e.translated_description || e.description || "—";
                 tr.appendChild(descCell);
-                exBody.appendChild(tr);
+                exBody2.appendChild(tr);
             });
-            exTbl.appendChild(exBody);
+            exTbl.appendChild(exBody2);
             secEx.append(exTbl);
             if (allEvidence.length > 3) {
                 var showAllBtn = el("button", "mira-pred-drawer-show-all", "Show full MR history (" + allEvidence.length + ")");
@@ -1219,22 +2090,23 @@
             machineCell.append(subRow);
         }
 
-        // 3. Recurring Issue Forecast
+        // 3. Main Issue — pill only; details go in drawer
         var issueCluster = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
         var issueCell = el("div", "mira-pred-mg-issue");
         issueCell.append(el("span", "mira-pred-issue-pill " + _issuePillClass(issueCluster), issueCluster));
-        var proof = (m.issue && m.issue.proof) || "";
-        if (proof) issueCell.append(el("div", "mira-pred-issue-proof", proof));
 
-        // 4. Pattern Signal — "15 MR · Last Jun 17 · Gap ~37d"
+        // 4. Pattern Signal — "34 cycles · median 11d · last MR 8 Jun · history 2024–2026"
         var timing = m.timing || {};
         var signalCell = el("div", "mira-pred-mg-signal");
-        var cnt = m.dominant_count || m.mr_count || 0;
-        var sigParts = [cnt + " MR"];
-        var lastDate = m.cluster_last_occurrence || m.last_occurrence;
-        if (lastDate) sigParts.push("Last " + _shortDate(lastDate));
-        if (timing.median_gap_days != null) sigParts.push("Gap ~" + timing.median_gap_days + "d");
-        signalCell.append(el("div", "mira-pred-signal-text", sigParts.join(" · ")));
+        var signalText = m.pattern_signal || (function() {
+            var cnt = m.dominant_count || m.mr_count || 0;
+            var parts = [cnt + " MR"];
+            var lastDate = m.cluster_last_occurrence || m.last_occurrence;
+            if (lastDate) parts.push("Last " + _shortDate(lastDate));
+            if (timing.median_gap_days != null) parts.push("Gap ~" + timing.median_gap_days + "d");
+            return parts.join(" · ");
+        }());
+        signalCell.append(el("div", "mira-pred-signal-text", signalText));
         if (timing.trend && timing.trend !== "stable") {
             var trendNote = timing.trend === "degrading" ? "Gap shrinking" : "Gap widening";
             signalCell.append(el("div", "mira-pred-signal-trend mira-pred-signal-trend-" + timing.trend, trendNote));
@@ -1244,36 +2116,31 @@
         var nextDueCell = el("div", "mira-pred-mg-nextdue");
         var dueLabel = m.likely_recurrence_label || m.recurrence_gauge || "Not enough history";
         var dueTone = "";
-        if (/anytime now/i.test(dueLabel))                            dueTone = " mira-pred-nextdue-now";
+        if (/Likely now/i.test(dueLabel))                             dueTone = " mira-pred-nextdue-now";
         else if (/within 1 week/i.test(dueLabel))                    dueTone = " mira-pred-nextdue-soon";
-        else if (/within 2 weeks/i.test(dueLabel))                   dueTone = " mira-pred-nextdue-soon";
+        else if (/within 1.2 weeks/i.test(dueLabel))                 dueTone = " mira-pred-nextdue-soon";
         else if (/within 1 month/i.test(dueLabel))                   dueTone = " mira-pred-nextdue-month";
-        else if (/1.3 months/i.test(dueLabel))                       dueTone = " mira-pred-nextdue-months";
+        else if (/within 1.2 months/i.test(dueLabel))                dueTone = " mira-pred-nextdue-months";
+        else if (/in 2\+/i.test(dueLabel))                           dueTone = " mira-pred-nextdue-months";
+        else if (/anytime now/i.test(dueLabel))                       dueTone = " mira-pred-nextdue-now";
         else if (/monitor|not enough|insufficient/i.test(dueLabel))  dueTone = " mira-pred-nextdue-unknown";
         nextDueCell.append(el("div", "mira-pred-nextdue-label" + dueTone, dueLabel));
 
-        // 6. Confidence + stock
+        // 6. Stock Status
         var confidenceCell = el("div", "mira-pred-mg-confidence");
-        confidenceCell.append(_buildConfidenceBadge(m.confidence));
-        var confSub = m.confidence_reason || "";
-        if (confSub.length > 65) confSub = confSub.slice(0, 62) + "…";
-        confidenceCell.append(el("div", "mira-pred-confidence-copy", confSub));
-        if (m.stock_status && m.stock_status !== "Unknown") {
-            confidenceCell.append(_buildStockBadge(m.stock_status));
+        var stockStatus = m.stock_status && m.stock_status !== "Unknown" ? m.stock_status : null;
+        if (stockStatus) {
+            confidenceCell.append(_buildStockBadge(stockStatus));
+        } else {
+            confidenceCell.append(el("span", "mira-pred-stock-na", "—"));
         }
 
         // 7. Action buttons — open drawer (no inline expand)
         var actionCell = el("div", "mira-pred-mg-toggle");
-        var viewBtn = el("button", "mira-pred-toggle-btn", "View Pattern");
+        var viewBtn = el("button", "mira-pred-toggle-btn", "View Details");
         viewBtn.type = "button";
         viewBtn.addEventListener("click", function() { _openForecastDrawer(m, "pattern"); });
         actionCell.append(viewBtn);
-        if (m.spare_available || (m.spare_parts_to_prepare && m.spare_parts_to_prepare.length) || (m.spare_parts && m.spare_parts.length)) {
-            var spareBtn = el("button", "mira-pred-toggle-btn mira-pred-toggle-btn-secondary", "Spare Parts");
-            spareBtn.type = "button";
-            spareBtn.addEventListener("click", function() { _openForecastDrawer(m, "spare"); });
-            actionCell.append(spareBtn);
-        }
         if (m.is_critical) {
             actionCell.append(el("div", "mira-pred-toggle-note", "Critical asset"));
         }
@@ -1361,10 +2228,10 @@
             return;
         }
         var visibleCats = (d.categories || []).filter(function(cat) {
-            return cat && (cat.name === "Production Equipment" || cat.name === "Utilities");
+            return cat && (cat.name === "Production Equipment" || cat.name === "Utilities" || cat.name === "Refrigeration");
         });
         if (!visibleCats.length) {
-            host.innerHTML = "<p class=\"mira-ov-muted\">No Production Equipment or Utilities data for this period.</p>";
+            host.innerHTML = "<p class=\"mira-ov-muted\">No Production Equipment, Utilities, or Refrigeration data for this period.</p>";
             return;
         }
         var selectedCat = visibleCats.find(function(cat) { return cat.name === predictiveCategoryView; }) || visibleCats[0];
@@ -1431,50 +2298,7 @@
         }
     }
 
-    // ── § 4  Data Quality & Daily Action Alerts ──────────────────────────────
-    function buildDataQualityAlertsSection() {
-        const sec = el("section", "mira-ov-daily-section");
-        const head = el("div", "mira-ov-daily-head");
-        head.append(el("div", "mira-ov-section-label", "Data Quality & Daily Action Alerts"));
-        const status = el("div", "mira-ov-daily-status");
-        refs.verdictBadge = el("span", "mira-ov-status-badge", "Loading");
-        refs.verdictScope = el("span", "mira-ov-verdict-scope", "");
-        status.append(refs.verdictBadge, refs.verdictScope);
-        head.append(status);
-        sec.append(head);
-
-        const grid = el("div", "mira-ov-daily-grid");
-        const dqCard = el("div", "mira-ov-daily-card");
-        dqCard.append(el("div", "mira-ov-sub-card-title", "Data Quality"));
-        refs.dataQualityChips = el("div", "mira-ov-dq-chip-grid");
-        refs.dataQualityChips.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-chips\"></div>";
-        dqCard.append(refs.dataQualityChips);
-        dqCard.append(el("p", "mira-ov-dq-note",
-            "These issues may affect machine-level trend, PM compliance, and predictive analysis accuracy."));
-        const dqActions = el("div", "mira-ov-daily-actions");
-        dqActions.append(buildNavButton("View Data Quality", "data_quality"));
-        dqCard.append(dqActions);
-
-        const alertsCard = el("div", "mira-ov-daily-card mira-ov-daily-alert-card");
-        alertsCard.append(el("div", "mira-ov-sub-card-title", "Daily Action Alerts"));
-        refs.verdictSummary = el("p", "mira-ov-muted", "Loading daily alerts...");
-        alertsCard.append(refs.verdictSummary);
-        refs.dailyAlerts = el("div", "mira-ov-daily-alerts");
-        refs.dailyAlerts.id = "mira-ov-verdict-body";
-        refs.dailyAlerts.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-chips\"></div>";
-        alertsCard.append(refs.dailyAlerts);
-
-        grid.append(dqCard, alertsCard);
-        sec.append(grid);
-        sec.append(el("p", "mira-ov-disclaimer",
-            "AI-detected issues are for review only. Technician/Engineer verification is required before any action. MIRA does not assign severity."));
-        return sec;
-    }
-
     // ── Alert context routing ────────────────────────────────────────────────
-    // Key used to pass alert context via sessionStorage to the target page/tab.
-    const ALERT_CTX_KEY = "mira_alert_ctx";
-
     function getActionRouteForAlert(key, extra) {
         const area = extra.area || "";
         const why  = extra.why  || "";
@@ -1537,15 +2361,19 @@
         if (key.startsWith("verdict-")) {
             const isRecurring = extra.recurrence;
             if (isRecurring) {
+                // Recurring MR issues live on the Downtime page (Machine Explorer, same
+                // module the non-recurring branch below opens) — not Spare Parts, which
+                // has no card for reviewing an MR issue history on a specific asset.
                 return {
                     label: "View Recurring Issue",
-                    navTarget: "asset_intelligence",
-                    navFocus: "issue_cluster",
+                    navTarget: "downtime",
+                    navFocus: "machine_explorer",
                     context: {
-                        page: "asset_parts_intelligence", focus: "issue_cluster",
+                        page: "downtime", focus: "machine_explorer",
                         alertType: "recurring_issue",
                         alertDescription: `${area} — repeated issue pattern detected`,
                         areaOrAsset: area, issueCluster: why,
+                        stageFilter,
                     },
                 };
             }
@@ -1584,16 +2412,12 @@
         btn.type = "button";
         btn.dataset.miraNavTarget = target;
         btn.addEventListener("click", () => {
-            try {
-                if (context) sessionStorage.setItem(ALERT_CTX_KEY, JSON.stringify(context));
-                else sessionStorage.removeItem(ALERT_CTX_KEY);
-            } catch (_) {}
-            navigateOverviewTarget(target, navFocus || null);
+            navigateOverviewTarget(target, navFocus || null, context || null);
         });
         return btn;
     }
 
-    function navigateOverviewTarget(target, navFocus) {
+    function navigateOverviewTarget(target, navFocus, context) {
         const clickView = (view) => {
             const tab = document.querySelector(`[data-view-tab="${view}"]`);
             if (tab) { tab.click(); return true; }
@@ -1603,31 +2427,18 @@
             const switched = clickView("downtime");
             if (!switched) {
                 window.location.href = "/Downtime/index.html";
-            } else if (navFocus) {
-                // Same-page: notify the downtime iframe via postMessage once it loads,
-                // and also fire a document event in case the iframe was already loaded.
-                const frame = document.getElementById("maintenance-downtime-frame");
-                const dispatchToFrame = () => {
-                    try {
-                        frame.contentWindow.postMessage({ type: "mira_alert_focus", focus: navFocus }, window.location.origin);
-                    } catch (_) {}
-                };
-                if (frame) {
-                    frame.addEventListener("load", dispatchToFrame, { once: true });
-                    window.setTimeout(dispatchToFrame, 400);
-                }
+                return;
             }
+            if (navFocus) retryCallIntoDowntimeFrame(navFocus, context || {}, 0);
             return;
         }
         if (target === "pm") {
             clickView("overview");
-            if (navFocus) {
-                window.setTimeout(() => {
-                    document.dispatchEvent(new CustomEvent("mira:alert:navigate", {
-                        bubbles: true, detail: { target: "pm", focus: navFocus },
-                    }));
-                }, 120);
-            }
+            if (navFocus === "task_list") retryCallPmScheduleFocus(context || {}, 0);
+            return;
+        }
+        if (target === "spare") {
+            clickView("spare_parts");
             return;
         }
         if (target === "data_quality" || target === "asset_intelligence") {
@@ -1635,6 +2446,32 @@
             const tabName = target === "data_quality" ? "data_quality" : "intelligence";
             retryClickSpareTab(tabName, 0);
         }
+    }
+
+    // The Downtime page runs inside a same-origin iframe (#maintenance-downtime-frame)
+    // that lazy-loads its src on first switch to the Downtime tab, so
+    // window.downtimeFocusSection isn't necessarily defined yet the instant we click
+    // the tab. Poll briefly for it rather than dropping the requested section.
+    function retryCallIntoDowntimeFrame(navFocus, context, attempt) {
+        const frame = document.getElementById("maintenance-downtime-frame");
+        const fn = frame && frame.contentWindow && frame.contentWindow.downtimeFocusSection;
+        if (typeof fn === "function") {
+            fn(navFocus, context);
+            return;
+        }
+        // Cold loads can take several seconds (the iframe fetches + renders the
+        // full Downtime payload before init() defines this function) — 60
+        // attempts at 150ms gives ~9s, generous enough without hanging forever.
+        if (attempt < 60) window.setTimeout(() => retryCallIntoDowntimeFrame(navFocus, context, attempt + 1), 150);
+    }
+
+    function retryCallPmScheduleFocus(context, attempt) {
+        const fn = window.pmScheduleFocusTaskList;
+        if (typeof fn === "function") {
+            fn(context);
+            return;
+        }
+        if (attempt < 20) window.setTimeout(() => retryCallPmScheduleFocus(context, attempt + 1), 150);
     }
 
     function retryClickSpareTab(tabName, attempt) {
@@ -1692,45 +2529,11 @@
         return String(text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
     }
 
-    function renderDataQualityChips(data, warnings) {
-        const host = refs.dataQualityChips;
-        if (!host) return;
-        const dt = (data && data.downtime_summary) || {};
-        const pm = (data && data.pm_schedule) || {};
-        const chips = [
-            { label: "MR missing Asset ID", value: num(dt.missing_asset_count) || 0, target: "data_quality" },
-            { label: "MR unmapped status", value: num(dt.unknown_status_count) || 0, target: "data_quality" },
-            { label: "PM missing mapping", value: num(pm.missing_mapping) || 0, target: "pm" },
-        ];
-        [
-            ["Area-only MR records", dt.general_area_asset_count, "data_quality"],
-            ["Missing functional location", dt.missing_functional_location_count, "data_quality"],
-            ["Other data issues", data && data.data_reliability_issue_count, "data_quality"],
-        ].forEach(([label, value, target]) => {
-            const n = num(value);
-            if (n && !chips.some((chip) => chip.label === label)) chips.push({ label, value: n, target });
-        });
-        host.innerHTML = "";
-        chips.slice(0, 6).forEach((chip) => {
-            const n = num(chip.value) || 0;
-            const node = el("button", "mira-ov-dq-chip " + (n > 0 ? "mira-ov-dq-chip-warn" : "mira-ov-dq-chip-ok"));
-            node.type = "button";
-            node.append(el("span", "mira-ov-chip-label", chip.label), el("strong", "mira-ov-chip-value", fmt(n)));
-            node.addEventListener("click", () => navigateOverviewTarget(chip.target));
-            host.append(node);
-        });
-        if ((warnings || []).length) {
-            const warn = el("p", "mira-ov-dq-inline-note", String(warnings[0]));
-            host.append(warn);
-        }
-    }
-
     function renderDailyQualityAndAlerts(data, pres, warnings, verdict) {
-        renderDataQualityChips(data || {}, warnings || []);
         renderDailyAlerts(buildDailyAlertRows(data || {}, pres || {}, warnings || [], verdict || null));
     }
 
-    function pushAlert(rows, key, area, flag, why, _action, _target, rank, extraData) {
+    function pushAlert(rows, key, area, flag, why, _action, _target, rank, extraData, category) {
         if (!why || rows.some((row) => row.key === key)) return;
         const route = getActionRouteForAlert(key, { area, why, ...(extraData || {}) });
         rows.push({
@@ -1739,6 +2542,7 @@
             target: route.navTarget,
             navFocus: route.navFocus || null,
             context: route.context || null,
+            category: category || "PM / Data Review",
         });
     }
 
@@ -1766,54 +2570,67 @@
             pushAlert(rows, "open-mr", dt.top_functional_location_name || "Open MR backlog",
                 open > 50 ? "Red" : "Amber",
                 `${fmt(open)} open / in-progress MR need engineer review.`, "View Downtime Details", "downtime", open > 50 ? 10 : 30,
-                { stage: state.stage });
-        }
-        if (overdue > 0) {
-            pushAlert(rows, "pm-overdue", "PM overdue tasks", overdue > 30 ? "Red" : "Amber",
-                `${fmt(overdue)} overdue PM tasks; PM compliance ${fmt(pm.compliance_pct)}%.`, "View PM Details", "pm", overdue > 30 ? 15 : 35);
+                { stage: state.stage }, "Immediate Review");
         }
         if (carryOver > 0) {
             pushAlert(rows, "carry-over", "Carry-over open MR", carryOver > 25 ? "Red" : "Amber",
                 `${fmt(carryOver)} MR were raised before the period and remain unresolved.`, "View Downtime Details", "downtime", carryOver > 25 ? 20 : 40,
-                { stage: state.stage });
+                { stage: state.stage }, "Immediate Review");
+        }
+        if (overdue > 0) {
+            const pmCompText = num(pm.compliance_pct) === 0
+                ? "PM completion records require verification."
+                : `PM compliance ${fmt(pm.compliance_pct)}%.`;
+            pushAlert(rows, "pm-overdue", "PM overdue tasks", overdue > 30 ? "Red" : "Amber",
+                `${fmt(overdue)} overdue PM tasks. ${pmCompText}`, "View PM Details", "pm", overdue > 30 ? 15 : 35,
+                undefined, "PM / Data Review");
         }
         if (missingAsset > 0) {
             pushAlert(rows, "missing-asset", "Missing Asset ID records", "Grey",
-                `${fmt(missingAsset)} MR missing Asset ID. Recorded area only - missing actual Asset ID.`, "View Data Quality", "data_quality", 45);
+                `${fmt(missingAsset)} MR missing Asset ID. Recorded area only — missing actual Asset ID.`, "View Data Quality", "data_quality", 45,
+                undefined, "PM / Data Review");
         }
         if (unknownStatus > 0) {
             pushAlert(rows, "unknown-status", "MR unmapped status", "Grey",
-                `${fmt(unknownStatus)} MR have an unmapped status.`, "View Data Quality", "data_quality", 50);
+                `${fmt(unknownStatus)} MR have an unmapped status.`, "View Data Quality", "data_quality", 50,
+                undefined, "PM / Data Review");
         }
         if (pmMissing > 0) {
             pushAlert(rows, "pm-mapping", "PM missing mapping", "Grey",
-                `${fmt(pmMissing)} PM records are missing mapping.`, "View PM Details", "pm", 55);
+                `${fmt(pmMissing)} PM records are missing mapping.`, "View PM Details", "pm", 55,
+                undefined, "PM / Data Review");
         }
         if (generalArea > 0) {
             pushAlert(rows, "area-only", "Recorded area only", "Grey",
-                `${fmt(generalArea)} MR use generic area tags. Recorded area only - missing actual Asset ID.`, "View Data Quality", "data_quality", 60);
+                `${fmt(generalArea)} MR use generic area tags. Recorded area only — missing actual Asset ID.`, "View Data Quality", "data_quality", 60,
+                undefined, "PM / Data Review");
         }
 
         const verdictItems = (verdict && Array.isArray(verdict.items) ? verdict.items : []).filter(isUsefulVerdictItem);
         verdictItems.slice(0, 2).forEach((item, index) => {
             const rag = String(item.rag || "Amber");
             const flag = rag === "Red" ? "Red" : "Amber";
-            const why = item.recurrence
+            const isRecurring = !!item.recurrence;
+            const cat = isRecurring ? "Recurring Risk" : "Immediate Review";
+            const why = isRecurring
                 ? `Open MR with repeated issue wording${item.recurrence_note ? ` (${item.recurrence_note})` : ""}.`
                 : (item.reason || "Insufficient repeated history. Manual review required.");
             pushAlert(rows, `verdict-${index}-${item.asset_name}`, item.asset_name || "Asset review candidate", flag,
                 why, "", "", flag === "Red" ? 12 + index : 42 + index,
-                { recurrence: item.recurrence, recurrenceNote: item.recurrence_note, assetName: item.asset_name, stage: state.stage });
+                { recurrence: item.recurrence, recurrenceNote: item.recurrence_note, assetName: item.asset_name, stage: state.stage },
+                cat);
         });
 
         if (!rows.length && (warnings || []).length) {
-            pushAlert(rows, "data-warning", "Data reliability", "Grey", String(warnings[0]), "View Data Quality", "data_quality", 70);
+            pushAlert(rows, "data-warning", "Data reliability", "Grey", String(warnings[0]), "View Data Quality", "data_quality", 70,
+                undefined, "PM / Data Review");
         }
         if (!rows.length) {
             pushAlert(rows, "manual-review", "Current selection", "Amber",
-                "Insufficient repeated history. Manual review required.", "View Downtime Details", "downtime", 80);
+                "Insufficient repeated history. Manual review required.", "View Downtime Details", "downtime", 80,
+                undefined, "PM / Data Review");
         }
-        return rows.sort((a, b) => a.rank - b.rank).slice(0, 5);
+        return rows.sort((a, b) => a.rank - b.rank);
     }
 
     function renderDailyAlerts(rows) {
@@ -1824,21 +2641,46 @@
             return;
         }
         host.innerHTML = "";
-        const table = el("table", "mira-ov-alert-table");
-        table.innerHTML = "<thead><tr><th>Area / Asset</th><th>Flag</th><th>Why it needs review</th><th>Action</th></tr></thead>";
-        const tbody = el("tbody");
+
+        // Category order and display names
+        const CAT_ORDER = ["Immediate Review", "Recurring Risk", "PM / Data Review", "Spare Parts / Procurement"];
+
+        // Group rows by category
+        const byCategory = {};
         rows.forEach((row) => {
-            const tr = el("tr");
-            const flagClass = row.flag === "Red" ? "mira-ov-risk-high" : row.flag === "Amber" ? "mira-ov-risk-medium" : "mira-ov-risk-low";
-            const actionCell = el("td");
-            actionCell.append(buildNavButton(row.action, row.target, row.navFocus, row.context));
-            const flagCell = el("td");
-            flagCell.append(el("span", `mira-ov-risk-badge ${flagClass}`, row.flag));
-            tr.append(el("td", null, row.area || "Current selection"), flagCell, el("td", null, row.why || ""), actionCell);
-            tbody.append(tr);
+            const cat = row.category || "PM / Data Review";
+            if (!byCategory[cat]) byCategory[cat] = [];
+            byCategory[cat].push(row);
         });
-        table.append(tbody);
-        host.append(table);
+
+        CAT_ORDER.forEach((cat) => {
+            const catRows = byCategory[cat];
+            if (!catRows || !catRows.length) return;
+
+            const catHeader = el("div", "mira-ov-alert-cat-header");
+            const catBadgeClass = cat === "Immediate Review" ? "mira-ov-alert-cat-immediate"
+                : cat === "Recurring Risk" ? "mira-ov-alert-cat-recurring"
+                : cat === "Spare Parts / Procurement" ? "mira-ov-alert-cat-spare"
+                : "mira-ov-alert-cat-data";
+            catHeader.append(el("span", `mira-ov-alert-cat-badge ${catBadgeClass}`, cat));
+            host.append(catHeader);
+
+            const table = el("table", "mira-ov-alert-table");
+            table.innerHTML = "<thead><tr><th>Area / Asset</th><th>Flag</th><th>Why it needs review</th><th>Action</th></tr></thead>";
+            const tbody = el("tbody");
+            catRows.forEach((row) => {
+                const tr = el("tr");
+                const flagClass = row.flag === "Red" ? "mira-ov-risk-high" : row.flag === "Amber" ? "mira-ov-risk-medium" : "mira-ov-risk-low";
+                const actionCell = el("td");
+                actionCell.append(buildNavButton(row.action, row.target, row.navFocus, row.context));
+                const flagCell = el("td");
+                flagCell.append(el("span", `mira-ov-risk-badge ${flagClass}`, row.flag));
+                tr.append(el("td", null, row.area || "Current selection"), flagCell, el("td", null, row.why || ""), actionCell);
+                tbody.append(tr);
+            });
+            table.append(tbody);
+            host.append(table);
+        });
     }
 
     // ── Removed: buildTabShell, buildDetailPanel, buildPredictivePanel,
@@ -2188,10 +3030,17 @@
                 if (token !== loadToken) return;
                 const isWarming = json && (json.warming || (json.data_availability && json.data_availability.warming));
                 if (isWarming) { scheduleWarmRetry(signature); return; }
-                warmRetries = 0;
                 if (warmRetryTimer) { window.clearTimeout(warmRetryTimer); warmRetryTimer = null; }
                 lastLoadSignature = signature;
                 renderVerified(json);       // replaces fast-kpi chips with full verified data
+                const availability = (json && ((json.data && json.data.data_availability) || json.data_availability)) || {};
+                const fullVerifiedReady = availability.complete !== false && !(json && json.spare_warming);
+                if (!fullVerifiedReady) {
+                    scheduleWarmRetry(signature);
+                    markAiSections("AI summary will refresh after verified data finishes loading.");
+                    return;
+                }
+                warmRetries = 0;
 
                 // ── Stage 4: AI summary (after full KPIs are visible) ──────────
                 window.setTimeout(() => {
@@ -2553,7 +3402,7 @@
             });
         }
 
-        const predCategories = (pred.categories || []).filter(c => c.name === "Production Equipment" || c.name === "Utilities");
+        const predCategories = (pred.categories || []).filter(c => c.name === "Production Equipment" || c.name === "Utilities" || c.name === "Refrigeration");
         const faultPattern = pred.fault_pattern || null;
         const dataConfidence = pred.data_confidence || {};
         const predKpiStrip = (document.getElementById("mira-pred-kpi-strip") || {}).textContent || "";
@@ -2601,158 +3450,880 @@
         return "Check store / verify manually";
     }
 
-    // ── PPT export ─────────────────────────────────────────────────────────────
-    function exportOverviewPPT() {
+    // ── PPT helpers ────────────────────────────────────────────────────────────
+    function _ovFmt(v) {
+        if (v === null || v === undefined) return "—";
+        if (typeof v === "number") return Number.isInteger(v) ? v.toLocaleString() : v.toFixed(1);
+        return String(v) || "—";
+    }
+    function _ovTrunc(s, n) {
+        const t = String(s || "").trim();
+        return t.length > n ? t.slice(0, n - 1) + "…" : (t || "—");
+    }
+
+    // ── Build PPT data (async — fetches MR + PM rows) ─────────────────────────
+    async function buildPptReportData() {
+        const data = (lastOverview && lastOverview.data) || {};
+        const pres = (lastOverview && lastOverview.pres) || {};
+        const pred = predictiveLatestPayload || {};
+        const wo  = data.work_orders || {};
+        const pm  = data.pm_schedule || {};
+        const dt  = data.downtime_summary || {};
+        const vdu = pres.view_data_used || {};
+
+        const stageParam = state.stage === "stage1" ? "Stage 1" : state.stage === "stage2" ? "Stage 2" : "all";
+        const yr = state.year || new Date().getFullYear();
+
+        // ── Fetch MR records ─────────────────────────────────────────────────
+        // Use work_order_source.records — ALL enriched records, no date filter,
+        // so carry-over open records from before the selected period still appear.
+        let mrRows = [];
+        let _mrFallback = false;
+        try {
+            const u = "/api/downtime?period=ytd&stage=" + encodeURIComponent(stageParam) + "&year=" + encodeURIComponent(yr);
+            const r = await fetch(u, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+            if (r.ok) {
+                const j = await r.json();
+                // Correct path: work_order_source.records = all records including carry-over open
+                const src = (j.work_order_source && Array.isArray(j.work_order_source.records))
+                    ? j.work_order_source.records
+                    : (j.management && Array.isArray(j.management.work_orders))
+                        ? j.management.work_orders
+                        : [];
+                mrRows = src;
+                window.console.debug("[PPT] MR loaded:", mrRows.length,
+                    "source=", j.work_order_source ? "work_order_source" : "management");
+            }
+        } catch (e) {
+            window.console.warn("[PPT] MR fetch error:", e && e.message);
+        }
+
+        // ── Fetch PM tasks ───────────────────────────────────────────────────
+        // Correct path: j.schedule.tasks (not j.payload.schedule.tasks)
+        // j.schedule.tables.overdue = pre-filtered overdue list (already computed by backend)
+        let pmTasks = [], pmOverdueTasks = [];
+        let _pmFallback = false;
+        try {
+            const u = "/api/maintenance/pm-schedule?year=" + encodeURIComponent(yr) + "&stage=" + encodeURIComponent(stageParam);
+            const r = await fetch(u, { cache: "no-store", signal: AbortSignal.timeout(15000) });
+            if (r.ok) {
+                const j = await r.json();
+                const sched = j.schedule || {};
+                pmTasks = Array.isArray(sched.tasks) ? sched.tasks
+                    : (sched.tables && Array.isArray(sched.tables.all)) ? sched.tables.all : [];
+                pmOverdueTasks = (sched.tables && Array.isArray(sched.tables.overdue)) ? sched.tables.overdue : [];
+                window.console.debug("[PPT] PM loaded:", pmTasks.length, "tasks,", pmOverdueTasks.length, "pre-filtered overdue");
+            }
+        } catch (e) {
+            window.console.warn("[PPT] PM fetch error:", e && e.message);
+        }
+
+        const today = new Date();
+        const daysAgo = (d) => d ? Math.max(0, Math.floor((today - new Date(d)) / 86400000)) : 0;
+
+        // ── MR action-needed filter (broad — same logic as the dashboard) ────
+        // Backend sets is_open=true and acknowledgement_status="Pending" for open records.
+        // status_category="Open" is the canonical indicator. Fall through to status text.
+        const _isActionNeeded = (r) => {
+            if (r.is_open === true) return true;
+            const cat = String(r.status_category || "").toLowerCase();
+            if (cat === "open") return true;
+            const st = String(r.status || "").toLowerCase();
+            if (/\b(new|open|in.?progress|pending|awaiting|backlog)\b/.test(st)) return true;
+            const ack = String(r.acknowledgement_status || "").toLowerCase();
+            if (ack === "pending" || ack.includes("awaiting") || ack === "not acknowledged") return true;
+            return false;
+        };
+        const _mrToRow = (r) => ({
+            mrNo:        _ovTrunc(r.maintenance_order_id || r.request_id || r.mr_id || r.mr_number || "—", 22),
+            woNo:        _ovTrunc(r.work_order_id || r.wo_id || "—", 22),
+            machine:     _ovTrunc(r.asset_name || r.mappedAssetName || r.machine_group || r.functional_location || "—", 42),
+            severity:    r.severity || r.fallback_severity || "—",
+            daysWaiting: daysAgo(r.created_date || r.start_time),
+            status:      _ovTrunc(r.status || "—", 22),
+            raisedDate:  String(r.created_date || r.start_time || "").slice(0, 10),
+            description: _ovTrunc(r.translated_description || r.description || "—", 60),
+        });
+
+        let actionRows = mrRows.filter(_isActionNeeded).map(_mrToRow);
+        window.console.debug("[PPT] MR action-needed:", actionRows.length, "| KPI open:", wo.open);
+
+        // Fallback: if filter returns 0 but records loaded (missing/inconsistent ack fields),
+        // use all non-closed records sorted by age — consistent with "carry-over" policy.
+        if (actionRows.length === 0 && mrRows.length > 0) {
+            _mrFallback = true;
+            window.console.warn("[PPT] MR mismatch: KPI open=" + (wo.open || 0) + " but filter returned 0. Using non-closed records as fallback.");
+            actionRows = mrRows.filter(r => {
+                const st = String(r.status || "").toLowerCase();
+                return !/\b(closed|confirmed|resolved|done|finished|completed)\b/.test(st);
+            }).map(_mrToRow);
+            window.console.debug("[PPT] MR fallback rows:", actionRows.length);
+        }
+
+        const latestUnackMr = [...actionRows]
+            .sort((a, b) => b.raisedDate.localeCompare(a.raisedDate) || b.daysWaiting - a.daysWaiting)
+            .slice(0, 10);
+        const longestUnackMr = [...actionRows]
+            .sort((a, b) => b.daysWaiting - a.daysWaiting || b.raisedDate.localeCompare(a.raisedDate))
+            .slice(0, 10);
+        window.console.debug("[PPT] Latest unack MR:", latestUnackMr.length, "| Longest unack MR:", longestUnackMr.length);
+
+        // ── MTTR / MTBF computation from MR records ──────────────────────────
+        const parseDateSafe = (val) => {
+            if (!val) return null;
+            const d = new Date(val);
+            if (isNaN(d.getTime()) || d.getFullYear() < 2000) return null;
+            return d;
+        };
+        const _classifyIssue = (text) => {
+            const t = String(text || "").toLowerCase();
+            if (/temperature|heating|not.?hot|burner|gas|flame|อุณหภูมิ|ไม่ร้อน/.test(t))  return "Heating / temperature";
+            if (/leak|gasket|valve|pipe|steam|water|รั่ว|วาล์ว|ปะเก็น|ท่อ/.test(t))       return "Leakage / valve / piping";
+            if (/motor|bearing|noise|vibrat|abnormal.?sound|เสียง|สั่น/.test(t))           return "Motor / bearing / vibration";
+            if (/pump|compressor|refriger|คอมเพรส/.test(t))                                return "Pump / compressor";
+            if (/filter|ไส้กรอง|กรองน้ำ/.test(t))                                          return "Filter / blockage";
+            if (/resin|softener|ล้างเรซิน/.test(t))                                        return "Resin / softener";
+            if (/sensor|alarm|electrical|wiring|breaker|สายไฟ|ไฟฟ้า/.test(t))             return "Electrical / sensor";
+            if (/door|rubber.?seal|hinge|ซีล|ประตู/.test(t))                              return "Door / seal";
+            if (/clean|dirty|ล้าง|ทำความสะอาด/.test(t))                                    return "Cleaning / hygiene";
+            return "Other maintenance";
+        };
+        // _getMg: prefer machine_family (canonical specific group, e.g. "Combi Oven")
+        // over broad machine_group (e.g. "Production Equipment").
+        // Also strip trailing unit numbers from asset_name as a frontend fallback.
+        const _stripUnit = (s) => String(s || "").replace(/\s+(?:no\.?\s*|#\s*|unit\s*|-\s*)?\d+[\w-]*$/i, "").trim();
+        const _BROAD_MG = /^(production equipment|facility[/ ]*building|facility|utilities|refrigeration|unknown|unmapped|review|unclassified)$/i;
+        const _getMg = (r) => {
+            const mf = r.machine_family;
+            if (mf && !_BROAD_MG.test(mf)) return mf;
+            const mmg = r.mappedMachineGroup || r.asset_machine_group;
+            if (mmg && !_BROAD_MG.test(mmg)) return mmg;
+            const an = r.asset_name || r.mappedAssetName;
+            const stripped = an ? _stripUnit(an) : "";
+            if (stripped && !_BROAD_MG.test(stripped) && stripped.length >= 3) return stripped;
+            const mg = r.machine_group || r.mainAssetGroup;
+            if (mg && !_BROAD_MG.test(mg)) return mg;
+            return r.functional_location || "Unmapped / Review";
+        };
+        const _getAn = (r) => r.asset_name || r.mappedAssetName || r.asset_id || "Unknown";
+
+        const mttrByGroup = (() => {
+            const groups = {};
+            mrRows.forEach(r => {
+                const mg = _getMg(r);
+                const s = parseDateSafe(r.actual_start_time || r.maintenance_start_time || r.start_time);
+                const e = parseDateSafe(r.actual_end_time   || r.maintenance_end_time   || r.end_time);
+                if (!s || !e) return;
+                const ttr = (e - s) / 86400000;
+                if (ttr <= 0 || ttr > 365) return;
+                if (!groups[mg]) groups[mg] = { ttrs: [], at: {}, iss: [] };
+                groups[mg].ttrs.push(ttr);
+                const an = _getAn(r);
+                if (!groups[mg].at[an]) groups[mg].at[an] = [];
+                groups[mg].at[an].push(ttr);
+                groups[mg].iss.push(r.translated_description || r.description || "");
+            });
+            return Object.entries(groups)
+                .filter(([, g]) => g.ttrs.length >= 2)
+                .map(([mg, g]) => {
+                    const avg = g.ttrs.reduce((a, b) => a + b, 0) / g.ttrs.length;
+                    const ic = {};
+                    g.iss.forEach(t => { const k = _classifyIssue(t); ic[k] = (ic[k] || 0) + 1; });
+                    const topIssue = Object.entries(ic).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+                    let worstAsset = "—", worstAvg = 0;
+                    Object.entries(g.at).forEach(([an, ttrs]) => {
+                        const a = ttrs.reduce((x, y) => x + y, 0) / ttrs.length;
+                        if (a > worstAvg) { worstAvg = a; worstAsset = an; }
+                    });
+                    return { mg, avgMttr: avg, woCount: g.ttrs.length, topIssue, worstAsset, worstMttr: worstAvg };
+                })
+                .sort((a, b) => b.avgMttr - a.avgMttr)
+                .slice(0, 10);
+        })();
+
+        const mtbfByGroup = (() => {
+            const groups = {};
+            mrRows.forEach(r => {
+                const mg = _getMg(r);
+                const an = _getAn(r);
+                const s = parseDateSafe(r.actual_start_time || r.maintenance_start_time || r.start_time);
+                const e = parseDateSafe(r.actual_end_time   || r.maintenance_end_time   || r.end_time);
+                if (!groups[mg]) groups[mg] = { assets: {}, iss: [] };
+                if (!groups[mg].assets[an]) groups[mg].assets[an] = [];
+                groups[mg].assets[an].push({ s, e });
+                groups[mg].iss.push(r.translated_description || r.description || "");
+            });
+            return Object.entries(groups)
+                .map(([mg, g]) => {
+                    const allGaps = [], assetAvg = {};
+                    Object.entries(g.assets).forEach(([an, evts]) => {
+                        const sorted = evts.filter(ev => ev.e).sort((a, b) => a.e - b.e);
+                        const gaps = [];
+                        for (let i = 1; i < sorted.length; i++) {
+                            if (!sorted[i].s) continue;
+                            const gap = (sorted[i].s - sorted[i - 1].e) / 86400000;
+                            if (gap >= 0 && gap <= 730) gaps.push(gap);
+                        }
+                        if (gaps.length) {
+                            assetAvg[an] = gaps.reduce((x, y) => x + y, 0) / gaps.length;
+                            allGaps.push(...gaps);
+                        }
+                    });
+                    if (allGaps.length < 2) return null;
+                    const avg = allGaps.reduce((a, b) => a + b, 0) / allGaps.length;
+                    const ic = {};
+                    g.iss.forEach(t => { const k = _classifyIssue(t); ic[k] = (ic[k] || 0) + 1; });
+                    const topIssue = Object.entries(ic).sort((a, b) => b[1] - a[1])[0]?.[0] || "—";
+                    let worstAsset = "—", worstGap = Infinity;
+                    Object.entries(assetAvg).forEach(([an, a]) => { if (a < worstGap) { worstGap = a; worstAsset = an; } });
+                    return { mg, avgMtbf: avg, recurrences: allGaps.length, topIssue, worstAsset, worstMtbf: worstGap === Infinity ? null : worstGap };
+                })
+                .filter(Boolean)
+                .sort((a, b) => a.avgMtbf - b.avgMtbf)
+                .slice(0, 10);
+        })();
+
+        const _allMttrVals = mrRows.reduce((acc, r) => {
+            const s = parseDateSafe(r.actual_start_time || r.maintenance_start_time || r.start_time);
+            const e = parseDateSafe(r.actual_end_time   || r.maintenance_end_time   || r.end_time);
+            if (s && e) { const d = (e - s) / 86400000; if (d > 0 && d <= 365) acc.push(d); }
+            return acc;
+        }, []);
+
+        const activeCat = (pred.categories || []).find(c => c.name === predictiveCategoryView) || (pred.categories || [])[0];
+        const _rfToRow = (m, categoryName) => {
+            const cnt = m.history_issue_count || m.dominant_count || m.mr_count || 0;
+            const total = m.history_mr_count || m.mr_count || cnt;
+            const t = m.timing || {};
+            const sig = [cnt + " cycle" + (cnt !== 1 ? "s" : "")];
+            const ld = m.cluster_last_occurrence || m.last_occurrence;
+            if (ld) sig.push("Last " + String(ld).slice(0, 10));
+            if (t.median_gap_days != null) sig.push("~" + t.median_gap_days + "d gap");
+            const spareParts = (m.spare_parts_to_prepare || m.spare_parts || []).slice(0, 2)
+                .map(p => _ovTrunc(p.label || p.part_name || p.name || "", 16)).filter(Boolean);
+            const issue = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
+            const pct = m.recurring_pct != null ? m.recurring_pct : null;
+            return {
+                rank:        m.rank || "",
+                category:    categoryName || m.category || "—",
+                machine:     _ovTrunc(m.unit || m.specific_machine_group || m.machine_group || "—", 36),
+                patternType: m.pattern_type || "—",
+                isPreventive: !!m.is_preventive,
+                issue:       _ovTrunc(issue, 48),
+                patternLine: _ovTrunc((m.pattern_type || "—") + " · " + cnt + " of " + total + " history MRs" + (pct != null ? " · " + pct + "%" : ""), 70),
+                description: _ovTrunc(m.latest_issue_description || m.matched_wording || "", 64),
+                historyMrCount: total,
+                historyIssueCount: cnt,
+                historyPct: pct,
+                signal:      m.pattern_signal || sig.join(" \xb7 "),
+                nextWindow:  m.likely_recurrence_label || m.recurrence_gauge || "—",
+                confidence:  m.confidence || "—",
+                spare:       _ovTrunc(spareParts.join(", ") || "—", 28),
+                isCritical:  !!m.is_critical,
+            };
+        };
+        const recurringForecast = ((activeCat && activeCat.top_machines) || []).slice(0, 5).map(m => _rfToRow(m, activeCat && activeCat.name));
+        const rfCategories = ["Production Equipment", "Utilities", "Refrigeration"].map(catName => {
+            const catData = (pred.categories || []).find(c => c.name === catName);
+            return {
+                name: catName,
+                total_mrs: (catData && catData.total_mrs) || 0,
+                machines: ((catData && catData.top_machines) || []).slice(0, 5).map(m => _rfToRow(m, catName)),
+            };
+        });
+
+        const perfSummary = {
+            mttrAvgDays:    _allMttrVals.length ? +(_allMttrVals.reduce((a, b) => a + b, 0) / _allMttrVals.length).toFixed(1) : null,
+            mtbfAvgDays:    mtbfByGroup.length  ? +(mtbfByGroup.reduce((a, g) => a + g.avgMtbf, 0) / mtbfByGroup.length).toFixed(1) : null,
+            validWoCount:   _allMttrVals.length,
+            totalMrCount:   mrRows.length,
+            worstMttrGroup: mttrByGroup[0] || null,
+            worstMtbfGroup: mtbfByGroup[0] || null,
+            recurringIssue: recurringForecast[0] ? recurringForecast[0].issue : "—",
+            openMrCount:    wo.open || 0,
+            unackMrCount:   actionRows.length,
+        };
+        window.console.debug("[PPT] MTTR groups:", mttrByGroup.length, "| MTBF groups:", mtbfByGroup.length, "| valid WOs:", perfSummary.validWoCount);
+
+        // ── PM unfinished filter ─────────────────────────────────────────────
+        // Public task fields: completionStatus ("Open"/"Completed (inferred)"),
+        // scheduleStatus ("Overdue"/"Due This Month"/etc), daysOverdue (number).
+        // Note: isDone/isOverdue are STRIPPED by _public_task() — use completionStatus/daysOverdue.
+        const _isPmUnfinished = (t) => {
+            const cs = String(t.completionStatus || "").toLowerCase();
+            if (/completed|done|confirmed/.test(cs)) return false;
+            if (cs === "open") return true;
+            if ((t.daysOverdue || 0) > 0) return true;
+            const ss = String(t.scheduleStatus || t.status || "").toLowerCase();
+            if (/\b(overdue|open|pending|in.?progress|not.?started|backlog)\b/.test(ss)) return true;
+            if (!t.completionDate && !t.actualCompletionDate) return true;
+            return false;
+        };
+        const _pmToRow = (t) => ({
+            id:          _ovTrunc(t.pmTaskId || "—", 20),
+            asset:       _ovTrunc(t.assetName || "—", 34),
+            location:    _ovTrunc(t.systemArea || "—", 24),
+            dueDate:     String(t.plannedDate || "").slice(0, 10),
+            daysOverdue: t.daysOverdue || 0,
+            status:      _ovTrunc(t.scheduleStatus || t.completionStatus || "Open", 22),
+            assignedTo:  _ovTrunc(t.contractorOrPIC || "—", 24),
+            isOverdue:   (t.daysOverdue || 0) > 0,
+        });
+
+        // Start from pre-filtered overdue list (from backend), then add non-overdue unfinished
+        let allUnfinished = [];
+        if (pmOverdueTasks.length > 0) {
+            const overdueIds = new Set(pmOverdueTasks.map(t => t.pmTaskId));
+            const otherUnfinished = pmTasks.filter(t => !overdueIds.has(t.pmTaskId) && _isPmUnfinished(t));
+            allUnfinished = [...pmOverdueTasks, ...otherUnfinished];
+        } else {
+            allUnfinished = pmTasks.filter(_isPmUnfinished);
+        }
+        window.console.debug("[PPT] PM unfinished:", allUnfinished.length, "| KPI overdue:", pm.overdue);
+
+        // Fallback: filter returned 0 but KPI says overdue > 0 — use all non-completed tasks
+        if (allUnfinished.length === 0 && pmTasks.length > 0) {
+            _pmFallback = true;
+            window.console.warn("[PPT] PM mismatch: KPI overdue=" + (pm.overdue || 0) + " but filter returned 0. Using all non-completed tasks.");
+            allUnfinished = pmTasks.filter(t => {
+                const cs = String(t.completionStatus || "").toLowerCase();
+                return !/completed|done|confirmed/.test(cs);
+            });
+            window.console.debug("[PPT] PM fallback rows:", allUnfinished.length);
+        }
+
+        // Sort: overdue first (highest daysOverdue first), then oldest dueDate first
+        allUnfinished.sort((a, b) => {
+            const aOv = (a.daysOverdue || 0), bOv = (b.daysOverdue || 0);
+            if (bOv !== aOv) return bOv - aOv;
+            return (a.plannedDate || "") < (b.plannedDate || "") ? -1 : 1;
+        });
+
+        const actionNotes = refs.summaryLine ? refs.summaryLine.map(l => (l.textContent || "").trim()).filter(Boolean) : [];
+        const alertRows = [];
+        if (refs.dailyAlerts) {
+            refs.dailyAlerts.querySelectorAll("tbody tr").forEach(tr => {
+                const cells = tr.querySelectorAll("td");
+                if (cells.length >= 3) alertRows.push({
+                    area: (cells[0] && cells[0].textContent || "").trim(),
+                    flag: (cells[1] && cells[1].textContent || "").trim(),
+                    why:  _ovTrunc((cells[2] && cells[2].textContent || "").trim(), 90),
+                });
+            });
+        }
+
+        return {
+            filters: {
+                label: vdu.period_label || periodLabel(),
+                dateRange: vdu.date_range || "",
+                stage: state.stage,
+                year: yr,
+            },
+            overviewKpis: {
+                mrRaised:        wo.total,
+                mrOpen:          wo.open,
+                mrCarryOver:     dt.carry_over_open_mr != null ? dt.carry_over_open_mr : dt.opening_backlog_count,
+                closureRate:     wo.closure_rate_pct,
+                pmDue:           pm.total_scheduled != null ? pm.total_scheduled : pm.total,
+                pmCompleted:     pm.completed != null ? pm.completed : pm.done_count,
+                pmOverdue:       pm.overdue,
+                pmCompliance:    pm.compliance_pct,
+                downtimeOpen:    wo.open != null ? wo.open : dt.total_active_workload,
+                downtimeClosed:  wo.closed != null ? wo.closed : wo.total_closed,
+                dtCarryOver:     dt.carry_over_open_mr != null ? dt.carry_over_open_mr : dt.opening_backlog_count,
+            },
+            latestUnackMr,
+            longestUnackMr,
+            mrFallbackNote: _mrFallback ? "List based on open/unresolved records — acknowledgement field not available in this dataset." : null,
+            mttrByGroup,
+            mtbfByGroup,
+            perfSummary,
+            recurringForecast,
+            rfCategories,
+            activeCatName: activeCat ? activeCat.name : (predictiveCategoryView || "Production Equipment"),
+            faultPattern:        pred.fault_pattern || null,
+            dataConfidence:      pred.data_confidence || {},
+            predKpiStrip:        (document.getElementById("mira-pred-kpi-strip") || {}).textContent || "",
+            unfinishedPm:        allUnfinished.slice(0, 10).map(_pmToRow),
+            totalUnfinishedPm:   allUnfinished.length,
+            pmFallbackNote: _pmFallback ? "List based on non-completed PM records — status field not available in this dataset." : null,
+            actionNotes,
+            alertRows,
+            exportedAt: new Date().toLocaleString(),
+        };
+    }
+
+    // ── Generate 7-slide management PPT from structured data ───────────────────
+    async function generateOvPpt(R) {
+        const pptx = new PptxGenJS();
+        pptx.layout = "LAYOUT_WIDE"; // 13.33 × 7.5"
+        const stg  = R.filters.stage === "stage1" ? "Stage 1" : R.filters.stage === "stage2" ? "Stage 2" : "All Stages";
+        const sub  = R.filters.label + (R.filters.dateRange ? "  \xb7  " + R.filters.dateRange : "") + "  \xb7  " + stg;
+        const TOTAL = 7;
+        const FF = "Calibri";
+
+        function hdr(slide, title, n) {
+            slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 13.33, h: 0.54, fill: { color: OVC.navyBg } });
+            slide.addText(title, { x: 0.18, y: 0.05, w: 9.5,  h: 0.26, fontSize: 14, bold: true, color: OVC.white, fontFace: FF });
+            slide.addText(sub,   { x: 0.18, y: 0.30, w: 10.5, h: 0.19, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+            slide.addText(n + " / " + TOTAL, { x: 12.0, y: 0.14, w: 1.15, h: 0.24, fontSize: 9, color: OVC.sub, align: "right", fontFace: FF });
+        }
+        function secLabel(slide, x, y, w, text, count) {
+            slide.addShape(pptx.ShapeType.rect, { x, y, w: 0.04, h: 0.22, fill: { color: OVC.accent }, line: { color: OVC.accent } });
+            const label = count != null ? text + "  (" + count + ")" : text;
+            slide.addText(label, { x: x + 0.10, y, w: w - 0.10, h: 0.22, fontSize: 9.5, bold: true, color: OVC.navyBg, fontFace: FF });
+        }
+        function kpiCard(slide, x, y, w, h, value, label, color) {
+            slide.addShape(pptx.ShapeType.roundRect, { x, y, w, h, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+            slide.addShape(pptx.ShapeType.rect,      { x, y: y + 0.07, w: 0.05, h: h - 0.14, fill: { color: color }, line: { color: color } });
+            slide.addText(_ovFmt(value), { x: x + 0.12, y: y + 0.06, w: w - 0.16, h: h * 0.57, fontSize: 20, bold: true, color, fontFace: FF, valign: "middle" });
+            slide.addText(label,         { x: x + 0.12, y: y + h * 0.62, w: w - 0.16, h: h * 0.35, fontSize: 7.5, color: OVC.slate, fontFace: FF });
+        }
+        function tHdr(cols) {
+            return cols.map(t => ({ text: t, options: { bold: true, fontSize: 8, color: OVC.white, fill: { color: OVC.navyBg }, valign: "middle" } }));
+        }
+        function tRow(cells, i) {
+            const bg = i % 2 === 0 ? OVC.white : "f1f5f9";
+            return cells.map(c => ({ text: String(c.v != null ? c.v : "—"), options: { fontSize: 7.5, color: c.c || OVC.text, fill: { color: bg }, bold: !!c.b, valign: "middle" } }));
+        }
+        function foot(slide) {
+            slide.addText(
+                "Data based on selected dashboard period and filters. Technician/Engineer verification required before action.  \xb7  Generated " + R.exportedAt,
+                { x: 0.18, y: 7.24, w: 13.0, h: 0.20, fontSize: 6.5, color: OVC.sub, fontFace: FF, italic: true }
+            );
+        }
+
+        // ─── Slide 1 — Maintenance Overview Summary ───────────────────────────
+        const s1 = pptx.addSlide();
+        hdr(s1, "Maintenance Overview Report", 1);
+        s1.addText(
+            "Period: " + R.filters.label + (R.filters.dateRange ? "  \xb7  " + R.filters.dateRange : "") +
+            "   |   Stage: " + stg + "   |   Year: " + R.filters.year,
+            { x: 0.18, y: 0.62, w: 13.0, h: 0.20, fontSize: 8.5, color: OVC.slate, fontFace: FF }
+        );
+        secLabel(s1, 0.18, 0.90, 8.0, "MR / Work Order Overview");
+        const mrKw = 3.10, mrKg = 0.12;
+        [
+            { v: R.overviewKpis.mrRaised,   l: "MR Raised",          c: OVC.accent },
+            { v: R.overviewKpis.mrOpen,      l: "Open / In Progress", c: OVC.amber  },
+            { v: R.overviewKpis.mrCarryOver, l: "Carry-over Open MR", c: OVC.red    },
+            { v: R.overviewKpis.closureRate != null ? _ovFmt(R.overviewKpis.closureRate) + "%" : null, l: "Closure Rate", c: OVC.green },
+        ].forEach((k, i) => kpiCard(s1, 0.18 + i * (mrKw + mrKg), 1.16, mrKw, 1.02, k.v, k.l, k.c));
+
+        const col2Y = 2.30;
+        secLabel(s1, 0.18, col2Y, 6.30, "PM Schedule Summary");
+        secLabel(s1, 6.85, col2Y, 6.30, "Downtime / MR Summary");
+        const cY = col2Y + 0.30, pmW = 2.95, pmG = 0.10, pmH = 0.48;
+        [
+            { v: R.overviewKpis.pmDue,      l: "PM Due",    c: OVC.accent },
+            { v: R.overviewKpis.pmCompleted, l: "Completed", c: OVC.green  },
+            { v: R.overviewKpis.pmOverdue,   l: "Overdue",   c: OVC.red    },
+            { v: R.overviewKpis.pmCompliance != null ? _ovFmt(R.overviewKpis.pmCompliance) + "%" : null, l: "Compliance", c: OVC.teal },
+        ].forEach((k, i) => kpiCard(s1, 0.18 + (i % 2) * (pmW + pmG), cY + Math.floor(i / 2) * (pmH + 0.08), pmW, pmH, k.v, k.l, k.c));
+        const dtW = 1.96, dtG = 0.12;
+        [
+            { v: R.overviewKpis.downtimeOpen,   l: "Open / In Progress", c: OVC.amber },
+            { v: R.overviewKpis.downtimeClosed, l: "Closed / Confirmed", c: OVC.green },
+            { v: R.overviewKpis.dtCarryOver,    l: "Carry-over Open",    c: OVC.red   },
+        ].forEach((k, i) => kpiCard(s1, 6.85 + i * (dtW + dtG), cY + 0.08, dtW, pmH * 2 + 0.08, k.v, k.l, k.c));
+
+        const notesY = cY + pmH * 2 + 0.08 + 0.22;
+        secLabel(s1, 0.18, notesY, 13.0, "Main Concern & Action Notes");
+        const slClrs = [OVC.red, OVC.text, OVC.accent];
+        let curY = notesY + 0.30;
+        R.actionNotes.forEach((line, i) => {
+            if (!line || curY > 5.70) return;
+            s1.addText(line, { x: 0.28, y: curY, w: 12.9, h: 0.26, fontSize: 9, color: slClrs[i] || OVC.text, fontFace: FF });
+            curY += 0.28;
+        });
+        R.alertRows.slice(0, 5).forEach(row => {
+            if (curY > 5.70) return;
+            const fc = row.flag === "Red" ? OVC.red : row.flag === "Amber" ? OVC.amber : OVC.slate;
+            const bullet = row.flag === "Red" ? "● " : row.flag === "Amber" ? "◆ " : "■ ";
+            s1.addText(bullet + row.area + "  —  " + row.why, { x: 0.32, y: curY, w: 12.82, h: 0.26, fontSize: 8.5, color: fc, fontFace: FF });
+            curY += 0.28;
+        });
+        if (!R.actionNotes.length && !R.alertRows.length) {
+            s1.addText("No action alerts for the selected period.", { x: 0.28, y: curY, w: 12.9, h: 0.26, fontSize: 9, color: OVC.sub, fontFace: FF });
+        }
+        foot(s1);
+
+        // ─── Slide 2 — Downtime & MR Action List ─────────────────────────────
+        const s2 = pptx.addSlide();
+        hdr(s2, "Downtime & MR Action List", 2);
+        s2.addText("Source: Downtime / MR data  \xb7  " + R.filters.label + "  \xb7  " + stg + "  \xb7  Unacknowledged = open with pending or no acknowledgement action",
+            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
+
+        var s2NoteY = 0.88;
+        if (R.mrFallbackNote) {
+            s2.addText("⚠ " + R.mrFallbackNote, { x: 0.18, y: s2NoteY, w: 13.0, h: 0.18, fontSize: 7, color: OVC.amber, italic: true, fontFace: FF });
+            s2NoteY += 0.20;
+        }
+        secLabel(s2, 0.18, s2NoteY, 10.0, "A.  Top 10 Latest Unacknowledged MR  (newest first)", R.latestUnackMr.length);
+        var aTableY2 = s2NoteY + 0.26;
+        const aCols2 = [1.35, 1.35, 2.8, 0.9, 1.4, 1.0, 4.2];
+        const aHdr2  = tHdr(["MR No.", "WO No.", "Equipment / Machine", "Days Wait", "Status", "Raised", "Issue Description"]);
+        const aData2 = R.latestUnackMr.slice(0, 8).map((r, i) => tRow([
+            { v: r.mrNo },
+            { v: r.woNo },
+            { v: r.machine },
+            { v: r.daysWaiting, c: r.daysWaiting > 14 ? OVC.red : r.daysWaiting > 7 ? OVC.amber : OVC.text },
+            { v: r.status },
+            { v: r.raisedDate },
+            { v: r.description },
+        ], i));
+        if (aData2.length) {
+            s2.addTable([aHdr2, ...aData2], { x: 0.18, y: aTableY2, w: 13.0, fontFace: FF, colW: aCols2, border: { color: OVC.border }, rowH: 0.25 });
+        } else {
+            s2.addText("No unacknowledged MR for this period.", { x: 0.28, y: aTableY2, w: 13.0, h: 0.28, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+        }
+        const aEnd2 = aTableY2 + 0.25 + (aData2.length ? aData2.length * 0.25 : 0.28);
+        if (R.latestUnackMr.length > 8) {
+            s2.addText("+" + (R.latestUnackMr.length - 8) + " more — see Downtime page for full list.",
+                { x: 0.28, y: aEnd2 + 0.04, w: 13.0, h: 0.16, fontSize: 7, color: OVC.slate, italic: true, fontFace: FF });
+        }
+        const bY2 = aEnd2 + (R.latestUnackMr.length > 8 ? 0.24 : 0.16);
+        secLabel(s2, 0.18, bY2, 10.0, "B.  Top 10 Longest Unacknowledged MR  (oldest wait first)", R.longestUnackMr.length);
+        const bCols2 = [1.35, 1.35, 2.8, 0.9, 1.4, 1.0, 4.2];
+        const bHdr2  = tHdr(["MR No.", "WO No.", "Equipment / Machine", "Days Wait", "Status", "Raised", "Issue Description"]);
+        const bData2 = R.longestUnackMr.slice(0, 8).map((r, i) => tRow([
+            { v: r.mrNo },
+            { v: r.woNo },
+            { v: r.machine },
+            { v: r.daysWaiting, c: r.daysWaiting > 14 ? OVC.red : r.daysWaiting > 7 ? OVC.amber : OVC.text },
+            { v: r.status },
+            { v: r.raisedDate },
+            { v: r.description },
+        ], i));
+        if (bData2.length) {
+            s2.addTable([bHdr2, ...bData2], { x: 0.18, y: bY2 + 0.25, w: 13.0, fontFace: FF, colW: bCols2, border: { color: OVC.border }, rowH: 0.25 });
+        } else {
+            s2.addText("No long-waiting MR for this period.", { x: 0.28, y: bY2 + 0.25, w: 13.0, h: 0.28, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+        }
+        const bEnd2 = bY2 + 0.25 + 0.25 + (bData2.length ? bData2.length * 0.25 : 0.28);
+        if (R.longestUnackMr.length > 8) {
+            s2.addText("+" + (R.longestUnackMr.length - 8) + " more — see Downtime page for full list.",
+                { x: 0.28, y: bEnd2 + 0.04, w: 13.0, h: 0.16, fontSize: 7, color: OVC.slate, italic: true, fontFace: FF });
+        }
+        foot(s2);
+
+        // ─── Slide 3 — Recurring Machine Issue Forecast (3 categories) ───────
+        const s3 = pptx.addSlide();
+        hdr(s3, "Recurring Machine Issue Forecast", 3);
+        if (R.predKpiStrip) s3.addText(R.predKpiStrip, { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 8, color: OVC.slate, fontFace: FF });
+        s3.addText("Corrective/Breakdown patterns ranked first. Preventive/Routine tasks shown below. Uses full 2024–2026 history.",
+            { x: 0.18, y: 0.82, w: 13.0, h: 0.16, fontSize: 7, color: OVC.slate, italic: true, fontFace: FF });
+
+        const rfCols3 = [0.28, 1.15, 1.55, 2.02, 1.05, 0.92, 1.58, 1.05, 0.58, 2.82];
+        const rfHdr3  = tHdr(["#", "Category", "Machine", "Latest Recurring Issue", "Pattern Type", "History MR Count", "Pattern Signal", "Next Window", "Conf.", "Suggested Action / Spare Part"]);
+        var s3Y = 1.02;
+        const rfCatColors = { "Corrective / Breakdown Pattern": OVC.red, "Preventive / Routine Pattern": OVC.green, "Mixed Pattern": OVC.amber };
+
+        (R.rfCategories || []).forEach(cat => {
+            const catHasMachines = cat.machines && cat.machines.length > 0;
+            const catLabel = cat.name + (cat.total_mrs ? "  (" + cat.total_mrs + " MR)" : "");
+            secLabel(s3, 0.18, s3Y, 13.0, catLabel, catHasMachines ? cat.machines.length : null);
+            s3Y += 0.24;
+            if (!catHasMachines) {
+                s3.addText("No recurring pattern data for this category.", { x: 0.28, y: s3Y, w: 13.0, h: 0.22, fontSize: 8, color: OVC.sub, fontFace: FF });
+                s3Y += 0.28;
+                return;
+            }
+            const rfRows3 = cat.machines.map((m, i) => {
+                const cc = String(m.confidence).toLowerCase() === "high" ? OVC.green : String(m.confidence).toLowerCase() === "medium" ? OVC.amber : OVC.slate;
+                const ptColor = rfCatColors[m.patternType] || OVC.slate;
+                const ptShort = /limited/i.test(m.patternType) ? "Limited" : /corrective|breakdown/i.test(m.patternType) ? "Corrective" : /preventive|routine/i.test(m.patternType) ? "Preventive" : "Mixed";
+                const histCount = (m.historyIssueCount || 0) + "/" + (m.historyMrCount || 0) + (m.historyPct != null ? " (" + m.historyPct + "%)" : "");
+                return tRow([
+                    { v: m.rank || (i + 1), c: OVC.slate },
+                    { v: m.category || cat.name, c: OVC.slate },
+                    { v: m.machine + (m.isCritical ? " ★" : ""), b: m.isCritical },
+                    { v: m.issue, c: OVC.accent },
+                    { v: ptShort, c: ptColor, b: true },
+                    { v: histCount, c: OVC.slate },
+                    { v: m.signal, c: OVC.slate },
+                    { v: m.nextWindow },
+                    { v: m.confidence, c: cc, b: true },
+                    { v: m.spare },
+                ], i);
+            });
+            s3.addTable([rfHdr3, ...rfRows3], { x: 0.18, y: s3Y, w: 13.0, fontFace: FF, colW: rfCols3, border: { color: OVC.border }, rowH: 0.24, fontSize: 5.8, margin: 0.02 });
+            s3Y += 0.24 + rfRows3.length * 0.24 + 0.12;
+        });
+
+        // Fault pattern + confidence at bottom
+        const rfBotY3 = Math.max(s3Y + 0.06, 5.60);
+        const fp = R.faultPattern;
+        s3.addShape(pptx.ShapeType.roundRect, { x: 0.18, y: rfBotY3, w: 6.45, h: 1.50, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+        secLabel(s3, 0.28, rfBotY3 + 0.10, 6.15, "Dominant Fault Pattern");
+        if (fp && !fp.empty) {
+            s3.addText((fp.fault_family || "—") + "  \xd7" + (fp.count || 0) + "  (" + (fp.pct_of_total || 0) + "% of MR)",
+                { x: 0.32, y: rfBotY3 + 0.36, w: 6.1, h: 0.26, fontSize: 10.5, color: OVC.accent, bold: true, fontFace: FF });
+            if (fp.affected_groups && fp.affected_groups.length)
+                s3.addText("Affects: " + fp.affected_groups.slice(0, 5).join(", "),
+                    { x: 0.32, y: rfBotY3 + 0.64, w: 6.1, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
+        } else {
+            s3.addText("No dominant fault pattern detected.", { x: 0.32, y: rfBotY3 + 0.36, w: 6.1, h: 0.24, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+        }
+        const conf = R.dataConfidence;
+        const cbc  = conf.band === "High" ? OVC.green : conf.band === "Medium" ? OVC.amber : OVC.red;
+        s3.addShape(pptx.ShapeType.roundRect, { x: 6.87, y: rfBotY3, w: 6.28, h: 1.50, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+        secLabel(s3, 6.97, rfBotY3 + 0.10, 6.0, "Data Confidence");
+        s3.addText((conf.band || "—") + "  —  " + (conf.label || "Confidence data unavailable."),
+            { x: 7.01, y: rfBotY3 + 0.36, w: 6.0, h: 0.26, fontSize: 9.5, color: cbc, bold: true, fontFace: FF });
+        [["Asset Mapped", conf.asset_mapping_pct], ["Complete Dates", conf.date_completeness_pct], ["WO Linked", conf.wo_link_pct]].forEach((pair, pi) => {
+            if (pair[1] != null) s3.addText(pair[0] + ": " + pair[1] + "%",
+                { x: 7.01, y: rfBotY3 + 0.64 + pi * 0.22, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
+        });
+        foot(s3);
+
+        // ─── Slide 4 — PM Schedule & Unfinished PM Tasks ─────────────────────
+        const s4 = pptx.addSlide();
+        hdr(s4, "PM Schedule & Unfinished PM Tasks", 4);
+        s4.addText("Source: PM Schedule data  \xb7  " + R.filters.label + "  \xb7  " + stg + "  \xb7  Sorted: Overdue first, oldest due date",
+            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
+        secLabel(s4, 0.18, 0.88, 7.0, "PM Schedule Summary");
+        const pmKw = 3.10, pmKg = 0.12;
+        [
+            { v: R.overviewKpis.pmDue,      l: "PM Due This Month", c: OVC.accent },
+            { v: R.overviewKpis.pmCompleted, l: "Completed",         c: OVC.green  },
+            { v: R.overviewKpis.pmOverdue,   l: "Overdue",           c: OVC.red    },
+            { v: R.overviewKpis.pmCompliance != null ? _ovFmt(R.overviewKpis.pmCompliance) + "%" : null, l: "PM Compliance", c: OVC.teal },
+        ].forEach((k, i) => kpiCard(s4, 0.18 + i * (pmKw + pmKg), 1.14, pmKw, 1.00, k.v, k.l, k.c));
+
+        var s4SecY = 2.26;
+        if (R.pmFallbackNote) {
+            s4.addText("⚠ " + R.pmFallbackNote, { x: 0.18, y: s4SecY, w: 13.0, h: 0.18, fontSize: 7, color: OVC.amber, italic: true, fontFace: FF });
+            s4SecY += 0.20;
+        }
+        secLabel(s4, 0.18, s4SecY, 10.0, "Unfinished / Overdue PM Tasks", R.totalUnfinishedPm || 0);
+        var s4TableY = s4SecY + 0.26;
+        const pmCols = [1.8, 3.5, 2.2, 1.2, 1.0, 1.8, 1.5];
+        const pmHdr  = tHdr(["PM Task ID", "Asset / Machine", "Functional Location", "Due Date", "Days OD", "Status", "Assigned To"]);
+        const pmData  = R.unfinishedPm.map((t, i) => tRow([
+            { v: t.id },
+            { v: t.asset },
+            { v: t.location },
+            { v: t.dueDate },
+            { v: t.isOverdue ? t.daysOverdue : "—", c: t.isOverdue ? OVC.red : OVC.slate, b: t.isOverdue },
+            { v: t.status, c: t.isOverdue ? OVC.red : t.status === "Backlog" ? OVC.amber : OVC.text },
+            { v: t.assignedTo },
+        ], i));
+        if (pmData.length) {
+            s4.addTable([pmHdr, ...pmData], { x: 0.18, y: s4TableY, w: 13.0, fontFace: FF, colW: pmCols, border: { color: OVC.border }, rowH: 0.27 });
+        } else {
+            s4.addText("No unfinished PM tasks for the selected period.", { x: 0.28, y: s4TableY, w: 13.0, h: 0.28, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+        }
+        if (R.totalUnfinishedPm > 10) {
+            const pmMoreY = s4TableY + 0.30 + (pmData.length ? pmData.length * 0.27 : 0.28);
+            s4.addText("+" + (R.totalUnfinishedPm - 10) + " more unfinished PM tasks — see PM Schedule page for full list.",
+                { x: 0.28, y: pmMoreY + 0.06, w: 13.0, h: 0.20, fontSize: 7.5, color: OVC.slate, italic: true, fontFace: FF });
+        }
+        foot(s4);
+
+        // ─── Slide 5 — Performance Summary ───────────────────────────────────
+        const s5 = pptx.addSlide();
+        hdr(s5, "Performance Summary", 5);
+        s5.addText("Computed from MR / WO records  \xb7  " + R.filters.label + "  \xb7  " + stg,
+            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
+
+        const ps = R.perfSummary;
+        secLabel(s5, 0.18, 0.88, 13.0, "Key Performance Indicators");
+        const pfW = 2.50, pfG = 0.12, pfH = 1.10;
+        [
+            { v: ps.mttrAvgDays != null ? ps.mttrAvgDays + "d" : "N/A", l: "Avg MTTR (Overall)",    c: OVC.accent },
+            { v: ps.mtbfAvgDays != null ? ps.mtbfAvgDays + "d" : "N/A", l: "Avg MTBF (Overall)",    c: OVC.teal  },
+            { v: ps.validWoCount,                                         l: "WOs with Valid Dates",  c: OVC.slate },
+            { v: ps.openMrCount,                                          l: "Open MR",               c: OVC.amber },
+            { v: ps.unackMrCount,                                         l: "Unacknowledged MR",     c: OVC.red   },
+        ].forEach((k, i) => kpiCard(s5, 0.18 + i * (pfW + pfG), 1.14, pfW, pfH, k.v, k.l, k.c));
+
+        const ps2Y = 1.14 + pfH + 0.22;
+        secLabel(s5, 0.18, ps2Y, 6.30, "Highest MTTR Machine Group");
+        s5.addShape(pptx.ShapeType.roundRect, { x: 0.18, y: ps2Y + 0.28, w: 6.30, h: 1.30, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+        const wmt = ps.worstMttrGroup;
+        if (wmt) {
+            s5.addText(wmt.mg, { x: 0.32, y: ps2Y + 0.38, w: 6.0, h: 0.30, fontSize: 11, bold: true, color: OVC.accent, fontFace: FF });
+            s5.addText("Avg MTTR: " + wmt.avgMttr.toFixed(1) + " days  \xb7  " + wmt.woCount + " WOs",
+                { x: 0.32, y: ps2Y + 0.72, w: 6.0, h: 0.22, fontSize: 8.5, color: OVC.text, fontFace: FF });
+            s5.addText("Top issue: " + wmt.topIssue + "  \xb7  Worst machine: " + wmt.worstAsset,
+                { x: 0.32, y: ps2Y + 0.96, w: 6.0, h: 0.22, fontSize: 8, color: OVC.slate, fontFace: FF });
+        } else {
+            s5.addText("Insufficient data.", { x: 0.32, y: ps2Y + 0.60, w: 6.0, h: 0.24, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+        }
+        secLabel(s5, 6.85, ps2Y, 6.30, "Lowest MTBF Machine Group  (most frequent breakdown)");
+        s5.addShape(pptx.ShapeType.roundRect, { x: 6.85, y: ps2Y + 0.28, w: 6.30, h: 1.30, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+        const wmbf = ps.worstMtbfGroup;
+        if (wmbf) {
+            s5.addText(wmbf.mg, { x: 6.99, y: ps2Y + 0.38, w: 6.0, h: 0.30, fontSize: 11, bold: true, color: OVC.teal, fontFace: FF });
+            s5.addText("Avg MTBF: " + wmbf.avgMtbf.toFixed(1) + " days  \xb7  " + wmbf.recurrences + " recurrences",
+                { x: 6.99, y: ps2Y + 0.72, w: 6.0, h: 0.22, fontSize: 8.5, color: OVC.text, fontFace: FF });
+            s5.addText("Top issue: " + wmbf.topIssue + "  \xb7  Worst machine: " + wmbf.worstAsset,
+                { x: 6.99, y: ps2Y + 0.96, w: 6.0, h: 0.22, fontSize: 8, color: OVC.slate, fontFace: FF });
+        } else {
+            s5.addText("Insufficient data.", { x: 6.99, y: ps2Y + 0.60, w: 6.0, h: 0.24, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+        }
+
+        const ps3Y = ps2Y + 1.30 + 0.30;
+        secLabel(s5, 0.18, ps3Y, 13.0, "Top Recurring Issue  &  Data Coverage");
+        s5.addShape(pptx.ShapeType.roundRect, { x: 0.18, y: ps3Y + 0.28, w: 6.30, h: 1.00, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+        s5.addText("Top Recurring Issue:", { x: 0.32, y: ps3Y + 0.36, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
+        s5.addText(ps.recurringIssue, { x: 0.32, y: ps3Y + 0.58, w: 6.0, h: 0.30, fontSize: 10, bold: true, color: OVC.accent, fontFace: FF });
+        const psRfMachine = (R.recurringForecast[0] && R.recurringForecast[0].machine) || "";
+        if (psRfMachine) s5.addText(psRfMachine, { x: 0.32, y: ps3Y + 0.88, w: 6.0, h: 0.20, fontSize: 7.5, color: OVC.slate, fontFace: FF });
+        s5.addShape(pptx.ShapeType.roundRect, { x: 6.85, y: ps3Y + 0.28, w: 6.30, h: 1.00, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+        s5.addText("MTTR / MTBF Data Coverage:", { x: 6.99, y: ps3Y + 0.36, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
+        const pctCov = ps.totalMrCount ? Math.round(ps.validWoCount / ps.totalMrCount * 100) : 0;
+        s5.addText(ps.validWoCount + " of " + ps.totalMrCount + " records have valid start / end dates  (" + pctCov + "%)",
+            { x: 6.99, y: ps3Y + 0.58, w: 6.0, h: 0.50, fontSize: 9, color: pctCov < 50 ? OVC.amber : OVC.text, fontFace: FF, wrap: true });
+        foot(s5);
+
+        // ─── Slide 6 — MTTR & MTBF Performance — Top Machine Groups ─────────
+        const s6 = pptx.addSlide();
+        hdr(s6, "MTTR & MTBF Performance — Top Machine Groups", 6);
+
+        // Subtitle
+        const todayStr6 = new Date().toISOString().slice(0, 10);
+        s6.addText(
+            "Avg MTTR = actual end − actual start (completed WOs, valid dates only) · " +
+            "Avg MTBF = gap between consecutive failures on same asset · " +
+            R.filters.label + (R.filters.dateRange ? " · " + R.filters.dateRange : " · YTD 2026 · " + todayStr6) +
+            " · " + stg,
+            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7, color: OVC.slate, fontFace: FF, italic: true }
+        );
+
+        // ── KPI chips row ─────────────────────────────────────────────────────
+        const ps6 = R.perfSummary;
+        const s6MgCount = new Set([...R.mttrByGroup.map(g => g.mg), ...R.mtbfByGroup.map(g => g.mg)]).size;
+        const chips6 = [
+            { label: "Overall Avg MTTR",        val: ps6.mttrAvgDays != null ? ps6.mttrAvgDays + "d"  : "—", tone: ps6.mttrAvgDays > 7 ? OVC.red : ps6.mttrAvgDays > 3 ? OVC.amber : OVC.green },
+            { label: "Overall Avg MTBF",        val: ps6.mtbfAvgDays != null ? ps6.mtbfAvgDays + "d"  : "—", tone: ps6.mtbfAvgDays != null && ps6.mtbfAvgDays < 30 ? OVC.red : ps6.mtbfAvgDays < 60 ? OVC.amber : OVC.green },
+            { label: "Completed WOs Analysed",  val: ps6.validWoCount != null ? String(ps6.validWoCount) : "—", tone: OVC.teal },
+            { label: "Machine Groups Reviewed",  val: String(s6MgCount),  tone: OVC.accent },
+        ];
+        const chipW = 3.08, chipX0 = 0.18, chipY = 0.86, chipH = 0.44;
+        chips6.forEach((c, i) => {
+            const cx = chipX0 + i * (chipW + 0.12);
+            s6.addShape(pptx.ShapeType.roundRect, { x: cx, y: chipY, w: chipW, h: chipH, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
+            s6.addText(c.val,   { x: cx + 0.08, y: chipY + 0.03, w: chipW - 0.16, h: 0.24, fontSize: 13, bold: true, color: c.tone, fontFace: FF, align: "center" });
+            s6.addText(c.label, { x: cx + 0.08, y: chipY + 0.27, w: chipW - 0.16, h: 0.14, fontSize: 7, color: OVC.slate, fontFace: FF, align: "center" });
+        });
+
+        // ── Combined priority for each machine group ───────────────────────────
+        const _s6Priority = (mg, mttrMap, mtbfMap) => {
+            const mt = mttrMap[mg]; const mb = mtbfMap[mg];
+            let score = 0;
+            if (mt && mt.avgMttr > 7) score += 2;
+            if (mb && mb.avgMtbf < 30) score += 2;
+            if ((mt && mt.woCount >= 3) || (mb && mb.recurrences >= 2)) score += 1;
+            return score >= 4 ? "High" : score >= 2 ? "Med" : "Low";
+        };
+        const _mttrMap = Object.fromEntries(R.mttrByGroup.map(g => [g.mg, g]));
+        const _mtbfMap = Object.fromEntries(R.mtbfByGroup.map(g => [g.mg, g]));
+
+        // ── Left table: Top 5 MTTR (sorted by priority desc, then avgMttr desc) ─
+        const tblY = 1.38, tblH_rows = 5;
+        const mttrTop5 = [...R.mttrByGroup]
+            .map(g => ({ ...g, _pri: _s6Priority(g.mg, _mttrMap, _mtbfMap) }))
+            .sort((a, b) => { const ps = {"High":3,"Med":2,"Low":1}; return (ps[b._pri]-ps[a._pri]) || b.avgMttr - a.avgMttr; })
+            .slice(0, tblH_rows);
+
+        secLabel(s6, 0.18, tblY - 0.24, 6.44, "Highest Avg MTTR — Slowest to Repair", mttrTop5.length);
+        const mCols1 = [0.28, 1.80, 0.70, 0.52, 1.60, 1.30, 0.24];  // total 6.44"
+        const mHdr1 = tHdr(["#", "Machine Group", "Avg MTTR", "WOs", "Top Issue", "Worst Machine", "!"]);
+        const mData1 = mttrTop5.map((g, i) => tRow([
+            { v: i + 1, c: OVC.slate },
+            { v: _ovTrunc(g.mg, 22), b: i === 0 },
+            { v: g.avgMttr.toFixed(1) + "d", c: g.avgMttr > 7 ? OVC.red : g.avgMttr > 3 ? OVC.amber : OVC.green, b: true },
+            { v: g.woCount, c: OVC.slate },
+            { v: _ovTrunc(g.topIssue, 20), c: OVC.accent },
+            { v: _ovTrunc(g.worstAsset, 18), c: g.worstMttr > 7 ? OVC.red : OVC.text },
+            { v: g._pri, c: g._pri === "High" ? OVC.red : g._pri === "Med" ? OVC.amber : OVC.green },
+        ], i));
+        if (mData1.length) {
+            s6.addTable([mHdr1, ...mData1], { x: 0.18, y: tblY, w: 6.44, fontFace: FF, colW: mCols1, border: { color: OVC.border }, rowH: 0.36 });
+        } else {
+            s6.addText("No MTTR data available.", { x: 0.18, y: tblY, w: 6.44, h: 0.30, fontSize: 8, color: OVC.sub, fontFace: FF });
+        }
+
+        // ── Right table: Top 5 MTBF (sorted by priority desc, then avgMtbf asc) ─
+        const mtbfTop5 = [...R.mtbfByGroup]
+            .map(g => ({ ...g, _pri: _s6Priority(g.mg, _mttrMap, _mtbfMap) }))
+            .sort((a, b) => { const ps = {"High":3,"Med":2,"Low":1}; return (ps[b._pri]-ps[a._pri]) || a.avgMtbf - b.avgMtbf; })
+            .slice(0, tblH_rows);
+
+        const tbl2X = 6.80;
+        secLabel(s6, tbl2X, tblY - 0.24, 6.34, "Lowest Avg MTBF — Most Frequent Breakdowns", mtbfTop5.length);
+        const mCols2 = [0.28, 1.72, 0.72, 0.62, 1.54, 1.22, 0.24];  // total 6.34"
+        const mHdr2 = tHdr(["#", "Machine Group", "Avg MTBF", "Gaps", "Top Issue", "Worst Machine", "!"]);
+        const mData2 = mtbfTop5.map((g, i) => tRow([
+            { v: i + 1, c: OVC.slate },
+            { v: _ovTrunc(g.mg, 22), b: i === 0 },
+            { v: g.avgMtbf.toFixed(1) + "d", c: g.avgMtbf < 30 ? OVC.red : g.avgMtbf < 60 ? OVC.amber : OVC.green, b: true },
+            { v: g.recurrences, c: OVC.slate },
+            { v: _ovTrunc(g.topIssue, 20), c: OVC.accent },
+            { v: _ovTrunc(g.worstAsset, 18), c: g.worstMtbf != null && g.worstMtbf < 30 ? OVC.red : OVC.text },
+            { v: g._pri, c: g._pri === "High" ? OVC.red : g._pri === "Med" ? OVC.amber : OVC.green },
+        ], i));
+        if (mData2.length) {
+            s6.addTable([mHdr2, ...mData2], { x: tbl2X, y: tblY, w: 6.34, fontFace: FF, colW: mCols2, border: { color: OVC.border }, rowH: 0.36 });
+        } else {
+            s6.addText("No MTBF data available (requires multiple closed WOs per machine).", { x: tbl2X, y: tblY, w: 6.34, h: 0.30, fontSize: 8, color: OVC.sub, fontFace: FF });
+        }
+
+        // Priority legend (centred between tables)
+        s6.addText("! = Priority:  High · Med · Low  (High = MTTR > 7d + MTBF < 30d + ≥3 WOs)",
+            { x: 0.18, y: tblY + 0.36 * (tblH_rows + 1) + 0.04, w: 13.0, h: 0.16, fontSize: 6.5, color: OVC.sub, italic: true, fontFace: FF });
+
+        // ── Management Focus insights ─────────────────────────────────────────
+        const insightY = tblY + 0.36 * (tblH_rows + 1) + 0.26;
+        secLabel(s6, 0.18, insightY, 13.0, "Management Focus");
+        const _genInsights = () => {
+            const ins = [];
+            const highPri = mttrTop5.filter(g => g._pri === "High").map(g => g.mg);
+            const highMttrOnly = mttrTop5.filter(g => g._pri === "Med" && g.avgMttr > 7 && !_mtbfMap[g.mg]).map(g => g.mg);
+            const highFreqOnly = mtbfTop5.filter(g => g._pri === "Med" && g.avgMtbf < 30 && !_mttrMap[g.mg]).map(g => g.mg);
+            if (highPri.length) ins.push(highPri.slice(0, 2).join(" and ") + " ha" + (highPri.length === 1 ? "s" : "ve") + " both high MTTR and frequent recurrence — priority for root cause review and PM effectiveness assessment.");
+            if (highMttrOnly.length) ins.push(highMttrOnly.slice(0, 2).join(" and ") + " show" + (highMttrOnly.length === 1 ? "s" : "") + " high repair duration with lower recurrence, indicating repair complexity rather than repeated breakdown — review spare parts availability and technician skill gap.");
+            if (highFreqOnly.length) ins.push(highFreqOnly.slice(0, 2).join(" and ") + " ha" + (highFreqOnly.length === 1 ? "s" : "ve") + " frequent repeated failures — review preventive maintenance frequency and trigger conditions.");
+            if (!ins.length && mttrTop5.length) ins.push((mttrTop5[0].mg || "Top machine group") + " has the highest average MTTR at " + mttrTop5[0].avgMttr.toFixed(1) + "d — review repair process and spare parts stocking.");
+            if (!ins.length) ins.push("Insufficient MTTR/MTBF history to generate insights. Ensure WOs have valid actual start and end dates.");
+            return ins.slice(0, 3);
+        };
+        const insights = _genInsights();
+        insights.forEach((txt, i) => {
+            s6.addText("• " + txt, {
+                x: 0.18, y: insightY + 0.22 + i * 0.24, w: 13.0, h: 0.22,
+                fontSize: 8, color: OVC.text, fontFace: FF, wrap: true,
+            });
+        });
+
+        // Footer note
+        s6.addText("Data based on selected dashboard period and filters. Technician/Engineer verification required before action.",
+            { x: 0.18, y: 7.15, w: 13.0, h: 0.16, fontSize: 6.5, color: OVC.sub, italic: true, fontFace: FF });
+        foot(s6);
+
+        const fileName = "Maintenance_Overview_Report_" + (R.filters.label || "YTD").replace(/[\s/]/g, "_") + ".pptx";
+        return pptx.writeFile({ fileName });
+    }
+
+    // ── PPT export entry point ─────────────────────────────────────────────────
+    async function exportOverviewPPT() {
         if (!window.PptxGenJS) { alert("PPT library is still loading. Please try again in a moment."); return; }
         if (!lastOverview) { alert("Overview data hasn’t loaded yet. Please wait and try again."); return; }
         _ovAllBtns(true);
-        const TO = window.setTimeout(() => { _ovAllBtns(false); alert("PPT export timed out. Please try again."); }, 30000);
+        const TO = window.setTimeout(() => {
+            _ovAllBtns(false);
+            alert("PPT generation timed out after 30 seconds. Please try again.");
+        }, 30000);
         try {
-            const R = overviewReportData();
-            const pptx = new PptxGenJS();
-            pptx.layout = "LAYOUT_WIDE";
-            const period = R.filters.label + (R.filters.dateRange ? "  \xb7  " + R.filters.dateRange : "");
-            const stage = R.filters.stage === "stage1" ? "Stage 1" : R.filters.stage === "stage2" ? "Stage 2" : "All Stages";
-            const subtitle = period + "  \xb7  " + stage;
-
-            function pptHdr(slide, title, sub) {
-                slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 13.33, h: 0.56, fill: { color: OVC.navyBg } });
-                slide.addText(title, { x: 0.2, y: 0.05, w: 9.5, h: 0.27, fontSize: 13, bold: true, color: OVC.white, fontFace: "Calibri" });
-                slide.addText(sub,   { x: 0.2, y: 0.3,  w: 11,  h: 0.2,  fontSize: 8.5, color: OVC.sub, fontFace: "Calibri" });
-                slide.addText("MIRA Overview", { x: 10.5, y: 0.1, w: 2.7, h: 0.35, fontSize: 8.5, color: "607080", align: "right", fontFace: "Calibri" });
-            }
-
-            // Slide 1: Overview Summary
-            const s1 = pptx.addSlide();
-            pptHdr(s1, "Maintenance Overview Report", subtitle);
-
-            const statusColor = R.statusText === "Critical" ? OVC.red : R.statusText === "Attention" ? OVC.amber : OVC.green;
-            s1.addShape(pptx.ShapeType.roundRect, { x: 0.15, y: 0.64, w: 1.4, h: 0.34, fill: { color: statusColor }, line: { color: statusColor }, rectRadius: 0.08 });
-            s1.addText(R.statusText, { x: 0.15, y: 0.65, w: 1.4, h: 0.32, fontSize: 9.5, bold: true, color: OVC.white, align: "center", fontFace: "Calibri" });
-            s1.addText(R.periodText, { x: 1.65, y: 0.68, w: 11.5, h: 0.26, fontSize: 8, color: OVC.slate, fontFace: "Calibri" });
-
-            const slClrs = [OVC.red, OVC.text, OVC.accent];
-            R.summaryLines.forEach((line, i) => {
-                if (!line) return;
-                s1.addText(line, { x: 0.15, y: 1.04 + i * 0.22, w: 13.0, h: 0.2, fontSize: 8, color: slClrs[i] || OVC.text, fontFace: "Calibri" });
-            });
-
-            const hkpis = R.headlineKpis.slice(0, 4);
-            const kpiW = hkpis.length ? (13.0 / hkpis.length) - 0.1 : 3;
-            hkpis.forEach((k, i) => {
-                const kx = 0.15 + i * (kpiW + 0.1);
-                const kt = k.tone === "critical" ? OVC.red : k.tone === "watch" ? OVC.amber : k.tone === "good" ? OVC.green : OVC.accent;
-                s1.addShape(pptx.ShapeType.roundRect, { x: kx, y: 1.72, w: kpiW, h: 0.9, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.06 });
-                s1.addText(String(k.display != null ? k.display : (k.value != null ? k.value : "—")), { x: kx + 0.07, y: 1.76, w: kpiW - 0.14, h: 0.4, fontSize: 17, bold: true, color: kt, align: "center", fontFace: "Calibri" });
-                s1.addText(k.label || "", { x: kx + 0.05, y: 2.18, w: kpiW - 0.1, h: 0.18, fontSize: 7, color: OVC.slate, align: "center", fontFace: "Calibri" });
-                if (k.note) s1.addText(k.note, { x: kx + 0.05, y: 2.35, w: kpiW - 0.1, h: 0.2, fontSize: 6.5, color: OVC.sub, align: "center", fontFace: "Calibri" });
-            });
-
-            const kpiSecs = [{ label: "PM Schedule", data: R.pmSection }, { label: "Downtime / MR", data: R.dtSection }, { label: "Spare Parts", data: R.spareSection }];
-            const secW = (13.0 / 3) - 0.1;
-            kpiSecs.forEach((sec, i) => {
-                const sx = 0.15 + i * (secW + 0.1);
-                s1.addShape(pptx.ShapeType.roundRect, { x: sx, y: 2.72, w: secW, h: 1.75, fill: { color: OVC.white }, line: { color: OVC.border }, rectRadius: 0.06 });
-                s1.addText(sec.label, { x: sx + 0.1, y: 2.77, w: secW - 1.1, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
-                const hs = (sec.data && sec.data.health_status) || "";
-                if (hs) {
-                    const hc = hs === "Good" ? OVC.green : hs === "Attention" ? OVC.amber : hs === "Critical" ? OVC.red : OVC.slate;
-                    s1.addText(hs, { x: sx + secW - 1.0, y: 2.77, w: 0.9, h: 0.22, fontSize: 7.5, color: hc, align: "right", fontFace: "Calibri" });
-                }
-                (sec.data && sec.data.metrics || []).slice(0, 4).forEach((m, mi) => {
-                    const my = 3.06 + mi * 0.3;
-                    const mc = m.tone === "critical" ? OVC.red : m.tone === "watch" ? OVC.amber : m.tone === "good" ? OVC.green : OVC.slate;
-                    s1.addText(m.label || "", { x: sx + 0.1, y: my, w: secW - 1.1, h: 0.24, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
-                    s1.addText(String(m.value || "—"), { x: sx + secW - 1.0, y: my, w: 0.9, h: 0.24, fontSize: 8, bold: true, color: mc, align: "right", fontFace: "Calibri" });
-                });
-            });
-
-            const ay = 4.56;
-            s1.addText("Daily Action Alerts", { x: 0.15, y: ay, w: 4, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
-            if (!R.alertRows.length) {
-                s1.addText("No active alerts for the selected period.", { x: 0.15, y: ay + 0.26, w: 13, h: 0.22, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
-            } else {
-                const aHdr = [
-                    [{ text: "Area / Asset", options: { bold: true, fontSize: 7.5, color: OVC.white, fill: { color: OVC.navyBg } } },
-                     { text: "Flag",         options: { bold: true, fontSize: 7.5, color: OVC.white, fill: { color: OVC.navyBg } } },
-                     { text: "Why it needs review", options: { bold: true, fontSize: 7.5, color: OVC.white, fill: { color: OVC.navyBg } } }],
-                ];
-                const aData = R.alertRows.slice(0, 5).map(row => {
-                    const fc = row.flag === "Red" ? OVC.red : row.flag === "Amber" ? OVC.amber : OVC.slate;
-                    return [
-                        { text: row.area || "—", options: { fontSize: 7, color: OVC.text } },
-                        { text: row.flag || "—", options: { fontSize: 7, color: fc, bold: true } },
-                        { text: row.why  || "—", options: { fontSize: 7, color: OVC.text } },
-                    ];
-                });
-                s1.addTable([...aHdr, ...aData], { x: 0.15, y: ay + 0.26, w: 13.0, fontFace: "Calibri", colW: [2.5, 0.9, 9.6], border: { color: OVC.border }, rowH: 0.28 });
-            }
-
-            // Slide 2: Recurring Machine Issue Forecast
-            const s2 = pptx.addSlide();
-            pptHdr(s2, "Recurring Machine Issue Forecast", subtitle);
-
-            if (R.predKpiStrip) s2.addText(R.predKpiStrip, { x: 0.15, y: 0.63, w: 13.0, h: 0.2, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
-
-            const activeCat = R.predCategories.find(c => c.name === R.categoryView) || R.predCategories[0];
-            const catLabel = activeCat ? activeCat.name : R.categoryView;
-            s2.addText("Category: " + catLabel, { x: 0.15, y: 0.87, w: 6, h: 0.2, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
-
-            if (activeCat && activeCat.top_machines && activeCat.top_machines.length) {
-                const mHdr = [[
-                    { text: "#",  options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
-                    { text: "Machine", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
-                    { text: "Issue Signature", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
-                    { text: "Suggested Spare Parts", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
-                    { text: "Stock / Purchase Status", options: { bold: true, fontSize: 7, color: OVC.white, fill: { color: OVC.navyBg } } },
-                ]];
-                const mData = activeCat.top_machines.slice(0, 5).map(m => {
-                    const unitName = m.unit || m.specific_machine_group || m.machine_group || "—";
-                    const issue = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
-                    const status = _forecastPurchaseStatus(m);
-                    const sc = status === "Purchase required" ? OVC.red : status === "Not required" ? OVC.green : OVC.amber;
-                    return [
-                        { text: String(m.rank || ""), options: { fontSize: 7, color: OVC.slate } },
-                        { text: unitName + (m.is_critical ? " ★" : ""), options: { fontSize: 7, color: OVC.text, bold: !!m.is_critical } },
-                        { text: issue, options: { fontSize: 7, color: OVC.accent } },
-                        { text: _forecastPartNames(m, 3), options: { fontSize: 7, color: OVC.slate } },
-                        { text: status, options: { fontSize: 7, color: sc, bold: true } },
-                    ];
-                });
-                s2.addTable([...mHdr, ...mData], { x: 0.15, y: 1.1, w: 13.0, fontFace: "Calibri", colW: [0.38, 2.22, 3.0, 5.0, 2.4], border: { color: OVC.border }, rowH: 0.42 });
-                s2.addText("Technician/Engineer verification required before action.", { x: 0.15, y: 3.55, w: 13, h: 0.18, fontSize: 7, color: OVC.slate, fontFace: "Calibri" });
-            } else {
-                s2.addText("No recurring machine data for the selected period.", { x: 0.15, y: 1.1, w: 13, h: 0.3, fontSize: 8.5, color: OVC.slate, fontFace: "Calibri" });
-            }
-
-            const botY = 5.7;
-            s2.addShape(pptx.ShapeType.roundRect, { x: 0.15, y: botY, w: 6.45, h: 1.62, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.06 });
-            s2.addText("Dominant Fault Pattern", { x: 0.25, y: botY + 0.07, w: 6.15, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
-            const fp = R.faultPattern;
-            if (fp && !fp.empty) {
-                s2.addText((fp.fault_family || "—") + "  \xd7" + (fp.count || 0) + "  (" + (fp.pct_of_total || 0) + "% of MR)", { x: 0.25, y: botY + 0.32, w: 6.15, h: 0.24, fontSize: 9, color: OVC.accent, bold: true, fontFace: "Calibri" });
-                if (fp.affected_groups && fp.affected_groups.length) s2.addText("Affects: " + fp.affected_groups.slice(0, 5).join(", "), { x: 0.25, y: botY + 0.6, w: 6.15, h: 0.2, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
-            } else {
-                s2.addText("No dominant fault pattern detected.", { x: 0.25, y: botY + 0.32, w: 6.15, h: 0.22, fontSize: 8, color: OVC.sub, fontFace: "Calibri" });
-            }
-
-            s2.addShape(pptx.ShapeType.roundRect, { x: 6.73, y: botY, w: 6.45, h: 1.62, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.06 });
-            s2.addText("Data Confidence", { x: 6.83, y: botY + 0.07, w: 6.15, h: 0.22, fontSize: 8.5, bold: true, color: OVC.navyBg, fontFace: "Calibri" });
-            const conf = R.dataConfidence;
-            const confBandColor = conf.band === "High" ? OVC.green : conf.band === "Medium" ? OVC.amber : OVC.red;
-            s2.addText((conf.band || "—") + "  —  " + (conf.label || "Confidence data unavailable."), { x: 6.83, y: botY + 0.32, w: 6.15, h: 0.24, fontSize: 8, color: confBandColor, bold: true, fontFace: "Calibri" });
-            [["Asset Mapped", conf.asset_mapping_pct], ["Complete Dates", conf.date_completeness_pct], ["WO Linked", conf.wo_link_pct]].forEach((pair, pi) => {
-                if (pair[1] != null) s2.addText(pair[0] + ": " + pair[1] + "%", { x: 6.83, y: botY + 0.6 + pi * 0.22, w: 6.15, h: 0.2, fontSize: 7.5, color: OVC.slate, fontFace: "Calibri" });
-            });
-
-            const fileName = "Maintenance_Overview_Report_" + (R.filters.label || "YTD").replace(/[\s/]/g, "_") + ".pptx";
-            pptx.writeFile({ fileName })
-                .then(() => { _ovAllBtns(false); window.clearTimeout(TO); })
-                .catch(() => { _ovAllBtns(false); window.clearTimeout(TO); });
+            const R = await buildPptReportData();
+            await generateOvPpt(R);
         } catch (e) {
+            alert("PPT export error: " + (e && e.message || "Unknown error."));
+        } finally {
             _ovAllBtns(false);
             window.clearTimeout(TO);
-            alert("PPT export error: " + e.message);
         }
     }
 
@@ -2837,41 +4408,41 @@
 
         return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Maintenance Overview Report</title>
 <style>
-@page{size:A4 landscape;margin:12mm 10mm}
+@page{size:A4 portrait;margin:15mm 14mm}
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:Inter,Arial,sans-serif;font-size:10px;color:#1e293b;background:#fff}
+body{font-family:Inter,Arial,sans-serif;font-size:9.5px;color:#1e293b;background:#fff}
 .pg{page-break-after:always;padding:4px 0}
 .pg:last-child{page-break-after:avoid}
-.ph{background:#1e293b;color:#fff;padding:7px 12px;border-radius:5px;margin-bottom:9px;display:flex;justify-content:space-between;align-items:center}
-.ph h1{font-size:12px;font-weight:700}
+.ph{background:#1e293b;color:#fff;padding:8px 12px;border-radius:5px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center}
+.ph h1{font-size:13px;font-weight:700}
 .ph .sub{font-size:8px;color:#94a3b8}
-.sr{display:flex;align-items:center;gap:9px;margin-bottom:7px}
+.sr{display:flex;align-items:center;gap:9px;margin-bottom:8px}
 .sb{padding:2px 10px;border-radius:999px;font-size:9px;font-weight:700;color:#fff}
 .pt{font-size:8px;color:#64748b}
-.sl{font-size:8.5px;padding:1px 0}
-.kr{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:9px}
-.kpi-c{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:6px 7px;text-align:center}
-.kpi-v{font-size:17px;font-weight:800}
-.kpi-l{font-size:7.5px;color:#64748b;margin-top:2px}
+.sl{font-size:8.5px;padding:2px 0}
+.kr{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:10px}
+.kpi-c{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:8px 7px;text-align:center}
+.kpi-v{font-size:18px;font-weight:800}
+.kpi-l{font-size:7.5px;color:#64748b;margin-top:3px}
 .kpi-n{font-size:7px;color:#94a3b8;margin-top:1px}
-.sr2{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:9px}
-.sec-c{background:#fff;border:1px solid #e2e8f0;border-radius:5px;padding:5px 8px}
-.sec-h{font-size:8px;font-weight:700;margin-bottom:4px;display:flex;justify-content:space-between}
-.sm{display:flex;justify-content:space-between;border-bottom:1px solid #f1f5f9;padding:2px 0}
+.sr2{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-bottom:10px}
+.sec-c{background:#fff;border:1px solid #e2e8f0;border-radius:5px;padding:6px 8px}
+.sec-h{font-size:8px;font-weight:700;margin-bottom:5px;display:flex;justify-content:space-between}
+.sm{display:flex;justify-content:space-between;border-bottom:1px solid #f1f5f9;padding:3px 0}
 .sml{font-size:7.5px;color:#64748b}
 .smv{font-size:8px;font-weight:700}
-.sl2{font-size:8.5px;font-weight:700;margin:7px 0 4px;color:#1e293b;border-bottom:1px solid #e2e8f0;padding-bottom:2px}
-.dqrow{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:7px}
+.sl2{font-size:8.5px;font-weight:700;margin:9px 0 4px;color:#1e293b;border-bottom:1px solid #e2e8f0;padding-bottom:3px}
+.dqrow{display:flex;flex-wrap:wrap;gap:3px;margin-bottom:8px}
 .dq{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:2px 7px;font-size:7.5px;border:1px solid #e2e8f0}
 .dqw{background:#fef3c7;color:#92400e;border-color:#fcd34d}
 .dqo{background:#f0fdf4;color:#166534;border-color:#86efac}
-.atbl,.mtbl{width:100%;border-collapse:collapse;font-size:7.5px}
-.atbl th,.atbl td,.mtbl th,.mtbl td{border:1px solid #e2e8f0;padding:3px 5px;vertical-align:top}
+.atbl,.mtbl{width:100%;border-collapse:collapse;font-size:7px}
+.atbl th,.atbl td,.mtbl th,.mtbl td{border:1px solid #e2e8f0;padding:4px 5px;vertical-align:top;word-break:break-word}
 .atbl th,.mtbl th{background:#1e293b;color:#fff;font-weight:700}
 .atbl tr:nth-child(even),.mtbl tr:nth-child(even){background:#f8fafc}
-.br{display:grid;grid-template-columns:1fr 1fr;gap:7px;margin-top:9px}
-.bc{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:7px 9px}
-.mu{color:#64748b;font-size:8px}
+.br{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.bc{background:#f8fafc;border:1px solid #e2e8f0;border-radius:5px;padding:8px 10px}
+.mu{color:#64748b;font-size:7.5px}
 .cb{background:#dc2626;color:#fff;border-radius:2px;padding:0 3px;font-size:6px}
 </style></head><body>
 <div class="pg">

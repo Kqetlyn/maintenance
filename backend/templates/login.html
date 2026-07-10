@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login | Maintenance Dashboard</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            display: grid;
+            place-items: center;
+            font-family: Inter, Arial, sans-serif;
+            background: #f8fafc;
+            color: #0f172a;
+        }
+        .login-shell {
+            width: min(420px, calc(100vw - 32px));
+            border: 1px solid #dbe4ee;
+            border-radius: 8px;
+            background: #ffffff;
+            box-shadow: 0 22px 48px rgba(15, 23, 42, 0.14);
+            overflow: hidden;
+        }
+        .login-header {
+            background: #0f172a;
+            color: #ffffff;
+            padding: 22px 24px;
+        }
+        .login-header h1 {
+            margin: 0;
+            font-size: 1.1rem;
+            letter-spacing: 0;
+        }
+        .login-header p {
+            margin: 6px 0 0;
+            color: #94a3b8;
+            font-size: 0.86rem;
+        }
+        form {
+            padding: 24px;
+            display: grid;
+            gap: 16px;
+        }
+        label {
+            display: grid;
+            gap: 7px;
+            font-size: 0.82rem;
+            font-weight: 700;
+            color: #475569;
+        }
+        input, select {
+            width: 100%;
+            border: 1px solid #cbd5e1;
+            border-radius: 7px;
+            padding: 12px 13px;
+            font: inherit;
+            color: #0f172a;
+            background: #ffffff;
+        }
+        input:focus, select:focus {
+            outline: 3px solid rgba(59, 130, 246, 0.18);
+            border-color: #3b82f6;
+        }
+        .login-error {
+            margin: 0;
+            border: 1px solid #fecaca;
+            border-radius: 7px;
+            background: #fef2f2;
+            color: #b91c1c;
+            padding: 10px 12px;
+            font-size: 0.86rem;
+            font-weight: 700;
+        }
+        button {
+            border: 0;
+            border-radius: 7px;
+            padding: 12px 14px;
+            background: #2563eb;
+            color: #ffffff;
+            font: inherit;
+            font-weight: 800;
+            cursor: pointer;
+        }
+        button:hover { background: #1d4ed8; }
+    </style>
+</head>
+<body>
+    <main class="login-shell">
+        <header class="login-header">
+            <h1>Maintenance Dashboard</h1>
+            <p>Sign in to continue.</p>
+        </header>
+        <form method="post" action="/login">
+            <input type="hidden" name="next" value="{{ next }}">
+            {% if error %}
+            <p class="login-error">{{ error }}</p>
+            {% endif %}
+            <label>
+                User
+                <select name="username" required autofocus>
+                    <option value="" disabled selected>Select an account</option>
+                    {% for group in login_groups %}
+                    <optgroup label="{{ group.label }}">
+                        {% for user in group.users %}
+                        <option value="{{ user.username }}">{{ user.username }}</option>
+                        {% endfor %}
+                    </optgroup>
+                    {% endfor %}
+                </select>
+            </label>
+            <label>
+                Password
+                <input name="password" type="password" autocomplete="current-password" required>
+            </label>
+            <button type="submit">Login</button>
+        </form>
+    </main>
+</body>
+</html>

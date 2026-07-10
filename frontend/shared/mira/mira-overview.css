@@ -898,6 +898,10 @@
     gap: 14px;
 }
 
+.mira-ov-daily-grid-single {
+    grid-template-columns: 1fr;
+}
+
 .mira-ov-daily-card {
     border: 1px solid #e7ecf3;
     border-radius: 10px;
@@ -1132,6 +1136,7 @@
 .mira-ov-risk-high   { background: #fee2e2; color: #991b1b; }
 .mira-ov-risk-medium { background: #fef3c7; color: #92400e; }
 .mira-ov-risk-low    { background: #f0fdf4; color: #166534; }
+.mira-ov-risk-neutral { background: #f1f5f9; color: #475569; }
 
 .mira-ov-review-select {
     border: 1px solid #e2e8f0;
@@ -2328,6 +2333,11 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
     gap: 8px;
 }
 
+.mira-pred-stock-na {
+    color: #94a3b8;
+    font-size: 13px;
+}
+
 .mira-pred-mg-toggle {
     flex-direction: column;
     align-items: stretch;
@@ -2360,6 +2370,26 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
 
 .mira-pred-toggle-btn-secondary:hover {
     background: #eff4f8;
+}
+
+.mira-pred-ask-btn {
+    appearance: none;
+    border: 1px solid #d1fae5;
+    background: #f0fdf4;
+    color: #166534;
+    border-radius: 7px;
+    padding: 6px 8px;
+    font-size: 0.64rem;
+    font-weight: 700;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.14s ease, border-color 0.14s ease, transform 0.14s ease;
+}
+
+.mira-pred-ask-btn:hover {
+    background: #dcfce7;
+    border-color: #86efac;
+    transform: translateY(-1px);
 }
 
 .mira-pred-panels-wrap {
@@ -2565,6 +2595,75 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
     padding: 10px;
 }
 
+.mira-pred-wording-para {
+    margin: 0 0 8px;
+    font-size: 0.82rem;
+    color: var(--mira-text, #1e293b);
+    line-height: 1.5;
+}
+.mira-pred-wording-para:last-child { margin-bottom: 0; }
+
+.mira-pred-spare-kit-list {
+    display: grid;
+    gap: 8px;
+}
+
+.mira-pred-spare-kit-item {
+    border: 1px solid #e3edf7;
+    border-radius: 8px;
+    background: #fff;
+    padding: 9px 11px;
+}
+
+.mira-pred-spare-kit-name {
+    font-weight: 600;
+    font-size: 0.78rem;
+    color: var(--mira-text, #1e293b);
+    display: flex;
+    align-items: baseline;
+    gap: 5px;
+    margin-bottom: 3px;
+    flex-wrap: wrap;
+}
+
+.mira-pred-spare-kit-idx {
+    color: var(--mira-muted, #64748b);
+    font-size: 0.72rem;
+    flex-shrink: 0;
+}
+
+.mira-pred-spare-kit-eng {
+    font-size: 0.72rem;
+    color: #4f46e5;
+    margin: 2px 0 5px 18px;
+}
+
+.mira-pred-trans-unverified {
+    color: var(--mira-muted, #64748b);
+    font-style: italic;
+}
+
+.mira-pred-spare-kit-meta {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 4px;
+}
+
+.mira-pred-spare-kit-reason {
+    font-size: 0.68rem;
+    color: var(--mira-muted, #64748b);
+    flex: 1;
+    min-width: 100px;
+}
+
+.mira-pred-spare-kit-action {
+    font-size: 0.68rem;
+    color: var(--mira-muted, #64748b);
+    font-style: italic;
+}
+
 .mira-pred-empty-note {
     margin: 0;
 }
@@ -2677,6 +2776,22 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
 }
 
 /* ── Issue proof sub-line ────────────────────────────────────────────────── */
+.mira-pred-pattern-type {
+    font-size: 0.62rem;
+    color: var(--mira-muted, #64748b);
+    margin-top: 3px;
+    font-style: italic;
+    letter-spacing: 0.01em;
+}
+.mira-pred-pattern-corrective {
+    color: #dc2626;
+    font-style: normal;
+    font-weight: 600;
+}
+.mira-pred-pattern-preventive {
+    color: #16a34a;
+    font-style: normal;
+}
 .mira-pred-issue-proof {
     font-size: 0.65rem;
     color: var(--mira-muted, #64748b);
@@ -2733,7 +2848,7 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
     opacity: 1;
 }
 .mira-pred-drawer {
-    width: 420px;
+    width: 560px;
     max-width: 92vw;
     height: 100%;
     background: #ffffff;
@@ -2889,4 +3004,440 @@ details[open] > .mira-ov-details-summary::before { transform: rotate(90deg); }
 
 @media (max-width: 540px) {
     .mira-pred-drawer { width: 100%; max-width: 100%; }
+}
+
+/* ── Asset "View Details" drill-down: header + tabs (extends the drawer above) ── */
+.mira-pred-detail-body { padding: 0; }
+.mira-pred-detail-header {
+    padding: 16px 16px 12px;
+    border-bottom: 1px solid #eef2f7;
+}
+.mira-pred-detail-header-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+}
+.mira-pred-detail-header-top h3 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 800;
+    color: #0f172a;
+}
+.mira-pred-detail-header-top p { margin: 2px 0 0; }
+.mira-pred-detail-header-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 12px;
+}
+.mira-pred-detail-meta-chip {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px 10px;
+    border: 1px solid #eef2f7;
+    border-radius: 7px;
+    background: #f8fafc;
+    min-width: 96px;
+}
+.mira-pred-detail-meta-chip span {
+    font-size: 0.6rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #94a3b8;
+}
+.mira-pred-detail-meta-chip strong {
+    font-size: 0.76rem;
+    font-weight: 700;
+    color: #1e293b;
+}
+.mira-pred-detail-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 8px 12px 0;
+    border-bottom: 1px solid #eef2f7;
+    background: #fbfcfe;
+}
+.mira-pred-detail-tab {
+    appearance: none;
+    background: none;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: #64748b;
+    font-size: 0.72rem;
+    font-weight: 700;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: color 0.12s ease, border-color 0.12s ease;
+}
+.mira-pred-detail-tab:hover { color: #1e293b; }
+.mira-pred-detail-tab.active {
+    color: #2563eb;
+    border-bottom-color: #2563eb;
+}
+.mira-pred-detail-panels { padding: 4px 0 20px; }
+.mira-pred-detail-panel { display: none; }
+.mira-pred-detail-panel.mira-pred-detail-panel-active { display: block; }
+.mira-pred-detail-empty {
+    padding: 24px 16px;
+    text-align: center;
+}
+
+/* ── § 2 Maintenance Risk Snapshot — KPI card footer nav buttons ─────────── */
+.mira-ov-kpi-footer {
+    margin-top: auto;
+    padding-top: 10px;
+    border-top: 1px solid #eef2f7;
+    display: flex;
+    justify-content: flex-end;
+}
+
+/* ── § 1 Daily Action Alerts — category group headers ───────────────────── */
+.mira-ov-alert-cat-header {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 0 4px;
+    margin-top: 8px;
+}
+.mira-ov-alert-cat-header:first-child { margin-top: 0; }
+
+.mira-ov-alert-cat-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 999px;
+    font-size: 0.66rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.mira-ov-alert-cat-immediate {
+    background: #fee2e2;
+    color: #b91c1c;
+    border: 1px solid #fca5a5;
+}
+.mira-ov-alert-cat-recurring {
+    background: #fef3c7;
+    color: #92400e;
+    border: 1px solid #fcd34d;
+}
+.mira-ov-alert-cat-data {
+    background: #f1f5f9;
+    color: #475569;
+    border: 1px solid #cbd5e1;
+}
+.mira-ov-alert-cat-spare {
+    background: #eff6ff;
+    color: #1d4ed8;
+    border: 1px solid #93c5fd;
+}
+
+/* Controlled Predictive Maintenance Cards */
+.mira-pred-risk-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 14px;
+}
+
+.mira-pred-risk-card {
+    border: 1px solid #dbe4ef;
+    border-left-width: 4px;
+    border-radius: 8px;
+    background: #fff;
+    padding: 14px;
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
+}
+
+.mira-pred-risk-high { border-left-color: #dc2626; }
+.mira-pred-risk-medium { border-left-color: #d97706; }
+.mira-pred-risk-low { border-left-color: #16a34a; }
+
+.mira-pred-risk-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.mira-pred-risk-head h3 {
+    margin: 0 0 3px;
+    font-size: 1rem;
+    color: #0f172a;
+}
+
+.mira-pred-risk-facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+    margin-bottom: 12px;
+}
+
+.mira-pred-risk-fact {
+    border: 1px solid #eef2f7;
+    border-radius: 8px;
+    padding: 8px;
+    background: #f8fafc;
+}
+
+.mira-pred-risk-fact span,
+.mira-pred-risk-block-title {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #64748b;
+}
+
+.mira-pred-risk-fact strong {
+    font-size: 0.82rem;
+    color: #0f172a;
+}
+
+.mira-pred-risk-block,
+.mira-pred-risk-ai {
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid #eef2f7;
+}
+
+.mira-pred-risk-block p {
+    margin: 0;
+    line-height: 1.5;
+    color: #334155;
+}
+
+.mira-pred-risk-list,
+.mira-pred-rule-list {
+    margin: 0;
+    padding-left: 18px;
+    color: #334155;
+    line-height: 1.5;
+}
+
+.mira-pred-risk-ai {
+    background: #f8fafc;
+    border: 1px solid #e2e8f0;
+    border-radius: 8px;
+    padding: 10px;
+}
+
+.mira-pred-view-details-btn {
+    appearance: none;
+    width: 100%;
+    margin-top: 12px;
+    padding: 8px 10px;
+    border: 1px solid #dbe4ef;
+    border-radius: 7px;
+    background: #f8fafc;
+    color: #2563eb;
+    font-size: 0.74rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+.mira-pred-view-details-btn:hover { background: #eff6ff; }
+
+.mira-pred-methodology-footnote {
+    margin: 12px 0 0;
+    font-size: 0.68rem;
+    color: #94a3b8;
+    line-height: 1.6;
+}
+.mira-pred-methodology-link {
+    appearance: none;
+    background: none;
+    border: none;
+    padding: 0;
+    color: #2563eb;
+    font-size: 0.68rem;
+    font-weight: 700;
+    text-decoration: underline;
+    cursor: pointer;
+}
+
+.mira-pred-methodology-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 1300;
+    background: rgba(15, 23, 42, 0.4);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+.mira-pred-methodology-overlay.mira-pred-methodology-open {
+    pointer-events: auto;
+    opacity: 1;
+}
+.mira-pred-methodology-modal {
+    width: 460px;
+    max-width: 92vw;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 24px 48px rgba(15, 23, 42, 0.2);
+    transform: translateY(8px);
+    transition: transform 0.15s ease;
+}
+.mira-pred-methodology-overlay.mira-pred-methodology-open .mira-pred-methodology-modal {
+    transform: translateY(0);
+}
+.mira-pred-methodology-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid #eef2f7;
+    font-size: 0.82rem;
+    font-weight: 800;
+    color: #0f172a;
+    flex-shrink: 0;
+}
+.mira-pred-methodology-body {
+    padding: 14px 16px;
+    overflow-y: auto;
+}
+.mira-pred-methodology-row {
+    padding: 8px 0;
+    border-bottom: 1px solid #f1f5f9;
+}
+.mira-pred-methodology-row:last-child { border-bottom: none; }
+.mira-pred-methodology-row strong {
+    display: block;
+    font-size: 0.76rem;
+    color: #0f172a;
+    margin-bottom: 2px;
+}
+.mira-pred-methodology-row p {
+    margin: 0;
+    font-size: 0.72rem;
+    color: #64748b;
+    line-height: 1.5;
+}
+
+/* ── Work Orders tab ──────────────────────────────────────────────────────── */
+.mira-pred-wo-tab { padding: 0 16px 16px; }
+.mira-pred-wo-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 12px 0 8px;
+}
+.mira-pred-wo-filter, .mira-pred-wo-custom input {
+    border: 1px solid #dbe4ef;
+    border-radius: 6px;
+    padding: 5px 7px;
+    font-size: 0.7rem;
+    color: #1e293b;
+    background: #fff;
+}
+.mira-pred-wo-custom {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 0.68rem;
+    color: #64748b;
+}
+.mira-pred-wo-custom.hidden { display: none; }
+.mira-pred-wo-export {
+    margin-left: auto;
+    appearance: none;
+    border: 1px solid #dbe4ef;
+    border-radius: 6px;
+    background: #f8fafc;
+    color: #2563eb;
+    font-size: 0.7rem;
+    font-weight: 700;
+    padding: 5px 10px;
+    cursor: pointer;
+}
+.mira-pred-wo-export:hover { background: #eff6ff; }
+.mira-pred-wo-count { margin: 4px 0 8px; font-size: 0.68rem; }
+.mira-pred-wo-table-wrap { overflow-x: auto; }
+.mira-pred-wo-table, .mira-pred-sp-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.7rem;
+}
+/* Fixed layout + wrapping (instead of nowrap) so all 9 columns fit inside
+   the drawer without forcing horizontal scroll on narrower viewports. */
+.mira-pred-wo-table {
+    table-layout: fixed;
+    font-size: 0.62rem;
+}
+.mira-pred-wo-table th:nth-child(1) { width: 9%; }
+.mira-pred-wo-table th:nth-child(2) { width: 16%; }
+.mira-pred-wo-table th:nth-child(3) { width: 7%; }
+.mira-pred-wo-table th:nth-child(4) { width: 19%; }
+.mira-pred-wo-table th:nth-child(5) { width: 8%; }
+.mira-pred-wo-table th:nth-child(6) { width: 6%; }
+.mira-pred-wo-table th:nth-child(7) { width: 9%; }
+.mira-pred-wo-table th:nth-child(8) { width: 19%; }
+.mira-pred-wo-table th:nth-child(9) { width: 7%; }
+.mira-pred-wo-table th, .mira-pred-sp-table th {
+    text-align: left;
+    padding: 5px 4px;
+    background: #f8fafc;
+    color: #64748b;
+    font-size: 0.6rem;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+    border-bottom: 1px solid #eef2f7;
+    white-space: normal;
+    overflow-wrap: break-word;
+}
+.mira-pred-wo-table td, .mira-pred-sp-table td {
+    padding: 5px 4px;
+    border-bottom: 1px solid #f1f5f9;
+    color: #334155;
+    vertical-align: top;
+    overflow-wrap: break-word;
+}
+.mira-pred-wo-expand {
+    appearance: none;
+    border: 1px solid #dbe4ef;
+    border-radius: 5px;
+    background: #fff;
+    color: #2563eb;
+    font-size: 0.7rem;
+    font-weight: 700;
+    line-height: 1;
+    padding: 3px 6px;
+    cursor: pointer;
+}
+.mira-pred-wo-detail-row td {
+    background: #f8fafc;
+    padding: 10px 8px;
+}
+.mira-pred-wo-detail-row.hidden { display: none; }
+
+/* ── Spare Parts tab ──────────────────────────────────────────────────────── */
+.mira-pred-sp-tab .mira-pred-drawer-section table { margin-top: 4px; }
+
+/* ── Trends tab ───────────────────────────────────────────────────────────── */
+.mira-pred-pvc-bar {
+    display: flex;
+    height: 10px;
+    border-radius: 999px;
+    overflow: hidden;
+    background: #eef2f7;
+    margin-bottom: 8px;
+}
+.mira-pred-pvc-seg { height: 100%; }
+.mira-pred-pvc-preventive { background: #16a34a; }
+.mira-pred-pvc-corrective { background: #dc2626; }
+.mira-pred-trend-canvas {
+    width: 100% !important;
+    height: 160px !important;
 }

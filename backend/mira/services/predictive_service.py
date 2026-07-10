@@ -10,6 +10,7 @@ New structure (replaces flat risk_groups):
 """
 from __future__ import annotations
 
+import calendar
 import hashlib
 import json
 import re
@@ -173,7 +174,7 @@ _CATCH_ALL_LOWER = frozenset(
 )
 
 # Display order for categories
-_CATEGORY_ORDER = ["Production Equipment", "Utilities", "Facility / Building"]
+_CATEGORY_ORDER = ["Production Equipment", "Utilities", "Refrigeration", "Facility / Building"]
 
 # Minimum MRs per machine group to appear in top-5
 _MIN_MACHINE_MRS = 2
@@ -197,7 +198,7 @@ _SPECIFIC_MACHINE_RULES: list[tuple[str, list[str]]] = [
     ("Hot Oil Boiler", ["hot oil boiler"]),
     ("Air Compressor", ["air compressor"]),
     ("Air Dryer", ["air dryer"]),
-    ("Bratt Pan", ["bratt pan", "bratt"]),
+    ("Bratt Pan", ["bratt pan", "brattpan", "bratt"]),
     ("Combi Oven", ["combi oven", "combi"]),
     ("Steam Box", ["steam box", "steambox"]),
     ("X-Ray", ["x-ray", "xray", "x ray"]),
@@ -482,6 +483,35 @@ def _row_mr_id(row: dict) -> str:
     ).strip()
 
 
+def _row_ttr_hours(row: dict) -> Optional[float]:
+    """TTR/duration field name varies by import pipeline (ttr_hours on the
+    PowerBI/SQL path, duration_hours elsewhere) — check both."""
+    for key in ("ttr_hours", "duration_hours"):
+        val = row.get(key)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _row_current_status_label(row: dict) -> str:
+    """Human status for the detail drawer — is_open is the most reliable field
+    across pipelines; fall back to request_state/status_category/status."""
+    is_open = row.get("is_open")
+    if is_open is True:
+        return "Open"
+    if is_open is False:
+        for key in ("request_state", "status_category"):
+            val = row.get(key)
+            if val:
+                return str(val)
+        return "Closed"
+    bucket = _row_status_bucket(row)
+    return {"open": "Open", "finished": "Finished"}.get(bucket, "Other")
+
+
 def _row_asset_id(row: dict) -> str:
     return str(row.get("asset_id") or "").strip()
 
@@ -541,7 +571,7 @@ _CAT_DISPLAY = {
     "Production Equipment": "Production Equipment",
     "Utilities": "Utilities",
     "Utilities / Support": "Utilities",
-    "Refrigeration": "Utilities",
+    "Refrigeration": "Refrigeration",
     "Facility / Building": "Facility / Building",
 }
 
@@ -582,7 +612,8 @@ _GROUP_KEYWORDS_CURATED: dict[str, list[str]] = {
                                 "หลอดไฟ", "ผ้าม่าน", "ห้องน้ำ", "สุขา", "บันได", "ผนัง", "ม่านพลาสติก"],
 }
 
-_GROUP_INDEX_CACHE: dict = {"sig": None, "index": None}
+_GROUP_INDEX_CACHE: dict = {"sig": None, "index": None, "checked_at": 0.0}
+_GROUP_INDEX_RECHECK_SECONDS = 10.0
 
 
 def _norm_blob(*values) -> str:
@@ -642,6 +673,39 @@ def _keyword_extract_unit_from_text(text: str) -> Optional[str]:
             if m:
                 return f"{label} No.{m.group(1)}"
             return None  # machine type found but no unit number → not specific
+    return None
+
+
+def _unit_family_and_number(unit_name: str | None) -> tuple[str, str]:
+    text = _norm_key(unit_name)
+    m = re.search(r"\bno\s*(\d+)\b", text)
+    if not m:
+        m = re.search(r"(\d+)\s*$", text)
+    number = m.group(1) if m else ""
+    family = re.sub(r"\bno\s*\d+\b", " ", text)
+    family = re.sub(r"\d+\s*$", " ", family)
+    family = re.sub(r"\s+", " ", family).strip()
+    return family, number
+
+
+def _description_unit_override(row: dict, display_name: str, index: dict) -> Optional[str]:
+    """Prefer an explicit unit in the MR text over a suspicious shared asset id.
+
+    Some rows carry a broad/shared asset id whose Asset Master display name is
+    Bratt Pan No.1 while the MR description clearly says BrattPan4/Bratt Pan 4.
+    When the machine family matches but the unit number differs, use the text
+    unit so examples and recurrence stay on the physical machine named by the MR.
+    """
+    desc_text = _row_issue_text(row) or _row_description(row)
+    if not desc_text.strip():
+        return None
+    text_unit = _qwen_extract_unit(desc_text, index) or _keyword_extract_unit_from_text(desc_text)
+    if not text_unit:
+        return None
+    display_family, display_no = _unit_family_and_number(display_name)
+    text_family, text_no = _unit_family_and_number(text_unit)
+    if display_family and text_family and display_family == text_family and text_no and text_no != display_no:
+        return text_unit
     return None
 
 
@@ -739,7 +803,7 @@ def resolve_to_unit(row: dict) -> tuple[Optional[str], str, Optional[str]]:
             specific, mg, cat, display_name, is_area = entry
             disp_cat = index["cat_display"].get(cat, "Facility / Building")
             if not is_area and display_name and not _is_catch_all(display_name):
-                return display_name, aid, disp_cat
+                return _description_unit_override(row, display_name, index) or display_name, aid, disp_cat
             # Area bucket: extract unit from description
             desc_text = _row_issue_text(row) or _row_description(row)
             unit = (_qwen_extract_unit(desc_text, index)
@@ -822,19 +886,37 @@ def _compute_group_index(mapping: dict) -> dict:
 
 
 def _group_index() -> dict:
-    """Cached machine-group index, rebuilt when Asset_Master changes."""
+    """Cached machine-group index, rebuilt when Asset_Master changes.
+
+    resolve_to_unit() calls this once per row, and every call used to hit the
+    DB (get_asset_master_sync_meta, via load_asset_mapping) just to check
+    whether the signature moved — ~6ms each, which is invisible for a single
+    row but adds tens of seconds once a caller resolves thousands of rows
+    (e.g. an asset's full history). Asset_Master syncs are infrequent, so a
+    short recheck window is enough to catch a change without paying that
+    round-trip on every row.
+    """
+    now = time.time()
+    if (
+        _GROUP_INDEX_CACHE["index"] is not None
+        and (now - _GROUP_INDEX_CACHE["checked_at"]) < _GROUP_INDEX_RECHECK_SECONDS
+    ):
+        return _GROUP_INDEX_CACHE["index"]
     try:
         from pathlib import Path as _P
         import asset_mapping as _am
         data_dir = str(_P(__file__).resolve().parents[3] / "data")
         mapping = _am.load_asset_mapping(data_dir)
     except Exception:
+        if _GROUP_INDEX_CACHE["index"] is not None:
+            return _GROUP_INDEX_CACHE["index"]
         return {"id_to_group": {}, "id_to_specific": {}, "mg_to_cat": {}, "keywords": [], "cat_display": _CAT_DISPLAY}
     sig = mapping.get("last_synced")
     if _GROUP_INDEX_CACHE["sig"] == sig and _GROUP_INDEX_CACHE["index"] is not None:
+        _GROUP_INDEX_CACHE["checked_at"] = now
         return _GROUP_INDEX_CACHE["index"]
     index = _compute_group_index(mapping)
-    _GROUP_INDEX_CACHE.update(sig=sig, index=index)
+    _GROUP_INDEX_CACHE.update(sig=sig, index=index, checked_at=now)
     return index
 
 
@@ -1026,6 +1108,238 @@ def _compute_cluster_recurrence(
     avg = sum(gaps) / len(gaps)
     return round(median, 1), round(avg, 1), len(gaps), n_records, gaps
 
+
+# ── Recurring Issue Forecast helpers (full-history recurrence logic) ─────────────
+
+_MONTH_ABBR = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def _occurrence_date(row: dict) -> Optional[date]:
+    """Prefer CreatedDate/RequestDate, then ActualStart. Never ActualEnd."""
+    for key in ("request_created_time", "created_date", "raised_date",
+                "actual_start_time", "actual_start"):
+        val = row.get(key)
+        if not val:
+            continue
+        parsed = kpi._parse_mix_datetime(val)
+        if parsed:
+            d = parsed.date()
+            if d.year >= 2000:
+                return d
+    return None
+
+
+def _normalize_unit_name(name: str) -> str:
+    return re.sub(r"\s+", " ", (name or "").strip()).lower()
+
+
+# (label, keywords, is_preventive)
+_RECURRING_ISSUE_RULES: list[tuple[str, list[str], bool]] = [
+    # ── Preventive / routine ───────────────────────────────────────────────────
+    ("Water filter / filter change",     ["เปลี่ยนกรองน้ำ", "water filter", "ไส้กรอง", "filter change", "replace filter", "กรองน้ำ"],      True),
+    ("Resin / softener cleaning",        ["ล้างเรซิน", "resin clean", "clean resin", "softener clean", "เรซิน"],                           True),
+    ("Inspection / PM routine",          ["preventive maintenance", "pm routine", "inspection", "ตรวจสอบ", "planned maintenance", "ตรวจเช็ค"], True),
+    ("Cleaning / hygiene task",          ["ทำความสะอาด", "sanitize", "hygiene cleaning"],                                                   True),
+    # ── Corrective / breakdown ─────────────────────────────────────────────────
+    ("Heating / temperature fault",      ["temperature", "heating", "ไม่ร้อน", "not hot", "อุณหภูมิ", "thermal fault", "ความร้อน"],         False),
+    ("Leakage — gasket / steam / valve", ["ประเก็น", "ปะเก็น", "gasket", "รั่ว", "steam leak", "สตีมรั่ว", "pipe leak"],                    False),
+    ("Valve / pipe fault",               ["valve", "วาล์ว", "condensate", "boiler", "ท่อ", "steam"],                                       False),
+    ("Motor / noise / vibration",        ["motor", "มอเตอร์", "noise", "เสียงดัง", "vibration", "สั่น", "abnormal sound"],                  False),
+    ("Electrical fault",                 ["electrical fault", "ไฟฟ้า", "circuit breaker", "power fault", "สายไฟขาด"],                      False),
+    ("Mechanical breakdown",             ["breakdown", "เสีย", "ชำรุด", "broken", "damage", "fault", "not working", "ไม่ทำงาน"],             False),
+    ("Refrigerant / cooling issue",      ["refrigerant", "น้ำยา", "cooling issue", "ความเย็น"],                                             False),
+    ("Pump / compressor fault",          ["pump fault", "compressor fault", "ปั๊มเสีย", "คอมเพรสเซอร์เสีย", "pump fail"],                  False),
+]
+
+_PREVENTIVE_TEXT_KEYWORDS = (
+    "filter change", "replace filter", "เปลี่ยนกรอง", "เปลี่ยนไส้กรอง", "เปลี่ยนกรองน้ำ",
+    "resin clean", "clean resin", "ล้างเรซิน",
+    "preventive", "inspection", "ตรวจสอบ", "ตรวจเช็ค",
+    "routine service", "service check", "scheduled maintenance",
+    "ทำความสะอาด", "sanitize",
+)
+
+
+def _classify_recurring_issue_v2(text: str) -> tuple[str, bool]:
+    """Return (label, is_preventive) for the given issue text."""
+    t = (text or "").lower()
+    for label, kws, is_prev in _RECURRING_ISSUE_RULES:
+        if any(kw in t for kw in kws):
+            return label, is_prev
+    return "Other", False
+
+
+def _recurring_issue_signature(row: dict) -> dict:
+    """Latest-recurring issue identity for one MR.
+
+    "Other" is kept as an internal category only. The visible title falls back to
+    a short cleaned description, and the match key is phrase-specific so unrelated
+    "Other" records are not counted as the same recurring pattern.
+    """
+    text = _row_issue_text(row) or _row_description(row)
+    category, is_prev = _classify_recurring_issue_v2(text)
+    if category == "Other":
+        title = _clean_issue_phrase(text, max_words=7)
+        match_key = "other:" + _norm_key(title)
+    else:
+        title = category
+        match_key = "category:" + category
+    return {
+        "title": title or "Issue described in MR text",
+        "category": category,
+        "match_key": match_key,
+        "is_preventive": is_prev or _is_preventive_mr_v2(row),
+        "description": _clean_issue_phrase(text, max_words=14),
+    }
+
+
+def _history_lookup_keys(unit_name: str, asset_id: str = "") -> list[str]:
+    keys: list[str] = []
+    aid = str(asset_id or "").strip().upper()
+    if aid and aid not in {"--", "-", "N/A", "NA", "NONE", "NULL", "UNKNOWN", "WO-ASSET"}:
+        keys.append("asset:" + aid)
+    norm_name = _normalize_unit_name(unit_name)
+    if norm_name:
+        keys.append("name:" + norm_name)
+    return keys
+
+
+def _is_preventive_mr_v2(row: dict) -> bool:
+    """Check maintenance type fields AND description text for preventive indicators."""
+    type_text = " ".join([
+        str(row.get("maintenance_type") or ""),
+        str(row.get("job_trade") or ""),
+        str(row.get("order_type") or ""),
+    ]).lower()
+    if any(kw in type_text for kw in ("pm", "preventive", "planned", "scheduled")):
+        return True
+    desc_text = " ".join([
+        str(row.get("translated_description") or ""),
+        str(row.get("description") or ""),
+    ]).lower()
+    return any(kw in desc_text for kw in _PREVENTIVE_TEXT_KEYWORDS)
+
+
+_is_preventive_mr = _is_preventive_mr_v2  # backward-compat alias
+
+
+def _pctile(data: list[float], p: float) -> float:
+    s = sorted(data)
+    if not s:
+        return 0.0
+    idx = (len(s) - 1) * p / 100.0
+    lo = int(idx)
+    hi = lo + 1
+    if hi >= len(s):
+        return s[lo]
+    return s[lo] + (idx - lo) * (s[hi] - s[lo])
+
+
+def _med(data: list[float]) -> float:
+    s = sorted(data)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    return (s[n // 2 - 1] + s[n // 2]) / 2.0 if n % 2 == 0 else float(s[n // 2])
+
+
+def _compute_recurrence_v2(cluster_rows: list[dict]) -> dict:
+    """Full-history recurrence: dedup within 0-2 days, clean gaps 3-365d, p25/p75 blend."""
+    empty: dict = {
+        "cycles": 0, "clean_gaps": [], "median_gap": None,
+        "low_window": None, "high_window": None,
+        "last_occurrence": None, "history_start": None, "history_end": None,
+    }
+    if not cluster_rows:
+        return empty
+
+    dated = sorted(filter(None, (_occurrence_date(r) for r in cluster_rows)))
+    if not dated:
+        return empty
+
+    # Collapse follow-up MRs within 0-2 days into one cycle
+    cycles: list[date] = [dated[0]]
+    for d in dated[1:]:
+        if (d - cycles[-1]).days > 2:
+            cycles.append(d)
+
+    all_gaps = [(cycles[i] - cycles[i - 1]).days for i in range(1, len(cycles))]
+    clean_gaps = [g for g in all_gaps if 3 <= g <= 365]
+
+    result: dict = {
+        "cycles": len(cycles),
+        "clean_gaps": clean_gaps,
+        "median_gap": None,
+        "low_window": None,
+        "high_window": None,
+        "last_occurrence": cycles[-1],
+        "history_start": cycles[0],
+        "history_end": cycles[-1],
+    }
+    if len(clean_gaps) < 3:
+        return result
+
+    fg = [float(g) for g in clean_gaps]
+    result["median_gap"] = round(_med(fg), 1)
+
+    recent_gaps = fg[-8:]
+    p25 = _pctile(fg, 25)
+    p75 = _pctile(fg, 75)
+    rp25 = _pctile(recent_gaps, 25)
+    rp75 = _pctile(recent_gaps, 75)
+
+    result["low_window"] = round(rp25 * 0.6 + p25 * 0.4)
+    result["high_window"] = round(rp75 * 0.6 + p75 * 0.4)
+    return result
+
+
+def _recurrence_window_label_v2(rec: dict, as_of_date: date) -> str:
+    clean_gaps = rec.get("clean_gaps") or []
+    if len(clean_gaps) < 3:
+        return "Not enough recurrence history"
+    last = rec.get("last_occurrence")
+    high_w = rec.get("high_window")
+    low_w = rec.get("low_window") or high_w
+    if last is None or high_w is None:
+        return "Not enough recurrence history"
+    days_since_last = (as_of_date - last).days
+    if days_since_last >= low_w or (high_w - days_since_last) <= 0:
+        return "Likely now / within 1 week"
+    if high_w <= 7:
+        return "Likely within 1 week"
+    if high_w <= 14:
+        return "Likely within 1–2 weeks"
+    if high_w <= 30:
+        return "Likely within 1 month"
+    if high_w <= 60:
+        return "Likely within 1–2 months"
+    return "Likely in 2+ months"
+
+
+def _confidence_from_cycles(
+    clean_gap_count: int, recent_gaps: list[float]
+) -> tuple[str, str]:
+    if clean_gap_count < 3:
+        return "Low", f"Only {clean_gap_count} clean interval(s) — need ≥3."
+    if clean_gap_count >= 8 and recent_gaps:
+        m = _med(recent_gaps)
+        if m > 0:
+            mad = _med([abs(g - m) for g in recent_gaps])
+            cv = mad / m
+            if cv <= 0.5:
+                return "High", f"{clean_gap_count} cycles, recent pattern stable."
+        return "Medium", f"{clean_gap_count} cycles but recent gap varies."
+    return "Medium", f"{clean_gap_count} clean intervals — pattern forming."
+
+
+def _short_date_v2(d: Optional[date]) -> str:
+    if not d:
+        return "—"
+    return f"{d.day} {_MONTH_ABBR[d.month - 1]}"
+
+
+# ── End Recurring Issue Forecast helpers ─────────────────────────────────────────
 
 # Reliability gate: a specific MTBF value + next-likely date are only trustworthy
 # with enough clean intervals AND reasonable date coverage. Below this, batch
@@ -2911,6 +3225,695 @@ def _compute_data_confidence(period_rows: list[dict]) -> dict:
 
 
 # ── Top-5 INDIVIDUAL UNITS per category (spec §2D / §3) ─────────────────────────
+def _risk_level_from_score(score: int) -> str:
+    if score >= _RISK_LEVEL_THRESHOLDS["high_min"]:
+        return "High"
+    if score >= _RISK_LEVEL_THRESHOLDS["medium_min"]:
+        return "Medium"
+    return "Low"
+
+
+# Single shared source for the predictive risk score: the scoring loop in
+# _build_predictive_risk_cards_inner() reads points from here (by key) instead
+# of inline literals, and the same list is returned verbatim in the "/predictive"
+# payload's risk_rules.factors (methodology footnote/modal reads it from there —
+# never duplicate these numbers in the frontend).
+_RISK_SCORE_RULES = [
+    {
+        "key": "corrective_wo_frequency",
+        "label": "3+ corrective WOs in last 30 days",
+        "points": 3,
+        "description": "3 or more corrective work orders were raised on this asset in the last 30 days.",
+    },
+    {
+        "key": "mtbf_decline",
+        "label": "MTBF decreased vs previous 30 days",
+        "points": 3,
+        "description": "The median time between failures over the last 30 days is lower than the prior 30-day period.",
+    },
+    {
+        "key": "repeat_issue_pattern",
+        "label": "Similar issue descriptions repeat",
+        "points": 2,
+        "description": "The same classified issue occurred 2 or more times in the last 30 days.",
+    },
+    {
+        "key": "aged_open_wo",
+        "label": "Open WO older than 7 days",
+        "points": 2,
+        "description": "At least one work order on this asset has been open for more than 7 days.",
+    },
+    {
+        "key": "critical_asset",
+        "label": "Asset marked critical",
+        "points": 3,
+        "description": "The asset is flagged critical in Asset Master.",
+    },
+    {
+        "key": "spare_part_consumption",
+        "label": "Repeated linked spare-part consumption",
+        "points": 1,
+        "description": "2 or more spare-part transactions are linked to this asset's work orders.",
+    },
+]
+_RISK_SCORE_RULE_BY_KEY = {rule["key"]: rule for rule in _RISK_SCORE_RULES}
+_RISK_LEVEL_THRESHOLDS = {"medium_min": 4, "high_min": 7}
+
+
+def _corrective_rows(rows: list[dict]) -> list[dict]:
+    out = []
+    for row in rows:
+        try:
+            classification, _needs_review = kpi._classify_preventive_corrective_row(row)
+        except Exception:
+            classification = "corrective" if not _is_preventive_mr_v2(row) else "preventive"
+        if classification == "corrective":
+            out.append(row)
+    return out
+
+
+def _wo_spare_usage_lookup() -> dict[str, list[dict]]:
+    lookup: dict[str, list[dict]] = defaultdict(list)
+    try:
+        import spare_parts_service as sps
+        payload = sps.build_project_transactions_payload()
+        for txn in payload.get("transactions") or []:
+            wo_id = str(txn.get("work_order_id") or "").strip()
+            if not wo_id:
+                continue
+            lookup[wo_id].append({
+                "item_code": txn.get("transaction_id"),
+                "part_name": txn.get("translated_description") or txn.get("original_description") or "",
+                "quantity": txn.get("quantity_used"),
+                "date": txn.get("project_date"),
+            })
+    except Exception:
+        pass
+    return lookup
+
+
+def _risk_ai_bullets(card: dict) -> list[str]:
+    asset = card.get("asset_name") or "This asset"
+    level = str(card.get("risk_level") or "Low").lower()
+    signals = [str(s.get("label") or s) for s in (card.get("main_signals") or [])][:3]
+    pattern = ((card.get("latest_recurring_issue_pattern") or {}).get("issue") or "").strip()
+    action = str(card.get("suggested_maintenance_action") or "").strip()
+    bullets = [
+        f"{asset} is currently rated {level} risk with a calculated score of {card.get('risk_score', 0)}.",
+    ]
+    if signals:
+        bullets.append("Main drivers: " + ", ".join(signals) + ".")
+    if pattern and pattern != "Unclassified":
+        bullets.append(f"The latest recurring issue pattern is {pattern.lower()}, based only on recorded WO/MR descriptions.")
+    if card.get("open_wo_status", {}).get("count"):
+        bullets.append(card["open_wo_status"].get("summary") or "Open WO follow-up is required.")
+    if action:
+        bullets.append(action)
+    return bullets[:5]
+
+
+def _risk_suggested_action(issue: str, open_old: bool, critical: bool, spare_repeated: bool) -> str:
+    cause = _ISSUE_CAUSE_TEMPLATES.get(issue) or "Review the repeated WO/MR descriptions and inspect the affected components."
+    actions = [cause]
+    if open_old:
+        actions.append("Review and close out the aged open WO after confirming the physical condition.")
+    if critical:
+        actions.append("Prioritise engineering review because the asset is marked critical.")
+    if spare_repeated:
+        actions.append("Check spare-part usage history and confirm whether the same part is being repeatedly consumed.")
+    return " ".join(actions)
+
+
+def build_predictive_risk_cards(filters: dict, top_n: int = 10) -> dict:
+    """Controlled Predictive Maintenance cards.
+
+    Scoring is deterministic and auditable. Any AI wording must only summarize
+    the prepared structured fields in these cards; it must not answer user text.
+    """
+    f = ctx.normalize_filters(filters)
+    key = ("predictive_risk_cards_v1", f["stage"], f["year"], f["month"], f.get("period_mode"), top_n)
+    return _memoized(key, lambda: _build_predictive_risk_cards_inner(f, top_n))
+
+
+def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
+    window = ctx.resolved_window(f)
+    today = window["end_date"]
+    current_start = today - timedelta(days=30)
+    prior_start = current_start - timedelta(days=30)
+    prior_end = current_start - timedelta(days=1)
+
+    all_rows = kpi._filtered_work_order_rows(f)
+    by_unit: dict[str, dict] = {}
+    for row in all_rows:
+        occ = _occurrence_date(row)
+        if not occ:
+            continue
+        unit_name, asset_id, category = resolve_to_unit(row)
+        if not unit_name or category == "Facility / Building":
+            continue
+        entry = by_unit.setdefault(unit_name, {
+            "asset_name": unit_name,
+            "asset_id": asset_id or "",
+            "machine_group": _normalize_machine_type(unit_name),
+            "category": category or _row_broad_category(row),
+            "rows": [],
+        })
+        if asset_id and not entry.get("asset_id"):
+            entry["asset_id"] = asset_id
+        entry["rows"].append(row)
+
+    spare_lookup = _wo_spare_usage_lookup()
+    cards: list[dict] = []
+    for _unit_name, entry in by_unit.items():
+        rows = entry["rows"]
+        current_rows = [r for r in rows if current_start <= (_occurrence_date(r) or date.min) <= today]
+        prior_rows = [r for r in rows if prior_start <= (_occurrence_date(r) or date.min) <= prior_end]
+        if not current_rows and len(rows) < 2:
+            continue
+
+        corrective = _corrective_rows(current_rows)
+        current_mtbf, current_intervals, _current_cov = _compute_mtbf_detail(current_rows)
+        prior_mtbf, prior_intervals, _prior_cov = _compute_mtbf_detail(prior_rows)
+        mtbf_decreased = (
+            current_mtbf is not None and prior_mtbf is not None
+            and current_intervals > 0 and prior_intervals > 0
+            and current_mtbf < prior_mtbf
+        )
+
+        issue_pairs = [
+            (row, classify_specific_issue(_row_issue_text(row) or _row_description(row)))
+            for row in current_rows
+        ]
+        issue_counter = Counter(issue for _row, issue in issue_pairs if issue and issue != "Unclassified")
+        repeated_issue = issue_counter.most_common(1)[0] if issue_counter else None
+        repeated_issue_flag = bool(repeated_issue and repeated_issue[1] >= 2)
+        issue_rows = [row for row, issue in issue_pairs if repeated_issue and issue == repeated_issue[0]]
+        latest_issue_row = max(issue_rows or current_rows or rows, key=lambda r: (_occurrence_date(r) or date.min))
+        latest_issue = repeated_issue[0] if repeated_issue else classify_specific_issue(_row_issue_text(latest_issue_row) or _row_description(latest_issue_row))
+
+        open_rows = [
+            r for r in current_rows
+            if _row_status_bucket(r) == "open" and (_occurrence_date(r) or today) <= today - timedelta(days=7)
+        ]
+        open_old = bool(open_rows)
+        oldest_open = min((_occurrence_date(r) for r in open_rows if _occurrence_date(r)), default=None)
+        open_age_days = (today - oldest_open).days if oldest_open else None
+
+        critical = any(_row_is_critical(r) for r in rows)
+        linked_wo_ids = {
+            _row_wo_id(r)
+            for r in current_rows
+            if _row_wo_id(r) and spare_lookup.get(_row_wo_id(r))
+        }
+        spare_tx_count = sum(len(spare_lookup.get(wo_id, [])) for wo_id in linked_wo_ids)
+        spare_repeated = len(linked_wo_ids) >= 2 or spare_tx_count >= 2
+
+        score = 0
+        signals = []
+        rule = _RISK_SCORE_RULE_BY_KEY["corrective_wo_frequency"]
+        if len(corrective) >= 3:
+            score += rule["points"]
+            signals.append({"label": rule["label"], "points": rule["points"], "value": len(corrective)})
+        rule = _RISK_SCORE_RULE_BY_KEY["mtbf_decline"]
+        if mtbf_decreased:
+            score += rule["points"]
+            signals.append({"label": rule["label"], "points": rule["points"], "value": {"current_days": round(current_mtbf, 1), "previous_days": round(prior_mtbf, 1)}})
+        rule = _RISK_SCORE_RULE_BY_KEY["repeat_issue_pattern"]
+        if repeated_issue_flag:
+            score += rule["points"]
+            signals.append({"label": rule["label"], "points": rule["points"], "value": f"{repeated_issue[0]} x{repeated_issue[1]}"})
+        rule = _RISK_SCORE_RULE_BY_KEY["aged_open_wo"]
+        if open_old:
+            score += rule["points"]
+            signals.append({"label": rule["label"], "points": rule["points"], "value": open_age_days})
+        rule = _RISK_SCORE_RULE_BY_KEY["critical_asset"]
+        if critical:
+            score += rule["points"]
+            signals.append({"label": rule["label"], "points": rule["points"], "value": True})
+        rule = _RISK_SCORE_RULE_BY_KEY["spare_part_consumption"]
+        if spare_repeated:
+            score += rule["points"]
+            signals.append({"label": rule["label"], "points": rule["points"], "value": spare_tx_count})
+        if score <= 0:
+            continue
+
+        latest_pattern = {
+            "issue": latest_issue or "Unclassified",
+            "count": int(repeated_issue[1]) if repeated_issue else 1,
+            "latest_date": (_occurrence_date(latest_issue_row).isoformat() if _occurrence_date(latest_issue_row) else None),
+            "latest_description": _clean_issue_phrase(_row_issue_text(latest_issue_row) or _row_description(latest_issue_row), max_words=18),
+            "keywords": _extract_issue_tokens(issue_rows or [latest_issue_row], latest_issue or ""),
+        }
+        card = {
+            "asset_name": entry["asset_name"],
+            "asset_id": entry.get("asset_id") or "",
+            "machine_group": entry.get("machine_group") or "Unknown",
+            "category": entry.get("category") or "Unknown",
+            "risk_level": _risk_level_from_score(score),
+            "risk_score": score,
+            "main_signals": signals,
+            "latest_recurring_issue_pattern": latest_pattern,
+            "suggested_maintenance_action": _risk_suggested_action(latest_issue or "", open_old, critical, spare_repeated),
+            "open_wo_status": {
+                "count": len(open_rows),
+                "oldest_age_days": open_age_days,
+                "work_order_ids": [_row_wo_id(r) for r in open_rows if _row_wo_id(r)][:5],
+                "summary": (
+                    f"{len(open_rows)} open WO(s), oldest {open_age_days} days old."
+                    if open_rows and open_age_days is not None else "No aged open WO signal."
+                ),
+            },
+            "structured_llm_context": {
+                "asset_name": entry["asset_name"],
+                "machine_group": entry.get("machine_group") or "Unknown",
+                "wo_count_last_30_days": len(current_rows),
+                "corrective_wo_count_last_30_days": len(corrective),
+                "mtbf_trend": "decreased" if mtbf_decreased else "not_decreased_or_insufficient_data",
+                "mttr_trend": "not_calculated_for_this_card",
+                "repeated_issue_keywords": latest_pattern["keywords"],
+                "latest_wo_descriptions": [
+                    _clean_issue_phrase(_row_issue_text(r) or _row_description(r), max_words=18)
+                    for r in sorted(current_rows, key=lambda row: (_occurrence_date(row) or date.min), reverse=True)[:3]
+                ],
+                "open_wo_age_days": open_age_days,
+                "critical_asset_flag": critical,
+                "spare_part_consumption_signal": spare_repeated,
+            },
+        }
+        card["ai_summary"] = _risk_ai_bullets(card)
+        cards.append(card)
+
+    cards.sort(key=lambda c: (-int(c.get("risk_score") or 0), c.get("asset_name") or ""))
+    return {
+        "period": f"Last 30 days ending {today.isoformat()}",
+        "comparison_period": f"{prior_start.isoformat()} to {prior_end.isoformat()}",
+        "risk_rules": {
+            "levels": {
+                "0-3": "Low",
+                f"4-{_RISK_LEVEL_THRESHOLDS['high_min'] - 1}": "Medium",
+                f"{_RISK_LEVEL_THRESHOLDS['high_min']}+": "High",
+            },
+            "factors": _RISK_SCORE_RULES,
+        },
+        "cards": cards[:top_n],
+        "assets_assessed": len(by_unit),
+        "scored_assets": len(cards),
+        "source": "Rule-based score from WO/MR history, MTBF gaps, critical flag, open WO status, and linked spare-part consumption.",
+        "llm_policy": "No open-ended user questions. AI wording may only summarize each card's structured_llm_context.",
+    }
+
+
+def _shape_wo_row_for_detail(row: dict) -> dict:
+    """One WO/MR row for the drill-down's Work Orders tab. No internal DB row
+    IDs are exposed — work_order_id/request_id here are the human-readable
+    business numbers (e.g. "WRKO-00006385"/"MNT-00005441"), not primary keys."""
+    try:
+        classification, _needs_review = kpi._classify_preventive_corrective_row(row)
+    except Exception:
+        classification = "preventive" if _is_preventive_mr_v2(row) else "corrective"
+    occ = _occurrence_date(row)
+    start_raw = row.get("actual_start_time") or row.get("start_time")
+    end_raw = row.get("actual_end_time") or row.get("end_time")
+    return {
+        "date": occ.isoformat() if occ else None,
+        "wo_number": _row_wo_id(row) or None,
+        "mr_number": _row_mr_id(row) or None,
+        "type": "Preventive" if classification == "preventive" else "Corrective",
+        "issue_category": classify_specific_issue(_row_issue_text(row) or _row_description(row)) or "Unclassified",
+        "description": _row_description(row) or None,
+        "cleaned_description": row.get("translated_description") or None,
+        "status": _row_current_status_label(row),
+        "is_open": _row_status_bucket(row) == "open",
+        "severity": row.get("service_level") or row.get("priority") or row.get("criticality") or None,
+        "actual_start": str(start_raw) if start_raw else None,
+        "actual_end": str(end_raw) if end_raw else None,
+        "downtime_hours": _row_ttr_hours(row),
+        "owner": row.get("started_by") or row.get("created_by") or None,
+    }
+
+
+def _build_asset_trends(asset_rows_full: list[dict], today: date) -> dict:
+    """Monthly corrective-WO counts + preventive/corrective split + MTBF trend,
+    over this asset's full history. Compact, pre-aggregated for chart rendering
+    — no raw rows in this payload."""
+    if not asset_rows_full:
+        return {"monthly": [], "preventive_vs_corrective": {"preventive": 0, "corrective": 0}, "mtbf_trend": []}
+
+    dated = sorted(((r, _occurrence_date(r)) for r in asset_rows_full if _occurrence_date(r)), key=lambda pair: pair[1])
+    if not dated:
+        return {"monthly": [], "preventive_vs_corrective": {"preventive": 0, "corrective": 0}, "mtbf_trend": []}
+
+    # Last 12 calendar months ending on the resolved window's end date.
+    months: list[tuple[int, int]] = []
+    y, m = today.year, today.month
+    for _ in range(12):
+        months.append((y, m))
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+    months.reverse()
+
+    monthly = []
+    preventive_total = 0
+    corrective_total = 0
+    for (y, m) in months:
+        month_rows = [r for r, d in dated if d.year == y and d.month == m]
+        corrective_rows = _corrective_rows(month_rows)
+        preventive_count = len(month_rows) - len(corrective_rows)
+        preventive_total += preventive_count
+        corrective_total += len(corrective_rows)
+        monthly.append({
+            "month": f"{y:04d}-{m:02d}",
+            "corrective_count": len(corrective_rows),
+            "preventive_count": preventive_count,
+            "total_count": len(month_rows),
+        })
+
+    # MTBF per month: median gap using rows up to and including that month
+    # (rolling), same primitive the scorer uses — not a new calculation method.
+    mtbf_trend = []
+    for (y, m) in months:
+        month_end = date(y, m, calendar.monthrange(y, m)[1]) if m != today.month or y != today.year else today
+        rows_to_date = [r for r, d in dated if d <= month_end]
+        mtbf_val, n_intervals, coverage = _compute_mtbf_detail(rows_to_date)
+        reliable = _mtbf_is_reliable(n_intervals, coverage)
+        mtbf_trend.append({"month": f"{y:04d}-{m:02d}", "mtbf_days": round(mtbf_val, 1) if (mtbf_val is not None and reliable) else None})
+
+    return {
+        "monthly": monthly,
+        "preventive_vs_corrective": {"preventive": preventive_total, "corrective": corrective_total},
+        "mtbf_trend": mtbf_trend,
+    }
+
+
+def _build_asset_recommendations(card: dict, spare_readiness: Optional[dict]) -> dict:
+    """Deterministic recommendation card — same rule-based idiom as
+    suggested_maintenance_action, built only from already-verified signals.
+    Never states a component has failed unless a signal actually supports it."""
+    contributors = card.get("main_signals") or []
+    labels = {s["label"] for s in contributors}
+    open_status = card.get("open_wo_status") or {}
+    priority = card.get("risk_level") or "Low"
+
+    evidence = [f"{s['label']} (+{s['points']})" for s in contributors]
+
+    actions = []
+    pattern = card.get("latest_recurring_issue_pattern") or {}
+    if pattern.get("issue") and pattern.get("issue") != "Unclassified":
+        actions.append(f"Review the last completed repairs for repeat \"{pattern['issue']}\" occurrences.")
+    if "Similar issue descriptions repeat" in labels or "MTBF decreased vs previous 30 days" in labels:
+        actions.append("Inspect the components referenced in the repeated WO/MR descriptions above.")
+    if "Open WO older than 7 days" in labels:
+        actions.append(f"Follow up on the {open_status.get('count', 0)} aged open work order(s) and confirm current condition.")
+    if "Asset marked critical" in labels:
+        actions.append("Prioritise engineering review given this asset's critical classification.")
+    if spare_readiness and spare_readiness.get("has_mapping"):
+        actions.append("Confirm availability of the linked spare parts before scheduling the repair.")
+    if not actions:
+        actions.append("Review recent WO/MR records and confirm condition onsite.")
+
+    return {
+        "priority": priority,
+        "evidence": evidence,
+        "recommended_actions": actions,
+        "pm_follow_up": "PM linkage isn't wired into this drill-down yet.",
+        "spare_parts_readiness": spare_readiness,
+        "open_wo_follow_up": open_status.get("summary") or "No aged open WO signal.",
+        "potential_production_concern": bool(labels & {"Asset marked critical", "3+ corrective WOs in last 30 days"}),
+    }
+
+
+def _stock_status_for(on_hand: Optional[float], minimum: Optional[float]) -> str:
+    if on_hand is None or minimum is None:
+        return "Unknown"
+    if on_hand <= 0:
+        return "Out of Stock"
+    if on_hand < minimum:
+        return "Below Minimum"
+    if on_hand == minimum:
+        return "At Minimum"
+    return "Available"
+
+
+def _build_asset_spare_parts(card: dict) -> dict:
+    """Spare Parts tab. Reuses spare_parts_service's existing asset-matching
+    (transactions/POs/suppliers) and inventory lookup — no new asset-to-part
+    matching logic invented here, per the "never guess a relationship" rule."""
+    import spare_parts_service as sps  # local import: avoid a module-load-order
+
+    asset_id = card.get("asset_id") or ""
+    asset_name = card.get("asset_name") or ""
+    try:
+        context = sps.build_asset_parts_intelligence_context(asset_id=asset_id or None, asset_name=asset_name or None)
+    except Exception as exc:
+        return {"status": "error", "error": str(exc), "has_mapping": False, "transactions": [], "purchase_orders": [], "on_hand": [], "readiness": None}
+
+    transactions = context.get("sparePartsUsed") or []
+    purchase_parts = context.get("purchaseParts") or []
+    has_mapping = context.get("status") == "ok" and bool(transactions or purchase_parts)
+
+    on_hand_rows = []
+    try:
+        inventory_payload = sps.build_spare_parts_payload()
+        inv_records = ((inventory_payload or {}).get("inventory") or {}).get("records") or []
+        needle_id = str(asset_id).strip().upper()
+        for rec in inv_records:
+            rec_asset = str(rec.get("equipment_asset_id") or "").strip().upper()
+            if needle_id and rec_asset == needle_id:
+                on_hand_qty = rec.get("current_quantity")
+                min_stock = rec.get("min_stock")
+                on_hand_rows.append({
+                    "part_name": rec.get("name"),
+                    "item_code": rec.get("code"),
+                    "linked_machine": rec.get("equipment_name") or asset_name,
+                    "on_hand": on_hand_qty,
+                    "min_stock": min_stock,
+                    "max_stock": rec.get("max_stock"),
+                    "on_order": rec.get("on_order"),
+                    "stock_status": _stock_status_for(on_hand_qty, min_stock),
+                    "last_updated": rec.get("last_updated"),
+                })
+    except Exception:
+        pass  # inventory lookup is best-effort; transactions/POs already reflect usage either way.
+
+    has_mapping = has_mapping or bool(on_hand_rows)
+
+    # 30/90-day usage windows: prefer actual store-issue transactions (real
+    # consumption). Many assets only have Gen PO purchase records with no
+    # matching store-issue transaction — a known, already-surfaced data gap
+    # ("Purchase records found in Gen PO, but no actual store issue
+    # transaction found") — so when there's no consumption data, fall back to
+    # purchase quantities/dates as the best available usage proxy. This is a
+    # different signal (procurement, not confirmed consumption), so it's
+    # labelled via usage_source rather than silently presented as the same
+    # thing.
+    usage_source = None
+    if transactions:
+        usage_source = "store_consumption"
+        usage_30 = sum(float(t.get("quantity") or 0) for t in transactions if t.get("date") and _within_days(t["date"], 30))
+        usage_90 = sum(float(t.get("quantity") or 0) for t in transactions if t.get("date") and _within_days(t["date"], 90))
+        last_issued = max((t.get("date") for t in transactions if t.get("date")), default=None)
+    elif purchase_parts:
+        usage_source = "purchase_records"
+        usage_30 = sum(float(p.get("quantity") or 0) for p in purchase_parts if p.get("po_date") and _within_days(p["po_date"], 30))
+        usage_90 = sum(float(p.get("quantity") or 0) for p in purchase_parts if p.get("po_date") and _within_days(p["po_date"], 90))
+        last_issued = max((p.get("po_date") for p in purchase_parts if p.get("po_date")), default=None)
+    else:
+        usage_30 = usage_90 = 0.0
+        last_issued = None
+
+    readiness = None
+    pattern = card.get("latest_recurring_issue_pattern") or {}
+    if has_mapping:
+        low_stock = [r for r in on_hand_rows if r["stock_status"] in ("Out of Stock", "Below Minimum")]
+        readiness = {
+            "likely_required_for": pattern.get("issue") or None,
+            # None (not False) when there's no on-hand data at all — "unknown"
+            # is not the same claim as "confirmed, nothing low".
+            "parts_available": (len(on_hand_rows) > 0 and not low_stock) if on_hand_rows else None,
+            "replenishment_may_be_needed": bool(low_stock) if on_hand_rows else None,
+            "low_stock_parts": [r["part_name"] for r in low_stock if r.get("part_name")],
+        }
+
+    return {
+        "status": "ok" if has_mapping else "no_mapping",
+        "has_mapping": has_mapping,
+        "no_mapping_message": None if has_mapping else "No validated spare-part mapping is available for this asset.",
+        "transactions": transactions[:50],
+        "purchase_orders": purchase_parts[:50],
+        "on_hand": on_hand_rows,
+        "usage_last_30_days": round(usage_30, 2) if usage_source else None,
+        "usage_last_90_days": round(usage_90, 2) if usage_source else None,
+        "last_issued_date": last_issued,
+        # "store_consumption" | "purchase_records" | None — lets the UI label
+        # purchase-derived usage figures distinctly from confirmed consumption.
+        "usage_source": usage_source,
+        "readiness": readiness,
+        "data_gaps": context.get("dataGaps") or [],
+    }
+
+
+def _within_days(iso_date: str, days: int) -> bool:
+    try:
+        d = datetime.fromisoformat(str(iso_date)[:10]).date()
+    except (TypeError, ValueError):
+        return False
+    return (date.today() - d).days <= days
+
+
+def build_asset_predictive_detail(asset_id: str, filters: dict) -> Optional[dict]:
+    """"View Details" drill-down for one asset on the Predictive Insights page.
+
+    Reuses the existing risk-card computation for the score/signals (never
+    recalculated here) and adds read-only Overview-tab aggregation — asset-level
+    MTTR/MTBF, computed from the same kpi-supplied rows the scorer already uses
+    (staying a consumer, per this module's governing rule; no new source reads).
+    """
+    f = ctx.normalize_filters(filters)
+    key = ("predictive_asset_detail_v1", f["stage"], f["year"], f["month"], f.get("period_mode"), asset_id)
+    return _memoized(key, lambda: _build_asset_predictive_detail_inner(asset_id, f))
+
+
+def _build_asset_predictive_detail_inner(asset_id: str, f: dict) -> Optional[dict]:
+    # top_n only slices the already-fully-scored list (every asset is scored
+    # regardless of top_n — see _build_predictive_risk_cards_inner), so this MUST
+    # match the main page's call (api.py's default, top_n=10) to reuse the same
+    # memoized computation instead of paying a second ~20s+ cold build for an
+    # identical result under a different cache key.
+    risk_payload = build_predictive_risk_cards(f, top_n=10)
+    needle = str(asset_id or "").strip().lower()
+    card = next(
+        (c for c in risk_payload["cards"] if str(c.get("asset_id") or "").strip().lower() == needle
+         or str(c.get("asset_name") or "").strip().lower() == needle),
+        None,
+    )
+    if not card:
+        return None
+
+    window = ctx.resolved_window(f)
+    today = window["end_date"]
+    all_rows = kpi._filtered_work_order_rows(f)
+    asset_rows = [r for r in all_rows if (resolve_to_unit(r)[0] or "").strip().lower() == str(card["asset_name"]).strip().lower()]
+
+    # Work Orders / Trends tabs need this asset's full history, independent of
+    # whatever period the main dashboard filter happens to be scoped to right
+    # now (the tab has its own 30d/90d/12mo/custom filters) — same stage filter,
+    # widened time window. A single custom range spanning decades is a cache
+    # key nothing else in the app ever produces, forcing build_downtime_payload
+    # to rebuild its entire management payload from scratch (~90s+ measured on
+    # this dataset) instead of the lightweight row-filter path. Walking real
+    # calendar years instead reuses the exact ("full_year"/"ytd", year) memo
+    # keys the dashboard itself already warms during normal use, and each
+    # per-year lookup is cheap even cold (a few seconds).
+    all_rows_full: list[dict] = []
+    for yr in range(today.year - 8, today.year + 1):
+        yf = dict(f)
+        yf["year"] = yr
+        yf["period_mode"] = "ytd" if yr == today.year else "full_year"
+        yf["start"] = None
+        yf["end"] = None
+        all_rows_full.extend(kpi._filtered_work_order_rows(yf))
+    asset_rows_full = [r for r in all_rows_full if (resolve_to_unit(r)[0] or "").strip().lower() == str(card["asset_name"]).strip().lower()]
+
+    # Current status: most recent row's status.
+    dated_rows = sorted(((r, _occurrence_date(r)) for r in asset_rows), key=lambda pair: pair[1] or date.min, reverse=True)
+    latest_row = dated_rows[0][0] if dated_rows else None
+    current_status = _row_current_status_label(latest_row) if latest_row is not None else None
+
+    # MTTR / MTBF: this file's governing rule is "never recompute — consume
+    # the dashboard's own builders", so pull this asset's row straight out of
+    # the Downtime page's own per-asset MTBF/MTTR table (the "historical"
+    # view is built from all-time records regardless of the page's current
+    # period filter — see downtime_service.py's historical_records= wiring —
+    # so it reads the same as what the Downtime page itself would show for
+    # this asset, not a value scoped to whatever narrow window the drawer
+    # happened to be opened under).
+    mgmt = kpi._downtime_management(f)
+    mtbf_views = (mgmt.get("mtbf") or {}).get("views") or {}
+
+    def _asset_reliability_row(view_key: str) -> Optional[dict]:
+        rows = (mtbf_views.get(view_key) or {}).get("asset_rows") or []
+        needle_id = str(card.get("asset_id") or "").strip().upper()
+        needle_name = str(card.get("asset_name") or "").strip().lower()
+        return next(
+            (r for r in rows
+             if (needle_id and str(r.get("asset_id") or "").strip().upper() == needle_id)
+             or str(r.get("asset_name") or "").strip().lower() == needle_name),
+            None,
+        )
+
+    historical_row = _asset_reliability_row("historical")
+    mttr_hours = (
+        round(historical_row["average_mttr_hours"], 2)
+        if historical_row and historical_row.get("average_mttr_hours") is not None
+        else None
+    )
+    mtbf_hours_val = historical_row.get("average_mtbf_hours") if historical_row else None
+    mtbf_days = round(mtbf_hours_val / 24, 1) if mtbf_hours_val is not None else None
+    mtbf_reliable = bool(historical_row) and historical_row.get("reliability_status") != "insufficient"
+    mtbf_change_signal = next((s for s in card["main_signals"] if s["label"] == "MTBF decreased vs previous 30 days"), None)
+
+    open_status = card["open_wo_status"]
+
+    covered_keys = {s["label"] for s in card["main_signals"]}
+    other_indicators = [
+        {"label": rule["label"], "points": rule["points"], "description": rule["description"]}
+        for rule in _RISK_SCORE_RULES
+        if rule["label"] not in covered_keys
+    ]
+
+    return {
+        "asset": {
+            "id": card.get("asset_id") or "",
+            "name": card["asset_name"],
+            "group": card.get("machine_group") or "Unknown",
+            "category": card.get("category") or "Unknown",
+            "critical": any(s["label"] == "Asset marked critical" for s in card["main_signals"]),
+            "status": current_status or "Not available",
+        },
+        "risk": {
+            "score": card["risk_score"],
+            "level": card["risk_level"],
+            "contributors": card["main_signals"],
+            "other_assessed_indicators": other_indicators,
+        },
+        "patterns": card["latest_recurring_issue_pattern"],
+        "maintenance_status": {
+            "open_wo_count": open_status["count"],
+            "oldest_open_wo_days": open_status["oldest_age_days"],
+            "open_work_order_ids": open_status["work_order_ids"],
+            # PM linkage (latest/next PM date, overdue flag) lives in the separate
+            # PM Schedule subsystem and isn't wired into this Overview tab yet —
+            # "Not available" rather than a fabricated date, per spec.
+            "latest_pm_date": None,
+            "next_pm_date": None,
+            "pm_overdue": None,
+            "mttr_hours": mttr_hours,
+            "mtbf_days": round(mtbf_days, 1) if (mtbf_days is not None and mtbf_reliable) else None,
+            "mtbf_reliable": mtbf_reliable,
+            "mtbf_changed_vs_previous_period": bool(mtbf_change_signal),
+            "mtbf_change_detail": mtbf_change_signal["value"] if mtbf_change_signal else None,
+        },
+        "suggested_maintenance_action": card["suggested_maintenance_action"],
+        "work_orders": sorted(
+            (_shape_wo_row_for_detail(r) for r in asset_rows_full),
+            key=lambda w: w["date"] or "",
+            reverse=True,
+        ),
+        "spare_parts": (spare_parts_detail := _build_asset_spare_parts(card)),
+        "trends": _build_asset_trends(asset_rows_full, today),
+        "recommendations": _build_asset_recommendations(card, spare_parts_detail.get("readiness")),
+        # AI Insight is generated on demand by a separate endpoint (same
+        # fallback-first pattern as /predictive-wording) so a slow/unavailable
+        # LLM never blocks this response; the frontend shows the rule-based
+        # suggested_maintenance_action immediately and upgrades in place.
+        "ai_insight": None,
+        "last_updated": today.isoformat(),
+        "period": risk_payload["period"],
+    }
+
+
 # This replaces _build_top_machines().  The unit of analysis is one physical asset
 # (e.g. "Bratt pan No.3").  No area-level rows.  No machine_group column.
 
@@ -2923,6 +3926,7 @@ def _build_top_units(
     unit_parts_context_getter,
     today: date,
     top_n: int = 5,
+    history_by_unit: Optional[dict] = None,  # full-history rows per unit for recurrence
 ) -> list[dict]:
     scored: list[dict] = []
 
@@ -2978,15 +3982,110 @@ def _build_top_units(
             classify_fault(_row_issue_text(r) or _row_description(r)) for r in rows
         ).most_common(1)[0][0]
 
-        # ── Proof string: auditable, not templated (spec §2B) ─────────────────
-        cluster_unit_count = dominant_count
-        issue_pct = round(cluster_unit_count / recurrence * 100)
-        proof = (
-            f"{_keyword_specific_short(dominant_issue)} wording in "
-            f"{issue_pct}% of {recurrence} MRs"
+        # ── Full-history rows for this unit (recurrence uses 2024-2026) ────────
+        history_lookup = history_by_unit or {}
+        hist_rows: list[dict] = []
+        for key in _history_lookup_keys(unit_name, asset_id):
+            if history_lookup.get(key):
+                hist_rows = history_lookup[key]
+                break
+        if not hist_rows:
+            hist_rows = rows
+
+        dated_hist = [(r, d) for r in hist_rows if (d := _occurrence_date(r))]
+        latest_row = (
+            max(dated_hist, key=lambda pair: pair[1])[0]
+            if dated_hist
+            else max(hist_rows, key=lambda r: (_row_latest_date(r) or date.min))
+        )
+        latest_sig = _recurring_issue_signature(latest_row)
+        dominant_issue_v2 = latest_sig["title"]
+        latest_issue_key = latest_sig["match_key"]
+        latest_issue_date = _occurrence_date(latest_row) or _row_latest_date(latest_row)
+        latest_issue_description = latest_sig["description"]
+
+        hist_signatures = [(r, _recurring_issue_signature(r)) for r in hist_rows]
+        hist_cluster_rows = [
+            r for r, sig in hist_signatures
+            if sig["match_key"] == latest_issue_key
+        ] or [latest_row]
+        dominant_count = len(hist_cluster_rows)
+        latest_cluster_date = latest_issue_date
+        open_cluster_ct = sum(1 for r in hist_cluster_rows if _row_status_bucket(r) == "open")
+
+        hist_issue_counter = Counter(sig["match_key"] for _, sig in hist_signatures)
+        hist_sig_by_key = {sig["match_key"]: sig for _, sig in hist_signatures}
+        strongest_historical = None
+        for key, count in hist_issue_counter.most_common():
+            if key == latest_issue_key:
+                continue
+            if count <= 1:
+                continue
+            sig = hist_sig_by_key.get(key) or {}
+            strongest_historical = {
+                "issue": sig.get("title") or "—",
+                "count": count,
+                "pct": round(count / max(len(hist_rows), 1) * 100),
+            }
+            break
+
+        n_prev_type = sum(1 for r in hist_cluster_rows if _is_preventive_mr_v2(r))
+        n_cluster = max(len(hist_cluster_rows), 1)
+        prev_pct = n_prev_type / n_cluster
+        latest_issue_is_prev = bool(latest_sig["is_preventive"])
+
+        if dominant_count <= 1:
+            pattern_type = "Latest Issue — Limited History"
+            is_preventive = latest_issue_is_prev
+        elif latest_issue_is_prev or prev_pct >= 0.65:
+            pattern_type = "Preventive / Routine Pattern"
+            is_preventive = True
+        elif prev_pct <= 0.20:
+            pattern_type = "Corrective / Breakdown Pattern"
+            is_preventive = False
+        else:
+            pattern_type = "Mixed Pattern"
+            is_preventive = False
+
+        # ── Recurrence calculation from full history for the latest issue ─────
+        rec_v2 = _compute_recurrence_v2(hist_cluster_rows)
+        n_cycles = rec_v2["cycles"]
+        clean_gaps_v2 = rec_v2["clean_gaps"]
+        median_gap_v2 = rec_v2["median_gap"]
+        avg_gap_v2 = round(sum(clean_gaps_v2) / len(clean_gaps_v2), 1) if clean_gaps_v2 else None
+
+        all_occ = [d for _, d in dated_hist]
+        as_of_date_v2 = max(all_occ) if all_occ else today
+
+        likely_label = _recurrence_window_label_v2(rec_v2, as_of_date_v2)
+        recurrence_band_key = likely_label.lower().replace(" ", "_").replace("/", "_")
+
+        recent_gaps_v2 = [float(g) for g in clean_gaps_v2[-8:]]
+        confidence, confidence_reason = _confidence_from_cycles(
+            len(clean_gaps_v2), recent_gaps_v2
         )
 
-        # ── MTBF ─────────────────────────────────────────────────────────────
+        last_occ_v2 = rec_v2.get("last_occurrence") or latest_issue_date
+        if dominant_count <= 1:
+            pattern_signal = "1 latest MR · limited recurrence · history 2024–2026"
+        else:
+            sig_parts: list[str] = [f"{n_cycles} cycle{'s' if n_cycles != 1 else ''}"]
+            if median_gap_v2 is not None:
+                sig_parts.append(f"median {round(median_gap_v2)}d")
+            if last_occ_v2:
+                sig_parts.append(f"latest MR {_short_date_v2(last_occ_v2)}")
+            sig_parts.append("history 2024–2026")
+            pattern_signal = " · ".join(sig_parts)
+
+        hist_pct = round(dominant_count / max(len(hist_rows), 1) * 100)
+        proof = f"{pattern_type} · {dominant_count} of {len(hist_rows)} history MRs · {hist_pct}%"
+        if strongest_historical and dominant_count <= 1:
+            proof += (
+                f" · Main historical pattern: {strongest_historical['issue']} — "
+                f"{strongest_historical['count']} of {len(hist_rows)} MRs"
+            )
+
+        # ── MTBF (still computed for drill-down / spare; uses period rows) ────
         mtbf_days, n_intervals, coverage = _compute_mtbf_detail(rows)
         reliable = (
             mtbf_days is not None and mtbf_days >= 1.0
@@ -2994,28 +4093,18 @@ def _build_top_units(
         )
         mtbf_label = f"~{round(mtbf_days, 1)}d" if reliable else "Insufficient data"
 
-        # ── Cluster recurrence + timing (spec §2C) ────────────────────────────
-        c_median, c_avg, c_n_intervals, _, c_gaps = _compute_cluster_recurrence(cluster_rows)
-        c_reliable = dominant_count >= 3 and c_n_intervals >= 2 and c_median is not None and c_median >= 1.0
-
-        likely_label, recurrence_band_key = _recurrence_band(c_median, c_n_intervals, dominant_count)
-        if c_reliable:
-            ref_date = latest_cluster_date or last_date
-            _, timing_label = _likely_recurrence(ref_date, c_median, today)
-            likely_label = timing_label
-
-        if c_median is not None and days_since < 999:
-            raw_next = round(c_median - days_since)
-            next_due_days: Optional[int] = max(0, raw_next)
+        next_due_days: Optional[int] = None
+        overdue = False
+        if rec_v2["high_window"] is not None and last_occ_v2:
+            days_since_last_occ = (as_of_date_v2 - last_occ_v2).days
+            raw_next = rec_v2["high_window"] - days_since_last_occ
+            next_due_days = max(0, raw_next)
             overdue = raw_next < 0
-        else:
-            next_due_days = None
-            overdue = False
 
-        if len(c_gaps) >= 4:
-            n_third = max(1, len(c_gaps) // 3)
-            older_med = _median_of(c_gaps[:-n_third])
-            recent_med = _median_of(c_gaps[-n_third:])
+        if len(clean_gaps_v2) >= 4:
+            n_third = max(1, len(clean_gaps_v2) // 3)
+            older_med = _median_of(clean_gaps_v2[:-n_third])
+            recent_med = _median_of(clean_gaps_v2[-n_third:])
             interval_trend = (
                 "degrading" if recent_med < older_med * 0.85
                 else "stabilizing" if recent_med > older_med * 1.15
@@ -3024,7 +4113,7 @@ def _build_top_units(
         else:
             interval_trend = "stable"
 
-        # ── Severity + criticality (spec §2D) ────────────────────────────────
+        # ── Severity + criticality ────────────────────────────────────────────
         sl_values = [v for v in (_row_service_level(r) for r in rows) if v is not None]
         dominant_sl: Optional[int] = Counter(sl_values).most_common(1)[0][0] if sl_values else None
         avg_weight = _median_of([_severity_weight(v) for v in sl_values]) if sl_values else 2.0
@@ -3032,72 +4121,75 @@ def _build_top_units(
         is_critical = critical_ct > len(rows) / 2
         criticality_mult = 1.5 if is_critical else 1.0
 
-        symptom_terms = _extract_issue_tokens(cluster_rows, dominant_issue)
+        latest_specific_issue = classify_specific_issue(_row_issue_text(latest_row) or _row_description(latest_row))
+        spare_issue_label = latest_specific_issue if latest_specific_issue != "Unclassified" else dominant_issue_v2
+        symptom_terms = _extract_issue_tokens(hist_cluster_rows, spare_issue_label)
 
-        # ── Spare recommendation (spec §2E) ─────────────────────────────────
-        # Cluster WO IDs → consumption for those WOs only
-        cluster_wo_ids = {_row_wo_id(r) for r in cluster_rows if _row_wo_id(r)}
+        # ── Spare recommendation ──────────────────────────────────────────────
+        cluster_wo_ids = {_row_wo_id(r) for r in hist_cluster_rows if _row_wo_id(r)}
         parts_context = unit_parts_context_getter(unit_name, cluster_wo_ids)
         spare = _compute_machine_spare(
             unit_name,
             rows,
-            dominant_issue,
+            spare_issue_label,
             parts_context,
             inventory_lookup,
-            c_median,
+            median_gap_v2,
             main_system=category_name,
             symptom_terms=symptom_terms,
         )
 
-        # ── Confidence (spec §2C) ─────────────────────────────────────────────
-        consumption_count = len(parts_context.get("sparePartsUsed") or []) if parts_context else 0
-        if c_n_intervals >= 6 and consumption_count >= 3:
-            confidence = "High"
-            confidence_reason = f"{recurrence} MRs, {c_n_intervals} clean intervals, {consumption_count} consumption records."
-        elif c_n_intervals >= 3:
-            confidence = "Medium"
-            confidence_reason = f"{recurrence} MRs, {c_n_intervals} clean intervals (need ≥3 consumption records for High)."
-        else:
-            confidence = "Low"
-            confidence_reason = f"Not enough history — {c_n_intervals} clean interval(s) (need ≥3 for Medium)."
-        if issue_confidence == "Low" and confidence != "Low":
-            confidence = "Low"
-            confidence_reason = "Weak issue cluster; " + confidence_reason
-
-        risk_score = recurrence * r_factor * avg_weight * criticality_mult
+        # Corrective breakdowns are ranked higher than preventive/routine tasks
+        latest_recency_days = (today - latest_issue_date).days if latest_issue_date else 999
+        recentness_score = max(0.0, 365.0 - min(latest_recency_days, 365)) / 365.0
+        severity_score = 5.0 - float(dominant_sl or 3)
+        risk_score = (
+            (0 if is_preventive else 1_000_000)
+            + (100_000 if is_critical else 0)
+            + (50_000 if dominant_count > 1 else 0)
+            + (n_cycles * 1_000)
+            + (recentness_score * 500)
+            + (severity_score * 100)
+            + (avg_weight * criticality_mult)
+        )
 
         # ── Escalation ────────────────────────────────────────────────────────
         escalation = None
-        if dominant_count >= 3 and issue_confidence != "Low":
+        if dominant_count >= 3 and confidence != "Low":
             escalation = {
                 "triggered": True,
-                "trigger": dominant_issue,
+                "trigger": dominant_issue_v2,
                 "trigger_count": dominant_count,
-                "reason": f"'{dominant_issue}' repeated {dominant_count}× for {unit_name}",
-                "mr_ids": list(dict.fromkeys(_row_mr_id(r) for r in rows if _row_mr_id(r)))[:12],
-                "wo_ids": list(dict.fromkeys(_row_wo_id(r) for r in rows if _row_wo_id(r)))[:8],
+                "reason": f"'{dominant_issue_v2}' repeated {dominant_count}× for {unit_name}",
+                "mr_ids": list(dict.fromkeys(_row_mr_id(r) for r in hist_cluster_rows if _row_mr_id(r)))[:12],
+                "wo_ids": list(dict.fromkeys(_row_wo_id(r) for r in hist_cluster_rows if _row_wo_id(r)))[:8],
             }
 
         trend = _trend_arrow(recurrence, prior_by_unit.get(unit_name, 0))
-        main_observed_issue = _build_main_observed_issue(dominant_issue, symptom_terms)
-        likely_cause_candidate = _build_likely_cause_candidate(dominant_issue, spare.get("parts") or [])
+        main_observed_issue = _build_main_observed_issue(dominant_issue_v2, symptom_terms)
+        likely_cause_candidate = _build_likely_cause_candidate(dominant_issue_v2, spare.get("parts") or [])
         evidence_summary = _format_issue_evidence(
-            dominant_count, latest_cluster_date, symptom_terms, mtbf_label, open_cluster_ct, dominant_issue
+            dominant_count, latest_cluster_date, symptom_terms, mtbf_label, open_cluster_ct, dominant_issue_v2
         )
 
         # ── Recent evidence for drill-down ────────────────────────────────────
         issue_evidence: list[dict] = []
-        for r, iss in recent_issue_rows:
+        evidence_rows = sorted(
+            hist_cluster_rows,
+            key=lambda r: (_occurrence_date(r) or _row_latest_date(r) or date.min),
+            reverse=True,
+        )
+        for r in evidence_rows:
             desc = _row_description(r)
             if not desc:
                 continue
-            ev_date = _row_latest_date(r)
+            ev_date = _occurrence_date(r) or _row_latest_date(r)
             translated = str(r.get("translated_description") or "").strip()
             issue_evidence.append({
                 "mr_id": _row_mr_id(r),
                 "wo_id": _row_wo_id(r),
                 "date": ev_date.isoformat() if ev_date else None,
-                "issue": iss if iss != "Unclassified" else None,
+                "issue": dominant_issue_v2,
                 "description": _clean_issue_phrase(desc, max_words=16),
                 "translated_description": _clean_issue_phrase(translated, max_words=16) if translated else None,
                 "status": str(r.get("status") or "").strip() or None,
@@ -3107,8 +4199,8 @@ def _build_top_units(
 
         other_common_faults = _build_other_common_faults(
             unit_name,
-            rows,
-            dominant_issue,
+            hist_cluster_rows,
+            spare_issue_label,
             unit_groups,
             parts_context,
             inventory_lookup,
@@ -3116,18 +4208,27 @@ def _build_top_units(
         )
 
         scored.append({
-            # ── Spec §3 identity ──────────────────────────────────────────────
+            # ── Identity ──────────────────────────────────────────────────────
             "unit": unit_name,
             "asset_id": asset_id,
             "category": category_name,
             "is_critical": is_critical,
             "mr_count": recurrence,
-            # ── Issue ─────────────────────────────────────────────────────────
-            "issue": {"cluster": dominant_issue, "proof": proof},
-            "recurring_issue": dominant_issue,
-            "recurring_issue_confidence": issue_confidence,
-            "recurring_issue_reason": issue_reason,
+            "history_mr_count": len(hist_rows),
+            # ── Issue (latest issue + full-history recurrence) ───────────────
+            "issue": {"cluster": dominant_issue_v2, "proof": proof},
+            "recurring_issue": dominant_issue_v2,
+            "recurring_issue_confidence": confidence,
+            "recurring_issue_reason": confidence_reason,
             "recurring_issue_fault_family": dominant_fault,
+            "issue_category": latest_sig["category"],
+            "latest_issue_description": latest_issue_description,
+            "matched_wording": f"Latest issue linked to {latest_issue_description}",
+            "pattern_type": pattern_type,
+            "is_preventive": is_preventive,
+            "history_issue_count": dominant_count,
+            "recurring_pct": hist_pct,
+            "historical_pattern": strongest_historical,
             "main_observed_issue": main_observed_issue,
             "evidence_summary": evidence_summary,
             "likely_cause_candidate": likely_cause_candidate,
@@ -3137,15 +4238,22 @@ def _build_top_units(
             ],
             "issue_evidence": issue_evidence,
             "other_common_faults": other_common_faults,
-            # ── Timing (spec §3) ──────────────────────────────────────────────
+            # ── Timing (full-history v2) ───────────────────────────────────────
+            "pattern_signal": pattern_signal,
             "timing": {
                 "next_due_days": next_due_days,
-                "median_gap_days": c_median,
+                "median_gap_days": median_gap_v2,
                 "days_since_last": days_since if days_since < 999 else None,
                 "trend": interval_trend,
                 "overdue": overdue,
+                "n_cycles": n_cycles,
+                "clean_gap_count": len(clean_gaps_v2),
+                "history_start": "2024-01-01",
+                "history_end": "2026-12-31",
+                "low_window": rec_v2.get("low_window"),
+                "high_window": rec_v2.get("high_window"),
             },
-            # ── Severity (spec §3) ────────────────────────────────────────────
+            # ── Severity ─────────────────────────────────────────────────────
             "severity": {
                 "weighted_score": round(risk_score, 2),
                 "dominant_service_level": dominant_sl,
@@ -3162,7 +4270,7 @@ def _build_top_units(
             "spare_recommendation_basis": spare.get("basis") or _NO_CONFIRMED_SPARE,
             "spare_linked_wo_count": spare.get("linked_wo_count", 0),
             "spare_linked_transaction_count": spare.get("linked_transaction_count", 0),
-            # ── Confidence (spec §2C / §3) ────────────────────────────────────
+            # ── Confidence (full-history v2) ──────────────────────────────────
             "confidence": confidence,
             "confidence_reason": confidence_reason,
             # ── Internals ─────────────────────────────────────────────────────
@@ -3173,9 +4281,9 @@ def _build_top_units(
             "mtbf_days": round(mtbf_days, 1) if (reliable and mtbf_days) else None,
             "mtbf_label": mtbf_label,
             "mtbf_reliable": reliable,
-            "recurrence_interval_days": c_median,
-            "recurrence_interval_avg_days": c_avg,
-            "recurrence_interval_n": c_n_intervals,
+            "recurrence_interval_days": median_gap_v2,
+            "recurrence_interval_avg_days": avg_gap_v2,
+            "recurrence_interval_n": len(clean_gaps_v2),
             "recurrence_gauge": likely_label,
             "recurrence_band": recurrence_band_key,
             "likely_recurrence_label": likely_label,
@@ -3209,7 +4317,7 @@ def build_predictive_insights(filters: dict) -> dict:
     All data flows from already-memoised kpi_query_service builders.
     """
     f = ctx.normalize_filters(filters)
-    key = ("predictive_v2", f["stage"], f["year"], f["month"], f.get("period_mode"))
+    key = ("predictive_v5_unit-override", f["stage"], f["year"], f["month"], f.get("period_mode"))
     return _memoized(key, lambda: _build_predictive_insights_inner(f))
 
 
@@ -3317,6 +4425,7 @@ def _build_predictive_insights_inner(f: dict) -> dict:
     unit_asset_ids: dict[str, Counter] = {}        # unit_name → Counter of asset_ids
     resolved_count = 0
     facility_count = 0
+    _gi = _group_index()   # cached — safe to reference once outside loops
 
     for row in period_rows:
         unit_name, asset_id, disp_cat = resolve_to_unit(row)
@@ -3327,8 +4436,44 @@ def _build_predictive_insights_inner(f: dict) -> dict:
         if unit_name not in unit_asset_ids:
             unit_asset_ids[unit_name] = Counter()
         if asset_id:
-            unit_asset_ids[unit_name][asset_id] += 1
+            # Don't count area-bucket IDs (shared across many specific units).
+            # Their canonical_asset_id would contaminate the history lookup.
+            _sid_entry = _gi.get("id_to_specific", {}).get(asset_id.upper())
+            if not (_sid_entry and _sid_entry[4]):   # _sid_entry[4] == is_area
+                unit_asset_ids[unit_name][asset_id] += 1
         resolved_count += 1
+
+    # Detect asset IDs that are genuinely shared across 2+ distinct unit names.
+    # These are de-facto area-buckets even when their is_area flag is False
+    # (e.g., one ENWA-001 display_name="Bratt Pan No.1" used for ALL Bratt Pans).
+    _aid_to_units: dict[str, set] = {}
+    for _un, _cnt in unit_asset_ids.items():
+        for _aid in _cnt:
+            _aid_to_units.setdefault(_aid.upper(), set()).add(_un)
+    _shared_asset_ids: set[str] = {
+        _aid for _aid, _uns in _aid_to_units.items() if len(_uns) > 1
+    }
+
+    # ── Full-history rows per unit (for recurrence forecast) ─────────────────
+    # Keyed by Machine ID first, normalized unit name second. Date filters from
+    # the overview page are not applied here; recurrence uses 2024-2026 history.
+    history_by_unit: dict[str, list[dict]] = defaultdict(list)
+    for row in all_rows:
+        occ = _occurrence_date(row)
+        if not occ or not (2024 <= occ.year <= 2026):
+            continue
+        unit_name_h, asset_id_h, _ = resolve_to_unit(row)
+        if unit_name_h:
+            # Area-bucket IDs are shared across multiple distinct units (e.g., all Bratt
+            # Pans under one ENWA-* ID). Indexing by that shared key would mix units and
+            # cause "Bratt Pan No.4" WOs to appear in "Bratt Pan No.1" drill-downs.
+            # Guard 1: is_area flag from Asset_Master.
+            # Guard 2: ID observed mapping to 2+ distinct units in period_rows resolution.
+            _hid_entry = _gi.get("id_to_specific", {}).get((asset_id_h or "").upper())
+            _is_shared = (asset_id_h or "").upper() in _shared_asset_ids
+            safe_aid = "" if (_is_shared or (_hid_entry and _hid_entry[4])) else asset_id_h
+            for key in _history_lookup_keys(unit_name_h, safe_aid):
+                history_by_unit[key].append(row)
 
     # canonical asset_id per unit = most frequent
     canonical_asset_id: dict[str, str] = {
@@ -3385,6 +4530,7 @@ def _build_predictive_insights_inner(f: dict) -> dict:
             inventory_lookup,
             unit_parts_context_getter,
             today,
+            history_by_unit=history_by_unit,
         )
         categories.append({
             "name": cat_name,

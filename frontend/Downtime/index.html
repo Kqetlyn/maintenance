@@ -12,13 +12,11 @@
     </script>
     <link rel="stylesheet" href="style.css?v=20260623-crit-collapse-2">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
-    <link rel="stylesheet" href="/shared/mira/mira-chat.css?v=20260607-mira-chat-10">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body data-sync-page="downtime">
     <div id="navbar"></div>
@@ -65,7 +63,7 @@
                         <option value="Unclassified">Unclassified</option>
                     </select>
                 </div>
-                <button class="toggle-btn" type="button" id="refresh-asset-mapping-btn">Refresh Asset Mapping</button>
+                <button class="toggle-btn" type="button" id="refresh-asset-mapping-btn" style="display:none">Refresh Asset Mapping</button>
                 <form class="filter-inline import-inline" id="work-order-import-form">
                     <label class="inline-label" for="work-order-import-file">Import WO</label>
                     <input id="work-order-import-file" class="inline-file" name="file" type="file" accept=".csv,.xlsx,.xls">
@@ -75,19 +73,7 @@
                     </label>
                     <button class="toggle-btn import-btn" type="submit">Load</button>
                 </form>
-                <div class="wr-btn-group">
-                    <select id="wr-period-select" class="inline-select wr-period-select" title="Report period">
-                        <option value="this_week">This Week</option>
-                        <option value="last_week">Last Week</option>
-                        <option value="this_month">This Month</option>
-                        <option value="last_month">Last Month</option>
-                        <option value="ytd">YTD / FY</option>
-                    </select>
-                    <button class="toggle-btn wr-btn" type="button" id="wr-ppt-btn" onclick="exportWeeklyPPT()">PPT</button>
-                    <button class="toggle-btn wr-btn" type="button" id="wr-pdf-btn" onclick="exportWeeklyPDF()">PDF</button>
-                    <button class="toggle-btn wr-btn" type="button" id="wr-xl-btn" onclick="exportWeeklyExcel()">Excel</button>
-                </div>
-                <div class="refresh-badge" id="last-synced">Last synced unavailable</div>
+<div class="refresh-badge" id="last-synced">Last synced unavailable</div>
             </div>
         </header>
         <div class="import-status hidden" id="export-status"></div>
@@ -97,12 +83,6 @@
                 <div class="alert-item warning" id="period-helper-text"></div>
             </div>
         </div>
-        <div class="mira-alert-ctx-banner hidden" id="mira-alert-ctx-banner" role="status">
-            <span class="mira-alert-ctx-icon">&#9432;</span>
-            <span class="mira-alert-ctx-text" id="mira-alert-ctx-text"></span>
-            <button type="button" class="mira-alert-ctx-clear" id="mira-alert-ctx-clear">Clear alert filter</button>
-        </div>
-
         <section class="card-shell view-toggle maintenance-tab-toggle">
             <button type="button" class="toggle-btn" onclick="window.location.href='/'">Overview</button>
             <button type="button" class="toggle-btn" onclick="window.location.href='/?view=utility'">Utility</button>
@@ -147,11 +127,11 @@
                             <span class="cma-row-count" id="act-count-active">--</span>
                             <span class="cma-row-detail" id="cma-active-detail"></span>
                         </div>
-                        <div class="cma-row">
+                        <div class="cma-row cma-row-clickable" id="critical-inactive-trigger" role="button" tabindex="0" aria-controls="inactive-critical-drawer" aria-expanded="false">
                             <span class="cma-dot" style="background:#d97706;"></span>
                             <span class="cma-row-label">Inactive</span>
                             <span class="cma-row-count" id="act-count-maintenance">--</span>
-                            <span class="cma-row-detail" id="cma-inactive-detail"></span>
+                            <span class="cma-row-detail" id="cma-inactive-detail">Click to view affected machines</span>
                         </div>
                         <div class="cma-divider"></div>
                         <div class="cma-row cma-row-total">
@@ -161,7 +141,7 @@
                             <span class="cma-row-detail" id="cma-total-detail"></span>
                         </div>
                     </div>
-                    <div class="kpi-trend critical-status-card-note" id="critical-status-card-note">All critical machines counted; no-WO machines are Active.</div>
+                    <div class="kpi-trend critical-status-card-note" id="critical-status-card-note">All critical machines counted; click Inactive to view affected machines.</div>
                 </div>
                 <div class="kpi-card highlight-blue compact-summary-card">
                     <div class="kpi-label">Open MR by Severity</div>
@@ -185,6 +165,16 @@
                 </div>
             </div>
         </section>
+
+        <!-- Import Status Badge — shown only when a PBI full batch is active -->
+        <div class="import-status-badge" id="import-status-badge" style="display:none" aria-live="polite">
+            <div class="isb-header">
+                <span class="isb-title">Import Status Summary</span>
+                <span class="isb-total" id="import-badge-total">—</span>
+            </div>
+            <div class="isb-pills" id="import-badge-pills"></div>
+            <div class="isb-note" id="import-badge-note"></div>
+        </div>
 
         <section class="card reliability-focus-section" aria-labelledby="reliability-focus-title">
             <div class="card-title-block reliability-focus-header">
@@ -1608,7 +1598,7 @@
                 <div class="topic-analysis-stack">
                     <div class="card nested-card">
                         <div class="card-title">Records Requiring Correction Before KPI Use</div>
-                        <p class="card-subtitle">Invalid dates, missing dates, missing asset IDs, review status, or missing SLA fields.</p>
+                        <p class="card-subtitle">Shows only records that affect KPI reliability: missing Asset ID / WO ID, missing ActualStart, Finished records with missing ActualEnd, or invalid date sequence (real ActualEnd before ActualStart). Open or incomplete records (New / Confirm / In Progress / Rejected / reWork) with a D365 placeholder ActualEnd (1900-01-01 or blank) are excluded from MTTR but are <strong>not</strong> treated as data errors. SLA fields are not checked for Power BI imports. <button type="button" id="repair-pbi-flags-btn" class="inline-action-btn" title="Re-evaluate quality flags for Power BI records imported before the lifecycle fix">Repair PBI Flags</button></p>
                         <div class="table-wrapper wo-response-table-wrapper">
                             <table>
                                 <thead>
@@ -1701,6 +1691,24 @@
                                     <option value="Not Acknowledged">Not Acknowledged</option>
                                 </select>
                             </div>
+                            <div class="filter-group">
+                                <label for="me-maint-type">Equip. Function</label>
+                                <select id="me-maint-type">
+                                    <option value="">All Types</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label for="me-zone">Zone</label>
+                                <select id="me-zone">
+                                    <option value="">All Zones</option>
+                                </select>
+                            </div>
+                            <div class="filter-group">
+                                <label for="me-func-loc">Area / Line</label>
+                                <select id="me-func-loc">
+                                    <option value="">All Areas</option>
+                                </select>
+                            </div>
                             <!-- Hidden filters retained so existing Machine Explorer logic keeps working. -->
                             <select id="machine-explorer-group" class="hidden" hidden><option value="">All Groups</option></select>
                             <select id="machine-explorer-criticality" class="hidden" hidden><option value="">All Criticalities</option></select>
@@ -1780,7 +1788,6 @@
                                                     <th>Translated Description</th>
                                                     <th>Created By</th>
                                                     <th>Started By</th>
-                                                    <th>Created Date</th>
                                                     <th>Actual Start</th>
                                                     <th>Actual End</th>
                                                     <th>Age / Duration</th>
@@ -1789,7 +1796,7 @@
                                                 </tr>
                                             </thead>
                                             <tbody id="refrig-history-body">
-                                                <tr><td colspan="18" class="empty-cell">Select a condenser group or asset to view WO/MR history.</td></tr>
+                                                <tr><td colspan="17" class="empty-cell">Select a condenser group or asset to view WO/MR history.</td></tr>
                                             </tbody>
                                         </table>
                                     </div>
@@ -1915,7 +1922,6 @@
                                                 <th>Translated Description</th>
                                                 <th>Started By</th>
                                                 <th>Created By</th>
-                                                <th>Created Date</th>
                                                 <th>Actual Start</th>
                                                 <th>Actual End</th>
                                                 <th>Age / Duration</th>
@@ -1924,7 +1930,7 @@
                                             </tr>
                                         </thead>
                                         <tbody id="machine-history-body">
-                                            <tr><td colspan="16" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
+                                            <tr><td colspan="15" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -2037,9 +2043,55 @@
 
     </main>
 
+    <div class="critical-drawer-backdrop" id="inactive-critical-backdrop" hidden></div>
+    <aside class="critical-drawer" id="inactive-critical-drawer" aria-hidden="true" aria-labelledby="inactive-critical-title">
+        <div class="critical-drawer-header">
+            <div>
+                <div class="critical-drawer-eyebrow">Critical Machine Status</div>
+                <h2 id="inactive-critical-title">Inactive Critical Machines</h2>
+                <p id="inactive-critical-subtitle">Loading affected machines...</p>
+            </div>
+            <button class="critical-drawer-close" id="inactive-critical-close" type="button" aria-label="Close inactive critical machines drawer">&times;</button>
+        </div>
+        <div class="critical-drawer-toolbar">
+            <input id="inactive-critical-search" type="search" placeholder="Search asset, machine, MR, WO, status, location">
+            <button class="toggle-btn" type="button" id="inactive-critical-refresh">Refresh</button>
+        </div>
+        <div class="critical-drawer-message" id="inactive-critical-message"></div>
+        <div class="critical-drawer-table-wrap">
+            <table class="critical-drawer-table">
+                <thead>
+                    <tr>
+                        <th>Asset ID</th>
+                        <th>Machine</th>
+                        <th>Exact Machine Detected</th>
+                        <th>Group / Category</th>
+                        <th>Stage</th>
+                        <th>Location / Area</th>
+                        <th>Area Type</th>
+                        <th>Critical Type</th>
+                        <th>Mapping Confidence</th>
+                        <th>Validation Flag</th>
+                        <th>MR</th>
+                        <th>WO</th>
+                        <th>Status</th>
+                        <th>Severity</th>
+                        <th>Actual Start</th>
+                        <th>Actual End</th>
+                        <th>Open Age</th>
+                        <th>Description</th>
+                        <th>Problem / Trade</th>
+                        <th>Owner</th>
+                        <th>Action</th>
+                    </tr>
+                </thead>
+                <tbody id="inactive-critical-body"></tbody>
+            </table>
+        </div>
+    </aside>
+
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
     <script src="script.js?v=20260623-crit-collapse-2" defer></script>
-    <script src="weekly-report.js?v=20260624-wr-1" defer></script>
-    <script src="/shared/mira/mira-chat.js?v=20260607-mira-chat-11" defer></script>
+
 </body>
 </html>

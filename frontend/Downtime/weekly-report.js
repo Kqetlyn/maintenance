@@ -205,24 +205,9 @@ async function wrBuildData() {
     // Critical WO count
     const critWoCount = entries.filter(e => e.criticality === "Critical").length;
 
-    // MIRA summary (best-effort)
-    let miraSummary = "";
-    try {
-        const r = await fetch("/api/mira", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                message: `Write a 2-sentence executive summary for a weekly maintenance report. Period: ${period.label}. Open MR: ${openEntries.length}, Critical: ${criticalOpen.length}, Awaiting acknowledgement: ${notAck.length}, Avg MTTR: ${avgMttr !== null ? wrFmtHours(avgMttr) : "N/A"}, MR raised this period: ${periodEntries.length}, completed: ${periodFinished.length}. Be concise and management-focused. No bullet points.`,
-            }),
-            signal: AbortSignal.timeout(10000),
-        });
-        if (r.ok) { const d = await r.json(); miraSummary = d.reply || d.response || d.message || ""; }
-    } catch (_) {}
-
-    if (!miraSummary) {
-        const rate = periodEntries.length ? Math.round(periodFinished.length / periodEntries.length * 100) : 0;
-        miraSummary = `${period.label}: ${periodEntries.length} maintenance requests raised with ${periodFinished.length} completed (${rate}% closure). ${criticalOpen.length > 0 ? `${criticalOpen.length} critical open MRs require immediate management attention.` : "No critical open MRs outstanding — maintenance performance is on track."}`;
-    }
+    // Controlled summary generated from calculated report values only.
+    const rate = periodEntries.length ? Math.round(periodFinished.length / periodEntries.length * 100) : 0;
+    const miraSummary = `${period.label}: ${periodEntries.length} maintenance requests raised with ${periodFinished.length} completed (${rate}% closure). ${criticalOpen.length > 0 ? `${criticalOpen.length} critical open MRs require immediate management attention.` : "No critical open MRs outstanding - maintenance performance is on track."}`;
 
     // Late/overdue rows from DOM drill-down table
     const lateRows = [];

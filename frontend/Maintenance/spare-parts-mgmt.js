@@ -50,13 +50,13 @@
         ["engineering_opex", "Engineering OPEX"],
         ["engineering_capex", "Engineering CAPEX"],
         ["all_engineering_po", "All Engineering PO"],
-        ["procurement_reference", "Procurement Reference / All Indirect PO"],
     ];
+    const CURRENT_YEAR = String(new Date().getFullYear());
     const state = {
         stage: "all",
         category: "all",
         financialView: "engineering_opex",
-        year: String(new Date().getFullYear()),
+        year: CURRENT_YEAR,
         month: "all",
         tab: "overview",
     };
@@ -65,9 +65,10 @@
     let charts = {};
     let mounted = false;
     let grgiTrendView = "monthly"; // "monthly" | "fy"
+    let dateFiltersInitialized = false;
 
     function emptyCache() {
-        return { overview: null, received: null, issued: null, analysis: null, importStatus: null, delivery: null, procurement: null };
+        return { overview: null, received: null, issued: null, analysis: null, importStatus: null, delivery: null };
     }
 
     function el(tag, cls, text) {
@@ -116,7 +117,6 @@
             || {
                 label: financialViewLabel(),
                 engineering_source_note: "Source: Engineering PO files",
-                procurement_source_note: "Source: Indirect PO procurement file",
                 consumption_source_note: "Source: Project Actual Transactions",
             };
     }
@@ -158,7 +158,7 @@
     function requiredResourcesForTab(tab) {
         if (tab === "overview") return ["overview", "importStatus"];
         if (tab === "grgi") return ["overview", "received", "issued", "importStatus"];
-        if (tab === "supplier") return ["delivery", "procurement", "importStatus"];
+        if (tab === "supplier") return ["delivery", "importStatus"];
         if (tab === "data_quality") return ["overview", "analysis", "importStatus"];
         return ["importStatus"];
     }
@@ -173,7 +173,6 @@
         if (key === "issued") return `${API}/goods-issued${query}`;
         if (key === "analysis") return `${API}/item-vendor-analysis${query}`;
         if (key === "delivery") return `${API}/delivery-performance${query}`;
-        if (key === "procurement") return `${API}/procurement-reconciliation${query}`;
         if (key === "importStatus") return `${API}/import-status`;
         return null;
     }
@@ -285,8 +284,11 @@
             }).field
         );
 
-        const yearField = makeField("Year", [["all", "All"]], state.year, (value) => {
+        const initialYearOptions = [["all", "All"]];
+        if (CURRENT_YEAR) initialYearOptions.push([CURRENT_YEAR, CURRENT_YEAR]);
+        const yearField = makeField("Year", initialYearOptions, state.year, (value) => {
             state.year = value;
+            state.month = "all";
         });
         refs.yearSel = yearField.select;
         wrap.append(yearField.field);
@@ -338,7 +340,6 @@
         const grid = el("div", "spm-import-slots");
         grid.append(buildImportSlot("Stage 1", "Stage 1 Gen PO", "Import Stage 1 Gen PO", `${API}/import-stage-1-gen-po`));
         grid.append(buildImportSlot("Stage 2", "Stage 2 Gen PO", "Import Stage 2 Gen PO", `${API}/import-stage-2-gen-po`));
-        grid.append(buildImportSlot("Indirect PO", "Indirect PO (Official Procurement)", "Import Indirect PO", `${API}/import-indirect-po`));
         grid.append(buildImportSlot("Consumption", "Project Actual Transactions", "Import Consumption", `${API}/import-consumption`));
         grid.append(buildImportSlot("Inventory", "Inventory / Stock", "Import Inventory", `${API}/import-inventory`));
         panel.append(grid);
@@ -496,6 +497,28 @@
             }
         });
 
+        // PO Spare + Inventory Mapping slots (Phase 8).
+        [
+            ["PO Spare",          importStatus["PO Spare"]          || {}, "lines"],
+            ["Inventory Mapping", importStatus["Inventory Mapping"]  || {}, "items"],
+        ].forEach(([key, status, countLabel]) => {
+            const slot = document.querySelector(`.spm-import-slot[data-stage="${key}"]`);
+            if (!slot) return;
+            const badge = slot.querySelector('[data-role="badge"]');
+            const meta  = slot.querySelector('[data-role="meta"]');
+            if (badge) {
+                badge.textContent = status.uploaded ? "Uploaded" : "Not uploaded";
+                badge.className   = "spm-import-badge " + (status.uploaded ? "ok" : "off");
+            }
+            if (meta) {
+                const bits = [];
+                if (status.file_name)   bits.push(status.file_name);
+                if (status.row_count != null) bits.push(num(status.row_count) + " " + countLabel);
+                if (status.imported_at) bits.push("imported " + String(status.imported_at).slice(0, 16).replace("T", " "));
+                meta.innerHTML = bits.length ? bits.map(esc).join(" | ") : `No file yet — import to enable PO Spare Analysis.`;
+            }
+        });
+
         const consumption = document.getElementById("spm-consumption-status");
         if (consumption) {
             const issued = importStatus["Goods Issued"] || {};
@@ -520,7 +543,7 @@
                     .map((key) => {
                         const url = resourceUrl(key, query);
                         if (!url) return null;
-                        const promise = (key === "procurement" || key === "delivery") ? fetchJson(url).catch(() => null) : fetchJson(url);
+                        const promise = key === "delivery" ? fetchJson(url).catch(() => null) : fetchJson(url);
                         return promise.then((value) => [key, value]);
                     })
                     .filter(Boolean)
@@ -528,7 +551,12 @@
             entries.forEach(([key, value]) => {
                 cache[key] = value;
             });
-            if (cache.received || cache.issued) populateDateFilters(cache.received || {}, cache.issued || {});
+            const dateScopeChanged = populateDateFilters(cache.overview || {}, cache.received || {}, cache.issued || {});
+            if (dateScopeChanged) {
+                invalidateDataCaches();
+                void load({ force: true });
+                return;
+            }
             renderStatus(cache.overview, cache.importStatus);
             refreshImportPanel(cache.importStatus);
             renderDynamicPanel();
@@ -540,21 +568,49 @@
         }
     }
 
-    function populateDateFilters(received, issued) {
+    function populateDateFilters(overview, received, issued) {
         const months = new Set();
+        const years = new Set();
+        const addMonth = (month) => {
+            const value = String(month || "");
+            if (!/^\d{4}-\d{2}$/.test(value)) return;
+            months.add(value);
+            years.add(value.slice(0, 4));
+        };
+        const addYear = (year) => {
+            const value = String(year || "");
+            if (/^\d{4}$/.test(value)) years.add(value);
+        };
+        const filterOptions = (overview && overview.filter_options) || {};
+        (filterOptions.years || []).forEach(addYear);
+        (filterOptions.months || []).forEach(addMonth);
         const addMonths = (rows) => (rows || []).forEach((row) => {
-            if (row && row.month) months.add(String(row.month));
+            if (row && row.month) addMonth(row.month);
         });
         addMonths(received && received.monthly_po_value);
         addMonths(received && received.monthly_received_value);
         addMonths(issued && issued.monthly_issued_value);
 
-        const yearOptions = Array.from(new Set(Array.from(months).map((month) => month.slice(0, 4)).filter(Boolean))).sort().reverse();
-        const monthOptions = Array.from(months).filter(Boolean).sort().reverse();
+        const yearOptions = Array.from(years).filter(Boolean).sort().reverse();
+        const defaultYear = String(filterOptions.default_year || (yearOptions.includes(CURRENT_YEAR) ? CURRENT_YEAR : (yearOptions[0] || CURRENT_YEAR)));
+        let scopeChanged = false;
+        if (!dateFiltersInitialized) {
+            dateFiltersInitialized = true;
+            if (state.year !== defaultYear) {
+                state.year = defaultYear;
+                state.month = "all";
+                scopeChanged = true;
+            }
+        }
+        const monthOptions = Array.from(months)
+            .filter((month) => state.year === "all" || month.slice(0, 4) === state.year || month === state.month)
+            .sort()
+            .reverse();
         if (state.year !== "all" && !yearOptions.includes(state.year)) yearOptions.unshift(state.year);
         if (state.month !== "all" && !monthOptions.includes(state.month)) monthOptions.unshift(state.month);
         updateSelect(refs.yearSel, [["all", "All"]].concat(yearOptions.map((year) => [year, year])), state.year);
         updateSelect(refs.monthSel, [["all", "All"]].concat(monthOptions.map((month) => [month, monthLabel(month)])), state.month);
+        return scopeChanged;
     }
 
     function updateSelect(select, options, value) {
@@ -588,12 +644,9 @@ function renderStatus(overview, importStatus) {
         const s2 = receivedStatus["Stage 2"] || {};
         const s1label = s1.file_name || (s1imp.uploaded ? s1imp.file_name || "loaded" : "not loaded");
         const s2label = s2.file_name || (s2imp.uploaded ? s2imp.file_name || "loaded" : "not loaded");
-        const indirectStatus = (importStatus && importStatus["Indirect PO"]) || {};
         status.innerHTML =
-            `Sources: Gen PO Stage 1 &amp; Stage 2 for PO/GRN. Indirect PO for official procurement reference. Project Actual Transactions for GI / Consumption. Inventory is the stock snapshot. ` +
-            `<span class="spm-status-muted">Stage 1: ${esc(s1label)} | Stage 2: ${esc(s2label)} | Indirect PO: ${
-                indirectStatus.uploaded ? esc(num(indirectStatus.row_count) + " lines") : "not loaded"
-            } | Consumption: ${
+            `Sources: Gen PO Stage 1 &amp; Stage 2 for PO/GRN, lead time, and delivery dates. Project Actual Transactions for GI / Consumption. Inventory is the stock snapshot. ` +
+            `<span class="spm-status-muted">Stage 1: ${esc(s1label)} | Stage 2: ${esc(s2label)} | Consumption: ${
                 issuedStatus.uploaded ? esc(sourceLoadedLabel(issuedStatus, "rows")) : "not loaded"
             } | Inventory: ${inventoryStatus.uploaded ? esc(sourceLoadedLabel(inventoryStatus, "rows")) : "not loaded"} | Data quality: ${
                 num(quality.missing_received_date)
@@ -638,15 +691,6 @@ function renderStatus(overview, importStatus) {
         });
     }
 
-    function showLegacyPanel(panelName) {
-        document.querySelectorAll("[data-spare-panel]").forEach((button) => {
-            button.classList.toggle("is-active", button.dataset.sparePanel === panelName);
-        });
-        document.querySelectorAll("[data-spare-panel-content]").forEach((panel) => {
-            panel.classList.toggle("is-active", panel.dataset.sparePanelContent === panelName);
-        });
-    }
-
     function applyCatalogueChildVisibility(mode) {
         const grid = document.querySelector(".spare-table-grid");
         const catalogue = document.querySelector(".pt-parts-combined-card");
@@ -678,9 +722,6 @@ function renderStatus(overview, importStatus) {
             showSelector(".spare-overview-shell");
         } else if (state.tab === "supplier") {
             showSelector("#epo-section");
-        } else if (state.tab === "classification") {
-            showLegacyPanel("external");
-            showSelector('[data-spare-panel-content="external"]');
         } else if (state.tab === "catalogue") {
             showSelector(".spare-table-grid");
             applyCatalogueChildVisibility("catalogue");
@@ -695,9 +736,9 @@ function renderStatus(overview, importStatus) {
             showSelector("#ay-combined-section");
         } else if (state.tab === "intelligence") {
             showSelector("#asset-parts-intelligence-card");
-        } else if (state.tab === "data_quality") {
-            showSelector(".spare-import-card");
         }
+        // "po_spare" and "data_quality" are rendered entirely into #spm-dynamic-root —
+        // no legacy selectors to show for them.
 
         window.setTimeout(() => {
             window.dispatchEvent(new Event("resize"));
@@ -734,7 +775,6 @@ function renderStatus(overview, importStatus) {
         const issued   = (cache.overview && cache.overview.goods_issued_kpis) || {};
         const inv      = (cache.overview && cache.overview.inventory_kpis) || {};
         const pocat    = (cache.overview && cache.overview.po_category_kpis) || {};
-        const pk       = (cache.overview && cache.overview.procurement_kpis) || {};
         const dq       = (cache.overview && cache.overview.data_quality) || {};
         const scope    = financialScope();
 
@@ -742,7 +782,7 @@ function renderStatus(overview, importStatus) {
         const head = el("div", "section-head spm-panel-head");
         const copy = el("div");
         copy.append(el("h2", null, "Spare Parts Overview"));
-        copy.append(el("p", "section-subtitle", "Engineering PO, GR/GI, current on-hand inventory, and procurement reference matching."));
+        copy.append(el("p", "section-subtitle", "Engineering PO, GR/GI, current on-hand inventory, delivery performance, and spare-part usage."));
         head.append(copy);
         panel.append(head);
 
@@ -817,10 +857,6 @@ function renderStatus(overview, importStatus) {
         const attention = [];
         if ((inv.unvalued_in_stock_items || 0) > 0)
             attention.push(`${num(inv.unvalued_in_stock_items)} inventory items missing price match`);
-        if (pk.available !== false && (pk.price_qty_mismatch_count || 0) > 0)
-            attention.push(`${num(pk.price_qty_mismatch_count)} PO price / qty mismatches`);
-        if (pk.available !== false && pk.match_rate_pct != null)
-            attention.push(`Procurement reference match only ${pct(pk.match_rate_pct)}`);
         if ((pocat.service_labour_repair_po_value || 0) > 0)
             attention.push("Services / labour spend should be reviewed separately from spare parts");
         if (dq.missing_received_date > 0)
@@ -1202,7 +1238,6 @@ function renderStatus(overview, importStatus) {
     function renderSupplierTab() {
         const root = el("div");
         root.append(renderDeliveryPerformancePanel());
-        root.append(renderProcurementReferenceSection());
         return root;
     }
 
@@ -1528,6 +1563,151 @@ function renderStatus(overview, importStatus) {
             tSection.append(wrap);
             tSection.append(el("p", "spm-flow-note", "Source: Engineering PO files with Indirect PO procurement file reference fields"));
             panel.append(tSection);
+        }
+
+        return panel;
+    }
+
+    function renderPoSparePanel() {
+        const d = cache.poSpare || {};
+        const kpis   = d.kpis   || {};
+        const recon  = d.reconciliation || {};
+        const items  = d.top_items     || [];
+        const monthly = d.monthly_trend || [];
+        const yearly  = d.yearly_trend  || [];
+        const labels  = d.display_labels || {};
+        const note    = d.source_note   || "";
+
+        const panel = el("div", "card-shell spm-compact-panel spm-po-spare-panel");
+
+        // ── Header ────────────────────────────────────────────────────────────
+        const head = el("div", "section-head spm-panel-head");
+        const copy = el("div");
+        copy.append(el("h2", null, "PO Spare Analysis (2024-2026)"));
+        copy.append(el("p", "section-subtitle spm-source-note", note || "PO Spare 24-26.csv is the controlled spare parts PO base table."));
+        head.append(copy);
+        panel.append(head);
+
+        if (!d.kpis) {
+            const imp = (cache.importStatus && cache.importStatus["PO Spare"]) || {};
+            const msg = imp.uploaded
+                ? "Loading PO Spare data…"
+                : "No PO Spare data loaded. Use Manage Imports → PO Spare 24-26 to import.";
+            panel.append(el("p", "spm-muted", msg));
+            return panel;
+        }
+
+        // ── KPI row ───────────────────────────────────────────────────────────
+        panel.append(kpiGrid([
+            ["Total PO Value (THB)",   money(kpis.total_po_value_thb), "blue"],
+            ["PO Count",               num(kpis.po_count),             "blue"],
+            ["PO Line Count",          num(kpis.po_line_count),        "blue"],
+            ["Unique Item Codes",      num(kpis.unique_item_count),    "blue"],
+            ["Total Ordered Qty",      num(kpis.total_ordered_qty),    "blue"],
+            ["Delivery Date Range",    kpis.date_range || "—",         ""],
+        ]));
+
+        // ── Top Items table ───────────────────────────────────────────────────
+        if (items.length) {
+            const sec = el("div", "spm-po-section");
+            sec.append(el("h3", "spm-section-label", "Top 20 Items by PO Value"));
+            const cols = [
+                ["Item Code", "item_code"],
+                ["Description", "item_description"],
+                ["Item Group", "item_group"],
+                ["Vendor", "vendor_name"],
+                ["Total Value THB", "total_value_thb", "money"],
+                ["Ordered Qty", "total_qty", "num"],
+                ["PO Lines", "po_line_count", "num"],
+                ["PO Count", "unique_po_count", "num"],
+                ["Inventory Match", "inventory_match_status"],
+                ["Stock", "available_stock", "num"],
+            ];
+            const wrap = el("div", "table-wrapper spm-table-wrap");
+            wrap.innerHTML =
+                `<table class="spm-table"><thead><tr>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>` +
+                items.map((r) =>
+                    `<tr>${cols.map((c) => {
+                        const raw = r[c[1]];
+                        if (c[2] === "money") return `<td>${esc(money(raw))}</td>`;
+                        if (c[2] === "num")   return `<td>${raw != null ? esc(num(raw)) : "—"}</td>`;
+                        const matched = c[1] === "inventory_match_status" && raw && raw.startsWith("Matched");
+                        return `<td${matched ? ' class="spm-match-ok"' : ""}>${esc(raw || "—")}</td>`;
+                    }).join("")}</tr>`
+                ).join("") +
+                "</tbody></table>";
+            sec.append(wrap);
+            panel.append(sec);
+        }
+
+        // ── Yearly trend ──────────────────────────────────────────────────────
+        if (yearly.length) {
+            const sec = el("div", "spm-po-section");
+            sec.append(el("h3", "spm-section-label", "Yearly PO Spend"));
+            const cols = [["Year", "year"], ["PO Value THB", "value_thb", "money"], ["Lines", "line_count", "num"], ["POs", "po_count", "num"]];
+            const wrap = el("div", "table-wrapper spm-table-wrap");
+            wrap.innerHTML =
+                `<table class="spm-table"><thead><tr>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>` +
+                yearly.map((r) =>
+                    `<tr>${cols.map((c) => {
+                        const raw = r[c[1]];
+                        if (c[2] === "money") return `<td>${esc(money(raw))}</td>`;
+                        if (c[2] === "num")   return `<td>${esc(num(raw))}</td>`;
+                        return `<td>${esc(raw || "—")}</td>`;
+                    }).join("")}</tr>`
+                ).join("") +
+                "</tbody></table>";
+            sec.append(wrap);
+            panel.append(sec);
+        }
+
+        // ── Monthly trend ─────────────────────────────────────────────────────
+        if (monthly.length) {
+            const sec = el("div", "spm-po-section");
+            sec.append(el("h3", "spm-section-label", "Monthly PO Trend"));
+            const cols = [["Month", "period"], ["PO Value THB", "value_thb", "money"], ["Lines", "line_count", "num"], ["POs", "po_count", "num"]];
+            const wrap = el("div", "table-wrapper spm-table-wrap");
+            wrap.innerHTML =
+                `<table class="spm-table"><thead><tr>${cols.map((c) => `<th>${esc(c[0])}</th>`).join("")}</tr></thead><tbody>` +
+                monthly.map((r) =>
+                    `<tr>${cols.map((c) => {
+                        const raw = r[c[1]];
+                        if (c[2] === "money") return `<td>${esc(money(raw))}</td>`;
+                        if (c[2] === "num")   return `<td>${esc(num(raw))}</td>`;
+                        return `<td>${esc(raw || "—")}</td>`;
+                    }).join("")}</tr>`
+                ).join("") +
+                "</tbody></table>";
+            sec.append(wrap);
+            panel.append(sec);
+        }
+
+        // ── Reconciliation ────────────────────────────────────────────────────
+        if (recon.total_po_spare_rows != null) {
+            const sec = el("div", "spm-po-section spm-recon-section");
+            sec.append(el("h3", "spm-section-label", "Data Reconciliation"));
+            const rows = [
+                ["Total PO Spare rows (base table)",              recon.total_po_spare_rows,                    ""],
+                ["Total PO Spare value (THB)",                    money(recon.total_po_spare_value_thb),        ""],
+                ["Rows matched to Gen PO reference",              recon.rows_matched_to_gen_po,                 "ok"],
+                ["Rows not matched to Gen PO (PO Spare only)",   recon.rows_not_matched_to_gen_po,             recon.rows_not_matched_to_gen_po > 0 ? "warn" : "ok"],
+                ["Item codes matched to inventory mapping",       recon.items_matched_to_inventory,             "ok"],
+                ["Item codes not in inventory mapping",          recon.items_not_in_inventory_mapping,          recon.items_not_in_inventory_mapping > 0 ? "warn" : "ok"],
+                ["Inventory items with no PO Spare line",        recon.inventory_items_with_no_po_spare,        ""],
+            ];
+            const table = el("table", "spm-table");
+            table.innerHTML =
+                `<thead><tr><th>Metric</th><th>Count</th></tr></thead><tbody>` +
+                rows.map(([label, val, tone]) =>
+                    `<tr><td>${esc(label)}</td><td${tone ? ` class="spm-recon-${tone}"` : ""}>${esc(val != null ? String(val) : "—")}</td></tr>`
+                ).join("") +
+                `</tbody>`;
+            const noteEl = el("p", "spm-flow-note",
+                "PO Spare 24-26.csv is the base table — no rows are dropped due to missing Gen PO or inventory match. " +
+                "Gen PO is used as procurement reference/enrichment only. " +
+                "On-hand list.xlsx is used only as item mapping and stock snapshot, not as the PO source.");
+            sec.append(table, noteEl);
+            panel.append(sec);
         }
 
         return panel;

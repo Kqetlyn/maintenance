@@ -222,9 +222,17 @@ def _mix_row_datetime(row: dict):
     return None
 
 
+def _work_order_rows_for_filter_scope(filters: dict) -> list[dict]:
+    """Use the selected-period payload first so YTD does not load all years."""
+    period = ctx.resolve_downtime_period(filters)
+    if period.get("period") == "all_years":
+        return _downtime_all_year_work_orders(filters)
+    return _downtime_management(filters).get("work_orders", []) or []
+
+
 def _filtered_work_order_rows(filters: dict) -> list[dict]:
     return [
-        row for row in _downtime_all_year_work_orders(filters)
+        row for row in _work_order_rows_for_filter_scope(filters)
         if _matches_work_order_filters(row, filters)
     ]
 

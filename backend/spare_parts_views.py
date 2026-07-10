@@ -679,6 +679,30 @@ def _monthly(rows, val_fn):
     return [{"month": m, "value": round(v, 2)} for m, v in sorted(agg.items())]
 
 
+def build_date_filter_options(stage=None, category=None, financial_view=None) -> dict:
+    gr_rows, _ = get_goods_received_rows()
+    gi_rows, _ = get_goods_issued_rows()
+    filtered_gr = _apply_filters(gr_rows, stage, category, None, None, financial_view)
+    filtered_gi = _apply_filters(gi_rows, None, category, None, None)
+    months = sorted(
+        {
+            str(row.get("month"))
+            for row in filtered_gr + filtered_gi
+            if row.get("month") and re.match(r"^\d{4}-\d{2}$", str(row.get("month")))
+        },
+        reverse=True,
+    )
+    years = sorted({month[:4] for month in months}, reverse=True)
+    current_year = str(datetime.now().year)
+    default_year = current_year if current_year in years else (years[0] if years else current_year)
+    return {
+        "years": years,
+        "months": months,
+        "default_year": default_year,
+        "default_month": "all",
+    }
+
+
 # ── public builders (cached/efficient) ───────────────────────────────────────
 def build_goods_received(stage=None, category=None, year=None, month=None, financial_view=None) -> dict:
     all_rows, status = get_goods_received_rows()
@@ -876,6 +900,7 @@ def build_overview(stage=None, category=None, year=None, month=None, financial_v
             "month": month or "all",
             "financial_view": normalize_financial_view(financial_view),
         },
+        "filter_options": build_date_filter_options(stage, category, financial_view),
         "financial_scope": financial_scope_meta(financial_view),
         "procurement_kpis": procurement_kpis,
         # Section C — Current inventory KPIs (On-hand list; not stage-filtered)

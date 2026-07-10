@@ -239,11 +239,20 @@ FLEXIBLE_COLUMN_ALIASES = {
     "work_order_id": ["Work Order ID", "WO ID", "WorkOrderID", "PR No.", "Request ID"],
 }
 _SPARE_PARTS_CACHE: dict[tuple, dict] = {}
-_SPARE_PERSISTENT_CACHE_VERSION = 1
+_SPARE_PERSISTENT_CACHE_VERSION = 3
 _SPARE_PERSISTENT_CACHE_DIR = DEFAULT_DATA_DIR / "_dashboard_cache" / "spare_parts"
 _SPARE_DB_SYNC_GUARD = threading.Lock()
 _SPARE_DB_SYNC_RUNNING = False
 _SPARE_DB_SYNC_PENDING = False
+SPARE_PARTS_CORE_IMPORTS = {
+    "inventory": "Current inventory / item list",
+    "external_po": "Gen PO / external purchases",
+    "project_transactions": "Project actual transactions / store usage",
+}
+SPARE_PARTS_OPTIONAL_IMPORTS = {
+    "work_orders": "Downtime work orders, used only for richer WO/MR linking",
+    "all_years_history": "Historical project transactions, used only for multi-year trend pages",
+}
 
 
 def _file_signature(path: Path | None):
@@ -3011,11 +3020,12 @@ def _build_full_payload_from_structured(structured_payload, source_paths):
                 pass
         last_synced = max(timestamps, default=None)
 
-    return {
+    payload = {
         "meta": {
             "last_synced": last_synced,
             "source_paths": [str(p) for p in source_paths],
             "errors": source_errors,
+            "response_mode": "browser_optimized",
         },
         "summary": {
             "total_records": len(legacy_records),
@@ -3058,12 +3068,82 @@ def _build_full_payload_from_structured(structured_payload, source_paths):
         "unlinked_rows": [],
         "filter_options": _build_filter_options(legacy_records),
         "matching_rules": {
-            "file_support": "Drop spare_parts_master, Item_list_for_keep_spare_part_TRANSLATED, inventory_movement, po_list, work_orders, and equipment_master files into the data folder as .xlsx or .csv.",
+            "file_support": "Core Spare Parts imports: inventory / item list, Gen PO external purchases, and Project actual transactions / store usage. Work orders and all-years history are optional enrichment only.",
+            "core_imports": SPARE_PARTS_CORE_IMPORTS,
+            "optional_imports": SPARE_PARTS_OPTIONAL_IMPORTS,
             "column_detection": "Adjust FLEXIBLE_COLUMN_ALIASES in backend/spare_parts_service.py for new source column names.",
             "po_classification": "Adjust _classify_po_item() keyword logic in backend/spare_parts_service.py.",
         },
         **structured_payload,
     }
+    _trim_spare_parts_payload_for_browser(payload)
+    return payload
+
+
+def _pick_fields(row: dict, fields: tuple[str, ...]) -> dict:
+    return {field: row.get(field) for field in fields if row.get(field) not in (None, "", [])}
+
+
+def _trim_spare_parts_payload_for_browser(payload: dict) -> None:
+    """Remove duplicate/heavy row fields from the main browser endpoint.
+
+    Detailed project transactions and external PO rows are available through
+    their lazy-loaded endpoints. The main Spare Parts page needs enough fields
+    for KPIs, filters, charts, and the visible tables.
+    """
+    inventory_fields = (
+        "code", "name", "description", "translated_name", "current_quantity",
+        "unit", "item_group", "category", "available_physical",
+        "reserved_physical", "on_order", "min_stock", "max_stock", "unit_cost",
+        "stock_value", "stock_status_group", "stock_health_status",
+        "quantity_to_buy", "estimated_reorder_cost", "data_quality_flags",
+        "duplicate_count", "equipment_asset_id", "equipment_name",
+        "equipment_criticality",
+    )
+    po_fields = (
+        "po_number", "po_date", "goods_received_date", "code",
+        "original_description", "translated_description", "clean_description",
+        "quantity_ordered", "quantity_received", "unit", "unit_cost",
+        "total_cost", "vendor_name", "supplier", "group_of_cost",
+        "pd_machine", "classification", "confidence", "classification_reason",
+        "translation_status", "inventory_match_status", "inventory_match_code",
+        "inventory_match_name", "needs_manual_review", "review_reasons",
+        "source_stage",
+    )
+    movement_fields = (
+        "date", "code", "name", "item_name", "description", "quantity_drawn",
+        "value", "asset_id", "equipment_name", "work_order_id",
+    )
+
+    inventory = payload.get("inventory") or {}
+    inventory_records = inventory.get("records") or []
+    inventory["records"] = [_pick_fields(row, inventory_fields) for row in inventory_records]
+
+    po_classification = payload.get("po_classification") or {}
+    po_records = po_classification.get("records") or []
+    manual_records = po_classification.get("manual_review_records") or []
+    po_classification["records"] = [_pick_fields(row, po_fields) for row in po_records]
+    po_classification["manual_review_records"] = [_pick_fields(row, po_fields) for row in manual_records]
+
+    consumption = payload.get("consumption") or {}
+    movement_records = consumption.get("store_drawn_records") or []
+    external_rows = consumption.get("external_bought_records") or []
+    consumption["store_drawn_records"] = [_pick_fields(row, movement_fields) for row in movement_records]
+    consumption["external_bought_records"] = []
+    consumption.setdefault("summary", {})["external_bought_records_omitted"] = len(external_rows)
+
+    turnover = payload.get("turnover") or {}
+    turnover_records = turnover.get("records") or []
+    turnover["records"] = []
+    turnover.setdefault("summary", {})["records_omitted"] = len(turnover_records)
+
+    comparison = payload.get("comparison") or {}
+    comparison["inventory_purchase_summary_rows"] = []
+    comparison["top_external_spare_parts_rows"] = []
+
+    legacy_records = payload.get("records") or []
+    payload["records"] = []
+    payload.setdefault("meta", {})["legacy_records_omitted"] = len(legacy_records)
 
 
 def build_spare_parts_payload():
@@ -6521,6 +6601,10 @@ def get_maintenance_import_status():
             "validation": {},
         },
     }
+    for key in SPARE_PARTS_CORE_IMPORTS:
+        sources[key]["required"] = True
+    for key in SPARE_PARTS_OPTIONAL_IMPORTS:
+        sources[key]["required"] = False
 
     stage_files = [status.get("file_name") for status in stage_status.values() if status.get("available") and status.get("file_name")]
     if stage_rows and stage_files:
@@ -6538,11 +6622,17 @@ def get_maintenance_import_status():
     if not sources["external_po"].get("available"):
         flags.append({"level": "error", "title": "Gen PO missing", "message": "Upload the external parts export to populate PO classification, spend, and vendor cards."})
     if not sources["project_transactions"].get("available"):
-        flags.append({"level": "warning", "title": "Consumption import missing", "message": "Spare-parts consumption tables and annual analysis need a Project annual transactions export."})
-    if not sources["work_orders"].get("available"):
-        flags.append({"level": "warning", "title": "Downtime work orders missing", "message": "Spare-parts consumption to work-order linking is limited until the Downtime work order import is loaded."})
+        flags.append({"level": "error", "title": "Consumption import missing", "message": "Upload the Project actual transactions export to populate usage, consumption, and annual analysis."})
     years = sources["all_years_history"].get("validation", {}).get("years") or []
     if years and len(years) == 1:
         flags.append({"level": "info", "title": "Single-year analysis", "message": f"Only {years[0]} is currently available in all-years analysis. Future annual imports will be kept in history for comparison."})
 
-    return {"sources": sources, "flags": flags}
+    return {
+        "sources": sources,
+        "flags": flags,
+        "design": {
+            "core_imports": SPARE_PARTS_CORE_IMPORTS,
+            "optional_imports": SPARE_PARTS_OPTIONAL_IMPORTS,
+            "note": "The page is designed to run on the three core imports. Optional sources enrich linking and long-term trends but should not block deployment.",
+        },
+    }

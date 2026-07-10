@@ -1,5 +1,9 @@
 @echo off
 cd /d "%~dp0"
+echo ============================================
+echo  Maintenance App  ^|  PORT 5005
+echo  http://localhost:5005
+echo ============================================
 rem Free port 5005 first so stale/zombie backends can't pile up or block startup
 rem (closing the console window does not always kill the old python process).
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr ":5005" ^| findstr "LISTENING"') do taskkill /f /pid %%P >nul 2>&1
@@ -21,12 +25,16 @@ if errorlevel 1 (
     rem Give the server a moment to bind the port, then pre-load the model in the
     rem background so the first MIRA AI request isn't slow ^(model load ~10-30s^).
     timeout /t 3 /nobreak >nul
-    start "Ollama warm-up" /min "%OLLAMA_EXE%" run qwen2.5:7b "warming up"
+    start "Ollama warm-up" /min "%OLLAMA_EXE%" run qwen3:8b "warming up"
 ) else (
     echo Local Ollama already running.
 )
 
 set "PYTHON_EXE="
+if exist "%LocalAppData%\Python\bin\python.exe" (
+    set "PYTHON_EXE=%LocalAppData%\Python\bin\python.exe"
+    goto :run
+)
 for /f "delims=" %%F in ('dir /b /s "%LocalAppData%\Python\pythoncore-*\python.exe" 2^>nul') do (
     set "PYTHON_EXE=%%F"
     goto :run

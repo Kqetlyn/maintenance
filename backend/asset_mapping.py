@@ -60,6 +60,148 @@ _CANDIDATES = [
 _CACHE = {"sig": None, "payload": None}
 
 
+def _build_mapping_from_sql_rows(rows):
+    """Reconstruct asset_map, groups, group_matchers from asset_master SQL rows.
+
+    SQL layout:
+      category      = mappedMainAssetGroup  (broad group, e.g. "Production Equipment")
+      machine_group = mappedMachineGroup    (fine group,  e.g. "Combi Oven")
+    """
+    asset_map = {}
+    groups = []
+    group_matchers = []
+    groups_by_broad = {}
+
+    for row in rows:
+        asset_id = str(row.get("asset_id") or "").strip().upper()
+        if not asset_id:
+            continue
+
+        display_name = str(row.get("asset_name") or asset_id).strip()
+        stage = str(row.get("stage") or "Needs Stage Review").strip()
+        broad_group = str(row.get("category") or "Unknown / Review").strip()
+        fine_group = str(row.get("machine_group") or "").strip()
+        functional_location = str(row.get("functional_location") or "Unassigned").strip()
+        criticality = str(row.get("criticality") or "Unmapped").strip()
+        area = str(row.get("area") or "").strip()
+        maint_type_code = str(row.get("maint_type_code") or "").strip()
+        maint_type      = str(row.get("maint_type")      or "").strip()
+        func_loc_name   = str(row.get("func_loc_name")   or "").strip()
+
+        mapping_status = _stage_mapping_status(stage, asset_id)
+        criticality_rank = 1 if criticality == "Critical" else (2 if criticality == "Non-Critical" else 999)
+
+        entry = {
+            "asset_id": asset_id,
+            "display_name": display_name,
+            "machine_group": broad_group,
+            "asset_machine_group": fine_group,
+            "location": functional_location,
+            "stage": stage,
+            "mappedStage": stage,
+            "mappedAssetName": display_name,
+            "mappedMainAssetGroup": broad_group,
+            "mappedMachineGroup": fine_group,
+            "mappedSubAssetGroup": "",
+            "mappedLocation": functional_location,
+            "mappedSystemArea": area,
+            "mappingStatus": mapping_status,
+            "mapped_stage": stage,
+            "mapped_asset_name": display_name,
+            "mapped_main_asset_group": broad_group,
+            "mapped_sub_asset_group": "",
+            "mapped_location": functional_location,
+            "mapped_system_area": area,
+            "mapping_status": mapping_status,
+            "remarks": "",
+            "criticality": criticality,
+            "raw_criticality": criticality,
+            "criticality_rank": criticality_rank,
+            "refrigeration_role": "Other" if broad_group == "Refrigeration" else None,
+            "parent_asset_id": None,
+            "refrigeration_subgroup": None,
+            "mapping_source": "sql",
+            "classification_source": "sql",
+            "has_assetlist_classification": mapping_status == "Mapped",
+            "has_asset_master_mapping": mapping_status == "Mapped",
+            "machine_name_display": display_name,
+            "asset_label": asset_id,
+            "asset_display_name": display_name,
+            "building": functional_location,
+            "group_asset_ids": [],
+            # D365 equipment-function + physical location fields
+            "maint_type_code": maint_type_code,
+            "maint_type": maint_type,
+            "func_loc_name": func_loc_name,
+        }
+        asset_map[asset_id] = entry
+
+        existing = groups_by_broad.get(broad_group)
+        if not existing:
+            g = {
+                "machine_group": broad_group,
+                "machine_name_display": broad_group,
+                "location": functional_location,
+                "building": functional_location,
+                "criticality": criticality,
+                "raw_criticality": criticality,
+                "criticality_rank": criticality_rank,
+                "classification_source": "sql",
+                "has_assetlist_classification": mapping_status == "Mapped",
+                "mappedStage": stage,
+                "mappedMainAssetGroup": broad_group,
+                "mappedSubAssetGroup": "",
+                "mappedLocation": functional_location,
+                "mappedSystemArea": area,
+                "mappingStatus": mapping_status,
+                "asset_ids": [],
+                "asset_entries": [],
+            }
+            groups.append(g)
+            group_matchers.append({
+                "machine_group": broad_group,
+                "machine_name_display": broad_group,
+                "location": functional_location,
+                "building": functional_location,
+                "criticality": criticality,
+                "raw_criticality": criticality,
+                "criticality_rank": criticality_rank,
+                "classification_source": "sql",
+                "has_assetlist_classification": mapping_status == "Mapped",
+                "mappedStage": stage,
+                "mappedMainAssetGroup": broad_group,
+                "mappedSubAssetGroup": "",
+                "mappedLocation": functional_location,
+                "mappedSystemArea": area,
+                "mappingStatus": mapping_status,
+                "aliases": _build_group_aliases(broad_group),
+            })
+            groups_by_broad[broad_group] = g
+            existing = g
+
+        existing["asset_ids"].append(asset_id)
+        existing["asset_entries"].append({
+            "asset_id": asset_id,
+            "asset_label": asset_id,
+            "asset_display_name": display_name,
+            "mappedStage": stage,
+            "mappedAssetName": display_name,
+            "mappedMainAssetGroup": broad_group,
+            "mappedMachineGroup": fine_group,
+            "mappedSubAssetGroup": "",
+            "mappedLocation": functional_location,
+            "mappedSystemArea": area,
+            "mappingStatus": mapping_status,
+        })
+
+    for group in groups:
+        for aid in group["asset_ids"]:
+            if aid in asset_map:
+                asset_map[aid]["group_asset_ids"] = group["asset_ids"]
+
+    return asset_map, groups, group_matchers
+
+
 def _file_sig(path):
     try:
         s = os.stat(path)
@@ -141,6 +283,40 @@ def _resolve_path(data_dir):
 
 
 def load_asset_mapping(data_dir):
+    # ── SQL-first path ─────────────────────────────────────────────────────────
+    # If the asset_master SQL table has been populated (even once), use it so
+    # that Asset_Master.xlsx is no longer required at runtime.
+    try:
+        import db as _db
+        meta = _db.get_asset_master_sync_meta()
+        if meta.get("available") and meta.get("asset_count", 0) > 0:
+            sql_sig = ("sql", meta["asset_count"], meta.get("last_synced"))
+            if _CACHE["sig"] == sql_sig and _CACHE["payload"] is not None:
+                return _CACHE["payload"]
+            rows = _db.query_asset_master()
+            if rows:
+                asset_map, groups, group_matchers = _build_mapping_from_sql_rows(rows)
+                payload = {
+                    "available": True,
+                    "path": meta.get("path") or "sql:asset_master",
+                    "last_synced": meta.get("last_synced"),
+                    "asset_map": asset_map,
+                    "keyword_rules": [],
+                    "groups": groups,
+                    "group_matchers": sorted(
+                        group_matchers,
+                        key=lambda m: max((len(a) for a in m["aliases"]), default=0),
+                        reverse=True,
+                    ),
+                    "message": f"Loaded {len(asset_map)} asset(s) from SQL asset_master.",
+                    "data_source": "sql",
+                }
+                _CACHE.update(sig=sql_sig, payload=payload)
+                return payload
+    except Exception:
+        pass
+
+    # ── Excel fallback ─────────────────────────────────────────────────────────
     path, sig = _resolve_path(data_dir)
 
     if sig and _CACHE["sig"] == sig and _CACHE["payload"] is not None:
@@ -208,6 +384,9 @@ def load_asset_mapping(data_dir):
         location = _clean(cell(row, "Location", fallback_index=5), "Unassigned")
         system_area = _clean(cell(row, "System/Area", "System Area", fallback_index=6), "")
         remarks = _clean(cell(row, "Remarks", fallback_index=7), "")
+        maint_type_code = _clean(cell(row, "Maint. Type Code", "Maint Type Code", "MaintenanceTypeCode"), "")
+        maint_type      = _clean(cell(row, "Maintenance Type", "MaintenanceType"), "")
+        func_loc_name   = _clean(cell(row, "Functional Location Name", "FunctionalLocationName"), "")
 
         raw_criticality = ""
         if mapping_status != "Mapped":
@@ -265,6 +444,10 @@ def load_asset_mapping(data_dir):
             "asset_display_name": display_name,
             "building": location,
             "group_asset_ids": [],
+            # D365 equipment-function + physical location fields
+            "maint_type_code": maint_type_code,
+            "maint_type": maint_type,
+            "func_loc_name": func_loc_name,
         }
         asset_map[asset_id] = entry
 

@@ -5256,33 +5256,3 @@ th {
 }
 
 /* ── MIRA Alert Context Banner ───────────────────────────────────────────────── */
-.mira-alert-ctx-banner {
-    display: flex;
-    align-items: center;
-    gap: 0.6rem;
-    padding: 0.6rem 1rem;
-    margin: 0 0 1rem 0;
-    background: #eff6ff;
-    border: 1px solid #bfdbfe;
-    border-left: 4px solid #3b82f6;
-    border-radius: 6px;
-    font-size: 0.83rem;
-    color: #1e3a5f;
-    flex-wrap: wrap;
-}
-.mira-alert-ctx-banner.hidden { display: none; }
-.mira-alert-ctx-icon { font-size: 1rem; color: #3b82f6; flex-shrink: 0; }
-.mira-alert-ctx-text { flex: 1; min-width: 0; }
-.mira-alert-ctx-clear {
-    flex-shrink: 0;
-    padding: 0.25rem 0.7rem;
-    border: 1px solid #93c5fd;
-    border-radius: 4px;
-    background: #fff;
-    color: #1d4ed8;
-    font-size: 0.78rem;
-    cursor: pointer;
-    white-space: nowrap;
-    transition: background 0.15s;
-}
-.mira-alert-ctx-clear:hover { background: #dbeafe; }

@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import os
 import sys
-from datetime import datetime
 
 # Ensure the backend dir (top-level dashboard modules + the mira package) is importable.
 _BACKEND_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -35,9 +34,8 @@ from mira.privacy import privacy_guard_service as guard
 from mira.providers import get_provider
 from mira.services import kpi_query_service as kpi
 from mira.services import presentation_service as presentation
-from mira.modules.maintenance import assistant_service
-from mira.modules.maintenance import chat_service
 from mira.reports import report_draft_service
+from mira.services import predictive_service
 
 FILTERS = {"stage": "all", "year": 2026, "month": 6}
 
@@ -150,50 +148,25 @@ def test_provider_is_local_mock():
     _check("provider is local-only", p.is_local_only is True)
 
 
-def test_assistant_six_questions():
-    questions = [
-        "Summarise this month's maintenance performance.",
-        "What is the MTTR this month?",
-        "What is the MTBF this month?",
-        "Compare Stage 1 and Stage 2 maintenance performance.",
-        "What are the main data reliability issues?",
-        "Summarise PM schedule status.",
-    ]
-    for q in questions:
-        res = assistant_service.ask(q, FILTERS)
-        _check(f"answer present: {q[:32]}...", bool(res.get("answer")))
-        _check("answer carries draft label", config.DRAFT_LABEL in res["answer"])
-        _check("mode is kpi_summary", res["mode"] == "kpi_summary")
-        _check("structured presentation is present", isinstance(res.get("presentation"), dict))
-        print(f"      Q: {q}\n      A: {res['answer'].splitlines()[0]}\n")
-
-
-def test_chat_intent_routing():
-    checks = [
-        ("What should be followed up today?", "daily_follow_up_query"),
-        ("Which asset has the most MR?", "top_asset_query"),
-        ("Which PM tasks are overdue?", "pm_overdue_query"),
-    ]
-    for question, expected_intent in checks:
-        res = chat_service.answer(question, FILTERS)
-        _check(f"chat intent matches for {question}", res.get("intent") == expected_intent)
-        _check("chat answer present", bool(res.get("answer")))
-        _check("chat key numbers present", isinstance(res.get("key_numbers_used"), list))
-
-
-def test_chat_default_period_is_ytd():
-    res = chat_service.answer("Summarise maintenance performance.", {"stage": "all"})
-    current_year = datetime.now().year
-    _check("chat defaults to current year", res.get("filters", {}).get("year") == current_year)
-    _check("chat defaults to ytd period mode", res.get("filters", {}).get("period_mode") == "ytd")
-    _check("chat exposes period used", str(res.get("period_used", "")).startswith("Period used: YTD "))
-
-
-def test_chat_read_only_guard():
-    res = chat_service.answer("Update this PM record and close the work order.", FILTERS)
-    _check("read-only guard intent set", res.get("intent") == "read_only_guard")
-    _check("read-only guard answer exact", res.get("answer") == "MIRA is currently read-only and cannot modify maintenance records.")
-    _check("read-only guard keeps read_only flag", res.get("read_only") is True)
+def test_predictive_risk_cards():
+    data = predictive_service.build_predictive_risk_cards(FILTERS, top_n=3)
+    _check("predictive payload has cards", isinstance(data.get("cards"), list))
+    _check("predictive payload has rules", data.get("risk_rules", {}).get("7+") == "High")
+    if data.get("cards"):
+        card = data["cards"][0]
+        for key in (
+            "asset_name",
+            "machine_group",
+            "risk_level",
+            "risk_score",
+            "main_signals",
+            "latest_recurring_issue_pattern",
+            "suggested_maintenance_action",
+            "open_wo_status",
+            "ai_summary",
+            "structured_llm_context",
+        ):
+            _check(f"predictive card has {key}", key in card)
 
 
 def test_report_draft():

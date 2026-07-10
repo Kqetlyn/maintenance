@@ -1,6 +1,34 @@
 document.addEventListener("DOMContentLoaded", () => {
     const urlParams = new URLSearchParams(window.location.search);
-    const initialView = (urlParams.get("view") || "mira_overview").toLowerCase();
+    const authRole = (document.body?.dataset?.userRole || window.DASHBOARD_AUTH?.role || "").toLowerCase();
+    const authPermissions = new Set(Array.isArray(window.DASHBOARD_AUTH?.permissions) ? window.DASHBOARD_AUTH.permissions : []);
+    const viewAliases = { pm_schedule: "overview" };
+    const fallbackPermissions = authRole === "public"
+        ? ["pm_schedule", "downtime"]
+        : ["mira_overview", "pm_schedule", "spare_parts", "downtime", "analysis", "utility"];
+    const effectivePermissions = authPermissions.size ? authPermissions : new Set(fallbackPermissions);
+    document.querySelectorAll("[data-permission]").forEach((node) => {
+        const required = String(node.dataset.permission || "").split(/\s+/).filter(Boolean);
+        const allowed = required.length && required.some((permission) => effectivePermissions.has(permission));
+        node.classList.toggle("permission-visible", allowed);
+        node.hidden = !allowed;
+    });
+    const rawAllowedViews = [];
+    if (effectivePermissions.has("mira_overview")) rawAllowedViews.push("mira_overview", "overview");
+    if (effectivePermissions.has("pm_schedule")) rawAllowedViews.push("pm_schedule");
+    if (effectivePermissions.has("spare_parts")) rawAllowedViews.push("spare_parts");
+    if (effectivePermissions.has("downtime")) rawAllowedViews.push("downtime");
+    if (effectivePermissions.has("analysis")) rawAllowedViews.push("analysis");
+    if (effectivePermissions.has("utility")) rawAllowedViews.push("utility", "equipment");
+    const allowedViews = rawAllowedViews.map((view) => viewAliases[view] || view);
+    const defaultRawView = rawAllowedViews.includes("mira_overview")
+        ? "mira_overview"
+        : rawAllowedViews.includes("pm_schedule")
+        ? "pm_schedule"
+        : rawAllowedViews[0] || "downtime";
+    const requestedRawView = (urlParams.get("view") || defaultRawView).toLowerCase();
+    const selectedRawView = rawAllowedViews.includes(requestedRawView) ? requestedRawView : defaultRawView;
+    const initialView = viewAliases[selectedRawView] || selectedRawView;
     const UTILITY_INSPECTION_OVERRIDES = {
         "UL-TN-01": [{ month: 1, week: "first" }],
         "UL-TN-02": [{ month: 1, week: "first" }],
@@ -95,7 +123,7 @@ document.addEventListener("DOMContentLoaded", () => {
         { value: "custom", label: "Custom Range" },
     ];
     const state = {
-        activeView: ["mira_overview", "overview", "spare_parts", "downtime"].includes(initialView) ? initialView : "mira_overview",
+        activeView: initialView,
         overviewMonth: "",
         overviewCategory: "all",
         overviewStatus: "all",
@@ -156,7 +184,7 @@ document.addEventListener("DOMContentLoaded", () => {
         downtimeData: null,
         downtimeImportStatus: null,
         downtimeFilters: {
-            period: "all_years",
+            period: "ytd",
             startDate: "",
             endDate: "",
             criticality: "all",
@@ -206,10 +234,6 @@ document.addEventListener("DOMContentLoaded", () => {
         "Normal": 3,
         "Above Recommended": 4,
     };
-
-    initialize().catch((error) => {
-        console.error("Maintenance initialization failed:", error);
-    });
 
     // Clear the backend response caches (so freshly dropped source files show up)
     // then hard-reload so every view re-fetches the latest data.
@@ -289,7 +313,7 @@ document.addEventListener("DOMContentLoaded", () => {
         setText(
             "maintenance-page-title",
             isMiraOverview
-                ? "Overview"
+                ? "Predictive Maintenance Insights"
                 : isOverview
                 ? "Preventive Maintenance Schedule"
                 : isSpareParts
@@ -301,7 +325,7 @@ document.addEventListener("DOMContentLoaded", () => {
         setText(
             "maintenance-page-subtitle",
             isMiraOverview
-                ? "AI-assisted daily summary for PM schedule, downtime, and spare parts."
+                ? "Controlled risk scoring and short AI summaries from verified WO/MR, MTBF, open-WO, criticality, and spare-part signals."
                 : isOverview
                 ? "Monthly PM planning, completion tracking, backlog, and compliance overview."
                 : isSpareParts
@@ -391,12 +415,18 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function bindControls() {
         document.querySelectorAll("[data-view-tab]").forEach((button) => {
+            const nextView = button.dataset.viewTab || "utility";
+            const nextRawView = nextView === "overview" ? "pm_schedule" : nextView;
+            if (!rawAllowedViews.includes(nextRawView)) {
+                button.hidden = true;
+                return;
+            }
             button.addEventListener("click", async () => {
-                const nextView = button.dataset.viewTab || "utility";
+                if (!allowedViews.includes(nextView)) return;
                 if (nextView === state.activeView) return;
                 state.activeView = nextView;
                 const nextUrl = new URL(window.location.href);
-                nextUrl.searchParams.set("view", nextView);
+                nextUrl.searchParams.set("view", nextRawView);
                 window.history.replaceState({}, "", nextUrl);
                 await loadActiveView();
             });
@@ -476,33 +506,6 @@ document.addEventListener("DOMContentLoaded", () => {
             state.ptFilters.search = event.target.value.trim().toLowerCase();
             renderPtDashboard(state.ptData || {});
         }, 200));
-        document.getElementById("spare-inventory-import-form")?.addEventListener("submit", (event) => {
-            handleMaintenanceImport(event, {
-                kind: "inventory",
-                inputId: "spare-inventory-import-file",
-                statusId: "spare-inventory-import-status",
-                url: "/api/maintenance/import/spare-inventory",
-                pendingMessage: "Importing inventory file...",
-            });
-        });
-        document.getElementById("spare-external-po-import-form")?.addEventListener("submit", (event) => {
-            handleMaintenanceImport(event, {
-                kind: "external_po",
-                inputId: "spare-external-po-import-file",
-                statusId: "spare-external-po-import-status",
-                url: "/api/maintenance/import/external-po",
-                pendingMessage: "Importing Gen PO file...",
-            });
-        });
-        document.getElementById("spare-project-transactions-import-form")?.addEventListener("submit", (event) => {
-            handleMaintenanceImport(event, {
-                kind: "project_transactions",
-                inputId: "spare-project-transactions-import-file",
-                statusId: "spare-project-transactions-import-status",
-                url: "/api/maintenance/import/project-transactions",
-                pendingMessage: "Importing project transactions file...",
-            });
-        });
         document.getElementById("spare-currency-global")?.addEventListener("change", (event) => {
             spareCurrency = event.target.value || "THB";
             state.ptCurrency = spareCurrency;
@@ -662,7 +665,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function bindDowntimeControls() {
         document.getElementById("downtime-period-filter")?.addEventListener("change", (event) => {
-            state.downtimeFilters.period = event.target.value || "all_years";
+            state.downtimeFilters.period = event.target.value || "ytd";
             syncDowntimeInputs();
         });
         document.getElementById("downtime-start-date")?.addEventListener("input", (event) => {
@@ -746,7 +749,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function buildDowntimeParams() {
         const params = new URLSearchParams();
-        params.set("period", state.downtimeFilters.period || "all_years");
+        params.set("period", state.downtimeFilters.period || "ytd");
         params.set("work_orders_only", "1");
         if (state.downtimeFilters.period === "custom") {
             if (state.downtimeFilters.startDate) params.set("start", state.downtimeFilters.startDate);
@@ -770,7 +773,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function readDowntimeFilterInputs() {
         const getValue = (id, fallback = "all") => document.getElementById(id)?.value || fallback;
-        state.downtimeFilters.period = getValue("downtime-period-filter", "all_years");
+        state.downtimeFilters.period = getValue("downtime-period-filter", "ytd");
         state.downtimeFilters.startDate = getValue("downtime-start-date", "");
         state.downtimeFilters.endDate = getValue("downtime-end-date", "");
         state.downtimeFilters.criticality = getValue("downtime-criticality-filter", "all");
@@ -812,7 +815,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const validValues = Array.from(node.options || []).map((option) => option.value);
             node.value = validValues.includes(String(value)) ? String(value) : fallback;
         };
-        setValue("downtime-period-filter", state.downtimeFilters.period, "all_years");
+        setValue("downtime-period-filter", state.downtimeFilters.period, "ytd");
         setValue("downtime-criticality-filter", state.downtimeFilters.criticality, "all");
         setValue("downtime-machine-group-filter", state.downtimeFilters.machineGroup, "all");
         setValue("downtime-location-filter", state.downtimeFilters.location, "all");
@@ -2911,17 +2914,23 @@ document.addEventListener("DOMContentLoaded", () => {
         lazyTargets.forEach((target) => spareLazyObserver.observe(target.node));
     }
 
+    function renderSparePartsDashboardProgressive(payload) {
+        window.requestAnimationFrame(() => {
+            populateSparePartsFilters(payload);
+            populateAssetPartsIntelFilters();
+            renderAssetPartsIntelligence(state.assetPartsIntelligence);
+            renderSparePartsDashboard(payload);
+            renderSparePartsLazyPlaceholders();
+            queueDeferredSparePartsLoads(false);
+        });
+    }
+
     async function loadSparePartsView(options = {}) {
         const forceReload = Boolean(options.forceReload);
         mountExternalPurchasesInSparePanel();
 
         if (!forceReload && state.sparePartsData) {
-            populateSparePartsFilters(state.sparePartsData);
-            populateAssetPartsIntelFilters();
-            renderAssetPartsIntelligence(state.assetPartsIntelligence);
-            renderSparePartsDashboard(state.sparePartsData);
-            renderSparePartsLazyPlaceholders();
-            queueDeferredSparePartsLoads(false);
+            renderSparePartsDashboardProgressive(state.sparePartsData);
             return;
         }
 
@@ -2933,12 +2942,14 @@ document.addEventListener("DOMContentLoaded", () => {
             payload = createEmptySparePartsPayload("Spare parts data could not be loaded.");
         }
         state.sparePartsData = payload;
-        populateSparePartsFilters(payload);
-        populateAssetPartsIntelFilters();
-        renderAssetPartsIntelligence(state.assetPartsIntelligence);
-        renderSparePartsDashboard(payload);
-        renderSparePartsLazyPlaceholders();
-        queueDeferredSparePartsLoads(forceReload);
+        window.requestAnimationFrame(() => {
+            populateSparePartsFilters(payload);
+            populateAssetPartsIntelFilters();
+            renderAssetPartsIntelligence(state.assetPartsIntelligence);
+            renderSparePartsDashboard(payload);
+            renderSparePartsLazyPlaceholders();
+            queueDeferredSparePartsLoads(forceReload);
+        });
     }
 
     function createEmptySparePartsPayload(message) {
@@ -3236,44 +3247,6 @@ document.addEventListener("DOMContentLoaded", () => {
                 : (source.message || "File not loaded");
             setSpareImportStatus(statusId, message, source.available ? "ok" : "error");
         });
-    }
-
-    async function handleMaintenanceImport(event, config) {
-        event.preventDefault();
-        const input = document.getElementById(config.inputId);
-        const file = input?.files?.[0];
-        if (!file) {
-            setSpareImportStatus(config.statusId, "Choose a CSV, XLSX, or XLS file first.", "error");
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append("file", file);
-        setSpareImportStatus(config.statusId, config.pendingMessage || "Uploading file...", "");
-
-        try {
-            const response = await fetch(config.url, { method: "POST", body: formData });
-            const result = await response.json().catch(() => ({}));
-            if (!response.ok || result.ok === false) {
-                throw new Error(result.message || `HTTP ${response.status}`);
-            }
-            if (input) input.value = "";
-            const validationText = formatSpareImportValidation(result.validation_summary || {});
-            setSpareImportStatus(
-                config.statusId,
-                `${result.message || "Import complete."}${validationText ? ` ${validationText}` : ""}`,
-                "ok"
-            );
-            state.sparePartsData = null;
-            state.ptData = null;
-            state.assetPartsIntelligence = null;
-            ayData = null;
-            _epoData = null;
-            await loadSparePartsView({ forceReload: true });
-        } catch (error) {
-            console.error(`${config.kind} import failed:`, error);
-            setSpareImportStatus(config.statusId, `Import failed: ${error.message}`, "error");
-        }
     }
 
     function populateSparePartsFilters(payload) {
@@ -4378,6 +4351,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     let spareManualReviewRowsCache = [];
     let spareManualReviewSearchTerm = "";
+    const SPARE_TABLE_RENDER_LIMIT = 250;
 
     function spareManualReviewRowMatches(row, term) {
         if (!term) return true;
@@ -4425,7 +4399,11 @@ document.addEventListener("DOMContentLoaded", () => {
             body.innerHTML = `<tr><td colspan="${colspan}" class="empty-row">${escapeHtml(emptyMessage || "No data available.")}</td></tr>`;
             return;
         }
-        body.innerHTML = rows.map((row) => (
+        const displayRows = rows.slice(0, SPARE_TABLE_RENDER_LIMIT);
+        const limitedMessage = rows.length > displayRows.length
+            ? `<tr><td colspan="${colspan}" class="empty-row">Showing first ${formatInteger(displayRows.length)} of ${formatInteger(rows.length)} rows. Use filters/search or export for the full set.</td></tr>`
+            : "";
+        body.innerHTML = limitedMessage + displayRows.map((row) => (
             `<tr${renderSpareTableRowAttrs(rowOptionsMapper ? rowOptionsMapper(row) : null)}>${cellMapper(row).map((cell) => `<td>${renderSpareTableCell(cell)}</td>`).join("")}</tr>`
         )).join("");
     }
@@ -7756,4 +7734,13 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     // ── End SPT ──────────────────────────────────────────────────────────────
+
+    // Bootstrap. Must run last in this closure — initialize() synchronously calls
+    // bindPtInsightTabs() and other binders that close over `let`/`const` state
+    // declared further down this file (e.g. ptInsightActiveTab); calling it before
+    // that state is declared throws "Cannot access before initialization" and aborts
+    // the whole page's setup.
+    initialize().catch((error) => {
+        console.error("Maintenance initialization failed:", error);
+    });
 });

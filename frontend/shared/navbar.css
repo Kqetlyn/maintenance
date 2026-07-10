@@ -372,3 +372,31 @@ html, body {
 .btn-export span {
   font-size: 1rem;
 }
+
+.nav-spacer {
+  flex: 1 1 auto;
+}
+
+.nav-user {
+  color: #e2e8f0;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 0 14px;
+  white-space: nowrap;
+}
+
+.nav-user span {
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-left: 6px;
+}
+
+.nav-logout-form {
+  margin: 0;
+}
+
+.nav-logout-btn {
+  border-left: 1px solid rgba(148, 163, 184, 0.22);
+}

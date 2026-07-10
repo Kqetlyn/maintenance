@@ -42,7 +42,7 @@ OLLAMA_HOST = (
     or "http://127.0.0.1:11434"
 ).strip().rstrip("/")
 OLLAMA_BASE_URL = OLLAMA_HOST  # alias matching the spec
-OLLAMA_MODEL = (os.environ.get("OLLAMA_MODEL") or os.environ.get("MIRA_OLLAMA_MODEL") or "qwen2.5:7b").strip()
+OLLAMA_MODEL = (os.environ.get("OLLAMA_MODEL") or os.environ.get("MIRA_OLLAMA_MODEL") or "qwen3:8b").strip()
 OLLAMA_TIMEOUT_SECONDS = int(os.environ.get("MIRA_OLLAMA_TIMEOUT", "120"))
 
 # MIRA system prompt — grounding rules for the LLM wording layer.

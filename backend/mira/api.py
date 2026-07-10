@@ -26,15 +26,13 @@ from flask import Blueprint, current_app, jsonify, request
 
 from . import config
 from .core import context as ctx
-from .modules.maintenance import assistant_service
-from .modules.maintenance import chat_service
-from .modules.maintenance import risk_service
 from .privacy import privacy_guard_service as guard
 from .providers import get_provider, get_provider_status, generate_structured_summary
 from .reports import report_draft_service
 from .services import kpi_query_service as kpi
 from .services import presentation_service as presentation
 from .services import asset_report_service as asset_report
+from .services import predictive_service
 
 mira_bp = Blueprint("mira", __name__, url_prefix="/api/mira")
 
@@ -76,7 +74,7 @@ def _coalesce(*values):
 
 
 def _copy_filter_aliases(source: dict | None, target: dict) -> None:
-    """Accept both dashboard snake_case filters and chatbot camelCase fields."""
+    """Accept dashboard snake_case filters and legacy camelCase filter fields."""
     if not isinstance(source, dict):
         return
 
@@ -614,7 +612,12 @@ def _get_dashboard_summary(
         warning = "Full verified KPI summary is warming in the background; fast overview fallback is active."
         if start_warmup:
             _start_summary_warmup(key, f, include_spare_parts=include_spare_parts)
-        return _fallback_dashboard_summary(f, warning), [warning], False
+        data, partial_warnings = _build_partial_dashboard_summary(
+            f, include_spare_parts=include_spare_parts
+        )
+        warnings = _unique_strings([warning] + partial_warnings)
+        _apply_data_availability(data, warnings)
+        return data, warnings, False
 
     try:
         data = _build_dashboard_summary_with_timeout(f, include_spare_parts=include_spare_parts)
@@ -673,23 +676,6 @@ def _health_routes() -> list[str]:
         )
     except Exception:
         return []
-
-
-def _normalise_chat_mode(value) -> str | None:
-    text = str(value or "").strip().lower().replace("-", "_")
-    if text in {"kpi", "kpi_analysis", "kpi analysis"}:
-        return "kpi_analysis"
-    if text in {"chat", "qa", "q_a"}:
-        return "chat"
-    return text or None
-
-
-def _read_selected_kpi_items(body: dict, *names: str) -> list[str]:
-    for name in names:
-        value = body.get(name)
-        if isinstance(value, list):
-            return [str(item).strip() for item in value if str(item).strip()]
-    return []
 
 
 def _read_description_tag_rows(limit: int = 600) -> list[dict]:
@@ -971,7 +957,7 @@ def build_mtbf_context(filters: dict, rows: list[dict] | None = None, selected_r
 def build_issue_theme_context(filters: dict, recent_context: dict | None, mttr_context: dict | None = None, mtbf_context: dict | None = None) -> dict:
     rolling_rows = list((recent_context or {}).get("_rolling_rows") or [])
     latest_rows = {(id(row)) for row in ((recent_context or {}).get("_latest_rows") or [])}
-    unknown_theme = getattr(chat_service, "_UNKNOWN_THEME", "Unknown / Insufficient Information")
+    unknown_theme = "Unclassified"
     if not rolling_rows:
         return {
             "top_issues": [],
@@ -992,7 +978,7 @@ def build_issue_theme_context(filters: dict, recent_context: dict | None, mttr_c
         desc = _row_description_text(row)
         if not desc:
             continue
-        theme = chat_service.classify_theme(desc)
+        theme = predictive_service.classify_specific_issue(desc)
         if theme == unknown_theme:
             unknown_count += 1
             continue
@@ -1010,7 +996,7 @@ def build_issue_theme_context(filters: dict, recent_context: dict | None, mttr_c
         bucket["openCount"] += 1 if _row_is_open(row) else 0
         bucket["latestDayCount"] += 1 if id(row) in latest_rows else 0
         bucket["missingWorkOrderCount"] += 1 if not _row_work_order_id(row) else 0
-        bucket["criticalCount"] += 1 if getattr(chat_service, "_is_existing_critical_asset", lambda _row: False)(row) else 0
+        bucket["criticalCount"] += 1 if predictive_service._row_is_critical(row) else 0
         asset_name = _row_asset_name(row)
         location_name = _row_functional_location(row)
         if asset_name:
@@ -1730,14 +1716,26 @@ def overview():
     """
     raw = _read_filters()
     filters = ctx.normalize_filters(raw)
-    data, load_warnings, cache_hit = _get_dashboard_summary(
-        filters,
-        include_spare_parts=True,
-        allow_blocking_build=True,
-        start_warmup=False,
-    )
+    full_cache_key = _normalised_cache_key(filters, True)
+    cached = _SUMMARY_CACHE.get(full_cache_key)
+    cache_hit = False
+    now = time.time()
+    if cached and now - cached.get("created_at", 0) <= MIRA_SUMMARY_CACHE_TTL_SECONDS:
+        data = cached["data"]
+        load_warnings = list(cached.get("warnings") or [])
+        cache_hit = True
+        spare_warming = False
+    else:
+        include_spare_parts = _spare_warm()
+        data, load_warnings, cache_hit = _get_dashboard_summary(
+            filters,
+            include_spare_parts=include_spare_parts,
+            allow_blocking_build=False,
+            start_warmup=False,
+        )
+        _start_summary_warmup(full_cache_key, filters, include_spare_parts=True)
+        spare_warming = not include_spare_parts
     warming = False
-    spare_warming = False
     status = _fast_provider_status("Verified KPI cards loaded. AI wording loads separately.")
     pres = presentation.build_presentation(
         "monthly_summary", data, filters, provider_name="mira",
@@ -1796,14 +1794,14 @@ def overview():
 
 @mira_bp.route("/risk", methods=["GET", "POST"])
 def risk():
-    """Backend-calculated maintenance risk insights (read-only; not a prediction)."""
+    """Controlled predictive maintenance cards. No free-text question handling."""
     raw = _read_filters()
     if request.is_json:
         body = request.get_json(silent=True) or {}
         if isinstance(body.get("filters"), dict):
             raw = {**raw, **{k: v for k, v in body["filters"].items() if k in ctx.FILTER_KEYS}}
-    result = risk_service.get_asset_risk_insights(ctx.normalize_filters(raw))
-    return jsonify(guard._deep_redact(result))
+    result = predictive_service.build_predictive_risk_cards(ctx.normalize_filters(raw))
+    return jsonify({"ok": True, "filters": ctx.normalize_filters(raw), "data": guard._deep_redact(result)})
 
 
 @mira_bp.route("/ai-summary", methods=["GET", "POST"])
@@ -1928,43 +1926,6 @@ def summary():
     response_type = _read_summary_type()
     data = kpi.get_dashboard_kpi_summary(filters, include_spare_parts=True)
     return _summary_response("monthly_summary", data, filters=filters, response_type=response_type)
-
-
-@mira_bp.route("/query", methods=["POST"])
-def query():
-    """Free-text question -> intent routing -> KPI summary (or limited rows)."""
-    body = request.get_json(silent=True) or {}
-    question = body.get("question") or body.get("q") or ""
-    limit = body.get("limit")
-    result = assistant_service.ask(question, _read_filters(), limit=limit)
-    return jsonify(result)
-
-
-@mira_bp.route("/chat", methods=["POST"])
-def chat():
-    """Intelligent read-only Q&A: intent + period extraction -> verified data -> wording.
-
-    The question period (e.g. "April 2026") overrides the dashboard filter, so the
-    answer never falls back to a generic YTD summary when a month was asked for.
-    """
-    body = request.get_json(silent=True) or {}
-    question = _coalesce(body.get("question"), body.get("userQuestion"), body.get("q"), "")
-    selected_kpis = _read_selected_kpi_items(body, "selected_kpis", "selectedKpis", "selectedKpiIds")
-    selected_kpi_labels = _read_selected_kpi_items(body, "selected_kpi_labels", "selectedKpiLabels")
-    mode = _normalise_chat_mode(body.get("mode"))
-    base_filters = _read_filters()
-    if isinstance(body.get("filters"), dict):
-        body_filters = {}
-        _copy_filter_aliases(body["filters"], body_filters)
-        base_filters = {**base_filters, **body_filters}
-    result = chat_service.answer(
-        question,
-        base_filters,
-        mode=mode,
-        selected_kpis=selected_kpis,
-        selected_kpi_labels=selected_kpi_labels,
-    )
-    return jsonify(guard._deep_redact(result))
 
 
 @mira_bp.route("/asset-report", methods=["POST"])
@@ -2291,15 +2252,140 @@ def predictive_insights():
     Reads from already-memoised dashboard builders. Deterministic ranking;
     Ollama is classification-only (fault family tagging) with keyword fallback.
     """
-    from .services import predictive_service as ps
     raw = _read_filters()
     filters = ctx.normalize_filters(raw)
     try:
-        data = ps.build_predictive_insights(filters)
+        data = predictive_service.build_predictive_risk_cards(filters)
         return jsonify({"ok": True, "filters": filters, "data": data,
                         "draft_label": config.DRAFT_LABEL})
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc), "filters": filters}), 500
+
+
+@mira_bp.route("/predictive/assets/<path:asset_id>/details", methods=["GET"])
+def predictive_asset_details(asset_id):
+    """"View Details" drill-down for one asset — same filters/scoring as
+    /predictive, just scoped and expanded for a single card. Never recomputes
+    the risk score; only reads and aggregates around the existing cards."""
+    raw = _read_filters()
+    filters = ctx.normalize_filters(raw)
+    try:
+        detail = predictive_service.build_asset_predictive_detail(asset_id, filters)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc), "filters": filters}), 500
+    if not detail:
+        return jsonify({"ok": False, "error": f"No risk card found for asset '{asset_id}' in the current filter scope.",
+                        "filters": filters}), 404
+    return jsonify({"ok": True, "filters": filters, "data": detail, "draft_label": config.DRAFT_LABEL})
+
+
+_ASSET_AI_INSIGHT_CACHE: dict[str, dict] = {}
+
+
+def _asset_ai_insight_fallback(detail: dict) -> str:
+    """Deterministic template — used immediately, and whenever Ollama is
+    unavailable/times out/returns something unusable. Built only from fields
+    already in `detail` (never invents a cause or a component)."""
+    asset = detail.get("asset") or {}
+    risk = detail.get("risk") or {}
+    ms = detail.get("maintenance_status") or {}
+    top_signals = [s["label"] for s in (risk.get("contributors") or [])[:2]]
+    concern = top_signals[0] if top_signals else "no single dominant signal"
+    lines = [
+        f"Risk interpretation: {asset.get('name', 'This asset')} is rated {risk.get('level', 'Low')} "
+        f"({risk.get('score', 0)}/10) based on {len(risk.get('contributors') or [])} triggered signal(s).",
+        f"Main concern: {concern}." if top_signals else "Main concern: no dominant single factor; risk is spread across several smaller signals.",
+        "Recommended immediate review: " + (
+            "verify the aged open work order(s) and confirm current condition onsite."
+            if ms.get("open_wo_count") else
+            "confirm the latest completed repair addressed the recurring pattern before the next scheduled run."
+        ),
+    ]
+    return " ".join(lines)
+
+
+@mira_bp.route("/predictive/assets/<path:asset_id>/ai-insight", methods=["GET"])
+def predictive_asset_ai_insight(asset_id):
+    """On-demand AI Insight for the "View Details" drawer's Overview tab —
+    separate from the main /details call so a slow/unavailable LLM never blocks
+    the rest of the drawer. Same fallback-first pattern as /predictive-wording:
+    the LLM may only restate the structured fields already computed server-side,
+    never calculate a score, invent a cause, or invent maintenance history."""
+    raw = _read_filters()
+    filters = ctx.normalize_filters(raw)
+    try:
+        detail = predictive_service.build_asset_predictive_detail(asset_id, filters)
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 500
+    if not detail:
+        return jsonify({"ok": False, "error": f"No risk card found for asset '{asset_id}'."}), 404
+
+    cache_key = json.dumps(
+        {"asset_id": asset_id, "filters": {k: str(v) for k, v in filters.items()},
+         "score": detail["risk"]["score"], "signals": [s["label"] for s in detail["risk"]["contributors"]]},
+        sort_keys=True,
+    )
+    if cache_key in _ASSET_AI_INSIGHT_CACHE:
+        return jsonify(_ASSET_AI_INSIGHT_CACHE[cache_key])
+
+    fallback_text = _asset_ai_insight_fallback(detail)
+    response = {"ok": True, "provider": "rule_based", "fallback": True, "ai_insight": fallback_text}
+
+    if config.PROVIDER_MODE not in ("auto", "ollama"):
+        _ASSET_AI_INSIGHT_CACHE[cache_key] = response
+        return jsonify(response)
+
+    try:
+        from .providers import OllamaMiraProvider, generate_with_ollama
+        provider = OllamaMiraProvider()
+        model = provider.resolve_model()
+        if not model:
+            _ASSET_AI_INSIGHT_CACHE[cache_key] = response
+            return jsonify(response)
+
+        risk = detail["risk"]
+        ms = detail["maintenance_status"]
+        pattern = detail.get("patterns") or {}
+        allowed = {
+            "asset_name": detail["asset"]["name"],
+            "machine_group": detail["asset"]["group"],
+            "risk_level": risk["level"],
+            "risk_score": risk["score"],
+            "risk_contributors": [{"label": s["label"], "points": s["points"]} for s in risk["contributors"]],
+            "recurring_issue": pattern.get("issue"),
+            "recurring_issue_count": pattern.get("count"),
+            "open_wo_count": ms.get("open_wo_count"),
+            "oldest_open_wo_days": ms.get("oldest_open_wo_days"),
+            "mttr_hours": ms.get("mttr_hours"),
+            "mtbf_days": ms.get("mtbf_days"),
+            "mtbf_changed_vs_previous_period": ms.get("mtbf_changed_vs_previous_period"),
+        }
+        system_prompt = (
+            "You are writing a short maintenance risk summary for an engineer. Only explain the structured data "
+            "provided below. Do not calculate or adjust the risk score. Do not invent a root cause, a failed "
+            "component, a spare part, or any maintenance history not present in the data. Maximum 80 words. "
+            "Return valid JSON only."
+        )
+        user_prompt = (
+            "STRUCTURED_DATA_JSON:\n" + json.dumps(allowed, ensure_ascii=False, default=str, indent=2)
+            + "\n\nReturn exactly this JSON schema:\n"
+            + json.dumps({"ai_insight": "Risk interpretation: ... Main concern: ... Recommended immediate review: ... (max 80 words total)"})
+        )
+        raw_out = generate_with_ollama(system_prompt, user_prompt, model=model, timeout=8, format_json=True)
+        parsed = json.loads(raw_out)
+        text = str((parsed or {}).get("ai_insight") or "").strip()
+        words = text.split()
+        if len(words) > 90:  # small margin over the 80-word instruction before we distrust it
+            text = ""
+        response = {
+            "ok": True, "provider": "ollama", "model": model, "fallback": False,
+            "ai_insight": text or fallback_text,
+        }
+    except Exception as exc:
+        current_app.logger.debug("predictive asset-insight: Ollama fallback (%s)", exc)
+
+    _ASSET_AI_INSIGHT_CACHE[cache_key] = response
+    return jsonify(response)
 
 
 def _predictive_wording_fallback(structured: dict) -> dict:
@@ -2307,45 +2393,79 @@ def _predictive_wording_fallback(structured: dict) -> dict:
     issue = str(structured.get("selectedIssue") or "the selected issue").strip()
     mr_count = structured.get("mrCount")
     total = structured.get("totalMachineMr")
-    pct = str(structured.get("percentage") or "").strip()
     latest = str(structured.get("latestOccurrence") or "").strip()
+    next_window = str(structured.get("nextLikelyWindow") or "").strip()
     keywords = structured.get("relatedKeywords") if isinstance(structured.get("relatedKeywords"), list) else []
     cause = str(structured.get("likelyCause") or "").strip()
     stock = str(structured.get("stockDecision") or "").strip()
 
-    bits = [f"{machine} has repeated {issue} records"]
+    issue_lower = issue.lower().rstrip(".")
+    summary = f"{machine} is showing a recurring {issue_lower}."
     if mr_count not in (None, "") and total not in (None, ""):
-        bits.append(f"seen in {mr_count} of {total} MR records")
-    elif mr_count not in (None, ""):
-        bits.append(f"seen in {mr_count} MR records")
-    if pct:
-        bits.append(f"({pct})")
-    if latest:
-        bits.append(f"latest case {latest}")
+        summary += f" This issue appeared in {mr_count} of {total} MR records"
+        if latest:
+            summary += f", with the latest occurrence on {latest}"
+        summary += "."
+    elif latest:
+        summary += f" The latest occurrence was on {latest}."
+    if next_window and not any(x in next_window.lower() for x in ("not enough", "insufficient", "monitor")):
+        summary += f" Based on the recorded intervals, the next likely occurrence is {next_window.lower()}."
     if keywords:
-        bits.append("keywords: " + ", ".join(str(k) for k in keywords[:5]))
+        kws = [str(k) for k in keywords[:3]]
+        kw_str = (", ".join(kws[:-1]) + ", and " + kws[-1]) if len(kws) > 1 else kws[0]
+        kw_lower = " ".join(str(k).lower() for k in keywords)
+        damage_types: list[str] = ["wear"]
+        if any(t in kw_lower for t in ("leak", "water", "fluid", "oil", "wet", "drip")):
+            damage_types.append("leakage")
+        if any(t in kw_lower for t in ("block", "clog", "jam", "stuck")):
+            damage_types.append("blockage")
+        if any(t in kw_lower for t in ("rust", "corrode", "oxidiz")):
+            damage_types.append("corrosion")
+        damage_types.append("damage")
+        dt = damage_types[:3]
+        damage_str = (", ".join(dt[:-1]) + ", or " + dt[-1]) if len(dt) > 1 else dt[0]
+        summary += f" Repeated keywords include {kw_str}, suggesting possible {damage_str} in related components."
 
-    parts = structured.get("sparePartsToPrepare") if isinstance(structured.get("sparePartsToPrepare"), list) else []
-    part_text = ", ".join(str(p) for p in parts[:5])
-    action = cause or f"Inspect the machine area related to {issue}."
-    if part_text:
-        action += f" Prepare: {part_text}."
-    if stock:
-        action += f" {stock}"
+    inspect_line = (f"Inspect {cause}." if cause else
+                    f"Inspect the area related to {issue_lower} for leakage, looseness, or wear.")
+    action = "\n\n".join([
+        inspect_line,
+        "Prepare the related spare parts listed below before the next repair.",
+        (stock or "Check store quantity first. If stock is unavailable or below minimum, raise a purchase request using Gen PO vendor/price history as reference."),
+    ])
 
     return {
-        "faultPatternSummary": ". ".join(bit for bit in bits if bit).strip() + ".",
-        "suggestedAction": action.strip(),
-        "technicianNote": "Technician/Engineer verification required before action.",
+        "faultPatternSummary": summary,
+        "recommendedAction": action,
+        "technicianNote": "Please verify the actual condition onsite before repair. Gen PO history should only be used to support vendor or purchase review, not as final confirmation of store availability.",
+        "translatedSpareParts": [],
     }
 
 
 def _clean_predictive_wording(parsed: dict, fallback: dict) -> dict:
     cleaned = {}
-    for key in ("faultPatternSummary", "suggestedAction", "technicianNote"):
+    for key in ("faultPatternSummary", "technicianNote"):
         value = parsed.get(key) if isinstance(parsed, dict) else None
         value = str(value or "").strip()
-        cleaned[key] = value[:600] if value else fallback[key]
+        cleaned[key] = value[:800] if value else fallback.get(key, "")
+    ra = (parsed.get("recommendedAction") or parsed.get("suggestedAction") or "") if isinstance(parsed, dict) else ""
+    cleaned["recommendedAction"] = str(ra).strip()[:1200] or fallback.get("recommendedAction", "")
+    translated = []
+    raw_parts = (parsed.get("translatedSpareParts") or []) if isinstance(parsed, dict) else []
+    if isinstance(raw_parts, list):
+        for p in raw_parts[:10]:
+            if not isinstance(p, dict):
+                continue
+            orig = str(p.get("originalName") or "").strip()
+            eng = str(p.get("englishName") or "").strip()
+            conf = str(p.get("translationConfidence") or "low").strip().lower()
+            if orig:
+                translated.append({
+                    "originalName": orig,
+                    "englishName": eng or "Translation to verify",
+                    "translationConfidence": conf if conf in ("high", "medium", "low") else "low",
+                })
+    cleaned["translatedSpareParts"] = translated or fallback.get("translatedSpareParts", [])
     return cleaned
 
 
@@ -2378,39 +2498,46 @@ def predictive_wording():
             _PREDICTIVE_WORDING_CACHE[cache_key] = response
             return jsonify(response)
 
+        raw_parts_for_trans = structured.get("rawSparePartsForTranslation") or []
+        if not isinstance(raw_parts_for_trans, list):
+            raw_parts_for_trans = []
         allowed = {
             "machine": structured.get("machine"),
             "selectedIssue": structured.get("selectedIssue"),
             "mrCount": structured.get("mrCount"),
             "totalMachineMr": structured.get("totalMachineMr"),
-            "percentage": structured.get("percentage"),
             "latestOccurrence": structured.get("latestOccurrence"),
+            "nextLikelyWindow": structured.get("nextLikelyWindow"),
             "medianInterval": structured.get("medianInterval"),
             "relatedKeywords": (structured.get("relatedKeywords") or [])[:8] if isinstance(structured.get("relatedKeywords"), list) else [],
             "likelyCause": structured.get("likelyCause"),
-            "sparePartsToPrepare": (structured.get("sparePartsToPrepare") or [])[:5] if isinstance(structured.get("sparePartsToPrepare"), list) else [],
             "stockDecision": structured.get("stockDecision"),
+            "rawSparePartsForTranslation": raw_parts_for_trans[:5],
         }
         system_prompt = (
-            "You are rewriting a maintenance dashboard recommendation. Do not invent new facts, "
-            "parts, costs, dates, or stock status. Only rewrite the structured data provided into "
-            "clear maintenance wording. Keep the response short and return valid JSON only."
+            "You are rewriting maintenance dashboard text. Do not invent facts, item numbers, costs, vendors, "
+            "stock status, or purchase decisions. Only rewrite the structured data provided. "
+            "If translating Thai spare-part names, provide a short practical English translation and keep the "
+            "original name. Return valid JSON only."
         )
         user_prompt = (
             "STRUCTURED_DATA_JSON:\n"
             + json.dumps(allowed, ensure_ascii=False, default=str, indent=2)
-            + "\n\nReturn exactly this JSON schema with short strings only:\n"
+            + "\n\nReturn exactly this JSON schema:\n"
             + json.dumps({
-                "faultPatternSummary": "",
-                "suggestedAction": "",
-                "technicianNote": "",
+                "faultPatternSummary": "short professional summary: machine name + issue + MR count/total + latest date + keywords",
+                "recommendedAction": "3 paragraphs separated by \\n\\n: (1) inspection action, (2) prepare spare parts, (3) stock/purchase action",
+                "technicianNote": "Technician/Engineer verification required before action.",
+                "translatedSpareParts": [
+                    {"originalName": "original", "englishName": "English translation", "translationConfidence": "high/medium/low"}
+                ],
             }, ensure_ascii=False)
         )
         raw = generate_with_ollama(
             system_prompt,
             user_prompt,
             model=model,
-            timeout=6,
+            timeout=8,
             format_json=True,
         )
         parsed = json.loads(raw)

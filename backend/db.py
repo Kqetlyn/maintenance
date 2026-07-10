@@ -51,11 +51,13 @@ def get_connection():
 
     Commits on clean exit, rolls back on exception, always closes.
     """
-    conn = sqlite3.connect(str(DB_PATH), timeout=10)
+    conn = sqlite3.connect(str(DB_PATH), timeout=30)
     conn.row_factory = sqlite3.Row
     # WAL mode: readers don't block writers and writers don't block readers.
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # Limit WAL file growth so auto-checkpoint doesn't stall concurrent reads.
+    conn.execute("PRAGMA wal_autocheckpoint=500")
     try:
         yield conn
         conn.commit()
@@ -119,6 +121,10 @@ CREATE TABLE IF NOT EXISTS work_orders (
     review_reason        TEXT,
     started_by           TEXT,
     created_by           TEXT,
+    worker_group         TEXT,
+    normalized_status    TEXT,
+    ttr_hours            REAL,
+    source_type          TEXT,
     updated_at           TEXT,
     UNIQUE(mr_number, wo_number)
 );
@@ -149,6 +155,58 @@ CREATE TABLE IF NOT EXISTS import_log (
 CREATE INDEX IF NOT EXISTS idx_import_source_type ON import_log (source_type);
 CREATE INDEX IF NOT EXISTS idx_import_imported_at ON import_log (imported_at);
 CREATE INDEX IF NOT EXISTS idx_import_source_file ON import_log (source_file);
+
+-- import_batches: tracks every import session with batch-activation state.
+-- Each POWERBI_FULL_MR_WO_EXPORT import creates a new batch; previous batches
+-- are deactivated (not deleted) so data history is preserved.
+CREATE TABLE IF NOT EXISTS import_batches (
+    batch_id    TEXT PRIMARY KEY,
+    source_type TEXT NOT NULL,
+    source_file TEXT,
+    imported_at TEXT NOT NULL,
+    is_active   INTEGER DEFAULT 1,
+    total_rows  INTEGER DEFAULT 0,
+    valid_rows  INTEGER DEFAULT 0,
+    review_rows INTEGER DEFAULT 0,
+    notes       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ib_type_active ON import_batches (source_type, is_active);
+CREATE INDEX IF NOT EXISTS idx_ib_imported_at ON import_batches (imported_at);
+
+-- raw_powerbi_mr_wo_export: stores Power BI Full MR/WO export rows per batch.
+-- Kept separate from work_orders so PBI and legacy Excel imports never mix
+-- in the active dashboard view.
+CREATE TABLE IF NOT EXISTS raw_powerbi_mr_wo_export (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    import_batch_id  TEXT NOT NULL REFERENCES import_batches(batch_id),
+    source_file      TEXT,
+    imported_at      TEXT,
+    request_id       TEXT,
+    work_order_id    TEXT,
+    asset_id         TEXT,
+    asset_name       TEXT,
+    request_state    TEXT,
+    requester        TEXT,
+    description      TEXT,
+    location         TEXT,
+    job_trade        TEXT,
+    job_type_id      TEXT,
+    request_type_id  TEXT,
+    responsible      TEXT,
+    worker_group     TEXT,
+    priority         TEXT,
+    actual_start     TEXT,
+    actual_end       TEXT,
+    normalized_status TEXT,
+    ttr_hours        REAL,
+    data_quality_flag TEXT,
+    review_reason    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_pbi_batch      ON raw_powerbi_mr_wo_export (import_batch_id);
+CREATE INDEX IF NOT EXISTS idx_pbi_asset_id   ON raw_powerbi_mr_wo_export (asset_id);
+CREATE INDEX IF NOT EXISTS idx_pbi_req_state  ON raw_powerbi_mr_wo_export (request_state);
+CREATE INDEX IF NOT EXISTS idx_pbi_start      ON raw_powerbi_mr_wo_export (actual_start);
+CREATE INDEX IF NOT EXISTS idx_pbi_dq         ON raw_powerbi_mr_wo_export (data_quality_flag);
 
 -- Phase 4: PM Schedule tasks from all sources (utility_stage1, equipment_stage1,
 -- feed_production, feed_utility). Stores the stable, non-date-relative fields from
@@ -235,7 +293,61 @@ CREATE INDEX IF NOT EXISTS idx_sp_category         ON spare_parts (category);
 CREATE INDEX IF NOT EXISTS idx_sp_source_file      ON spare_parts (source_file);
 CREATE INDEX IF NOT EXISTS idx_sp_type_date        ON spare_parts (transaction_type, transaction_date);
 CREATE INDEX IF NOT EXISTS idx_sp_stage_type_date  ON spare_parts (stage, transaction_type, transaction_date);
+
+-- Phase 8: PO Spare 24-26.csv — controlled spare parts PO import (base table for PO analysis).
+CREATE TABLE IF NOT EXISTS spare_po_lines (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    po_number               TEXT,
+    item_code               TEXT,
+    item_description        TEXT,
+    ordered_qty             REAL,
+    uom                     TEXT,
+    unit_price              REAL,
+    currency                TEXT    DEFAULT 'THB',
+    po_value_thb            REAL,
+    requested_delivery_date TEXT,
+    source_file             TEXT,
+    updated_at              TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_spl_po_number  ON spare_po_lines (po_number);
+CREATE INDEX IF NOT EXISTS idx_spl_item_code  ON spare_po_lines (item_code);
+CREATE INDEX IF NOT EXISTS idx_spl_date       ON spare_po_lines (requested_delivery_date);
+
+-- Phase 8: On-hand list.xlsx — inventory item mapping and stock snapshot (not a PO source).
+CREATE TABLE IF NOT EXISTS inventory_item_mapping (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_number         TEXT    NOT NULL UNIQUE,
+    product_name        TEXT,
+    inventory_unit      TEXT,
+    item_group          TEXT,
+    available_physical  REAL,
+    physical_inventory  REAL,
+    total_available     REAL,
+    on_order            REAL,
+    ordered_in_total    REAL,
+    vendor_name         TEXT,
+    stock_status        TEXT,
+    source_file         TEXT,
+    updated_at          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_iim_item_number ON inventory_item_mapping (item_number);
+CREATE INDEX IF NOT EXISTS idx_iim_item_group  ON inventory_item_mapping (item_group);
 """
+
+
+def _backup_db_once() -> None:
+    """
+    Copy dashboard.db → dashboard.db.bak before schema migrations, but only
+    when the backup doesn't already exist (i.e., one backup per deployment).
+    Safe to call on every startup — a no-op if the backup file already exists.
+    """
+    bak = DB_PATH.with_suffix(".db.bak")
+    if DB_PATH.exists() and not bak.exists():
+        import shutil
+        try:
+            shutil.copy2(str(DB_PATH), str(bak))
+        except Exception:
+            pass  # non-fatal — proceed with migration regardless
 
 
 def init_db() -> str:
@@ -246,6 +358,7 @@ def init_db() -> str:
     """
     with _INIT_LOCK:
         DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _backup_db_once()
         with get_connection() as conn:
             conn.executescript(_SCHEMA_SQL)
             # Phase 5b: add extra_json column to existing spare_parts tables.
@@ -264,6 +377,40 @@ def init_db() -> str:
                     conn.execute(f"ALTER TABLE work_orders ADD COLUMN {_col} TEXT")
                 except Exception:
                     pass  # column already exists — safe to ignore
+            # Phase 5e: add worker_group (Power BI WorkerG field) to work_orders.
+            try:
+                conn.execute("ALTER TABLE work_orders ADD COLUMN worker_group TEXT")
+            except Exception:
+                pass  # column already exists — safe to ignore
+            # Phase 5f: Power BI MR-WO-TTR import fields.
+            for _col, _type in (
+                ("normalized_status", "TEXT"),
+                ("ttr_hours",         "REAL"),
+                ("source_type",       "TEXT"),
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE work_orders ADD COLUMN {_col} {_type}")
+                except Exception:
+                    pass  # column already exists — safe to ignore
+            # Phase 6: request_type_id on raw_powerbi_mr_wo_export (Request Type ID column).
+            try:
+                conn.execute(
+                    "ALTER TABLE raw_powerbi_mr_wo_export ADD COLUMN request_type_id TEXT"
+                )
+            except Exception:
+                pass  # column already exists or table not yet created — safe to ignore
+            # Phase 7: D365 Maintenance Type + Functional Location Name on asset_master.
+            for _col, _type in (
+                ("maint_type_code", "TEXT"),
+                ("maint_type",      "TEXT"),
+                ("func_loc_name",   "TEXT"),
+            ):
+                try:
+                    conn.execute(f"ALTER TABLE asset_master ADD COLUMN {_col} {_type}")
+                except Exception:
+                    pass  # column already exists — safe to ignore
+            # Phase 8 tables are declared in _SCHEMA_SQL (CREATE TABLE IF NOT EXISTS),
+            # so no ALTER TABLE migrations are needed here.
     return str(DB_PATH)
 
 
@@ -308,6 +455,9 @@ def upsert_asset_master_from_mapping(asset_map: dict, source_file: str = "Asset_
             str(entry.get("mappedSystemArea") or "").strip(),
             source_file,
             now,
+            str(entry.get("maint_type_code") or "").strip(),
+            str(entry.get("maint_type")      or "").strip(),
+            str(entry.get("func_loc_name")   or "").strip(),
         ))
 
     if not rows:
@@ -316,8 +466,9 @@ def upsert_asset_master_from_mapping(asset_map: dict, source_file: str = "Asset_
     upsert_sql = """
         INSERT INTO asset_master
             (asset_id, asset_name, functional_location, stage, category,
-             machine_group, criticality, is_critical, area, source_file, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             machine_group, criticality, is_critical, area, source_file, updated_at,
+             maint_type_code, maint_type, func_loc_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asset_id) DO UPDATE SET
             asset_name          = excluded.asset_name,
             functional_location = excluded.functional_location,
@@ -328,7 +479,10 @@ def upsert_asset_master_from_mapping(asset_map: dict, source_file: str = "Asset_
             is_critical         = excluded.is_critical,
             area                = excluded.area,
             source_file         = excluded.source_file,
-            updated_at          = excluded.updated_at
+            updated_at          = excluded.updated_at,
+            maint_type_code     = excluded.maint_type_code,
+            maint_type          = excluded.maint_type,
+            func_loc_name       = excluded.func_loc_name
     """
 
     with get_connection() as conn:
@@ -354,6 +508,15 @@ def sync_asset_master_from_file(data_dir: str | Path) -> dict:
         mapping = load_asset_mapping(str(data_dir))
         if not mapping.get("available"):
             return {"ok": False, "rows": 0, "message": mapping.get("message", "Asset Master not available.")}
+
+        # If mapping was already loaded from SQL, nothing to sync from Excel.
+        if mapping.get("data_source") == "sql":
+            asset_count = len(mapping.get("asset_map", {}))
+            return {
+                "ok": True,
+                "rows": 0,
+                "message": f"Asset Master already in SQL ({asset_count} asset(s)). No Excel sync needed.",
+            }
 
         asset_map = mapping.get("asset_map", {})
         source_file = Path(mapping.get("path") or ASSET_MASTER_FILENAME).name
@@ -572,21 +735,30 @@ def get_overview_freshness() -> dict:
 
 # ── Work Orders sync ──────────────────────────────────────────────────────────
 
-def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
+def upsert_work_orders(
+    records: list[dict],
+    source_file: str = "",
+    source_type: str = "work_orders",
+) -> dict:
     """
     Bulk-upsert enriched work-order records (as produced by
     downtime_service.load_work_order_downtime() after enrichment and
     resolved_stage annotation) into the work_orders table.
 
-    Returns {"rows": int, "valid": int, "invalid": int}.
+    Returns {"rows", "valid", "invalid", "inserted", "updated",
+             "skipped", "missing_asset", "missing_dates"}.
     """
     if not records:
-        return {"rows": 0, "valid": 0, "invalid": 0}
+        return {"rows": 0, "valid": 0, "invalid": 0,
+                "inserted": 0, "updated": 0, "skipped": 0,
+                "missing_asset": 0, "missing_dates": 0}
 
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     rows = []
-    valid_count = 0
+    valid_count   = 0
     invalid_count = 0
+    missing_asset = 0
+    missing_dates = 0
 
     for rec in records:
         mr_number = str(rec.get("maintenance_order_id") or "").strip()
@@ -595,19 +767,36 @@ def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
             continue
 
         dq_flag = rec.get("data_quality_flag") or ""
+        dq_flags_list = rec.get("data_quality_flags") or []
         if dq_flag == "Valid":
             data_validity_status = "Valid"
             review_reason = None
             valid_count += 1
         else:
             data_validity_status = "Review"
-            review_reason = dq_flag or "; ".join(rec.get("data_quality_flags") or [])
+            review_reason = dq_flag or "; ".join(dq_flags_list)
             invalid_count += 1
+
+        # Quality counters for the import result message.
+        asset_val = str(rec.get("asset_id") or "").strip()
+        if not asset_val:
+            missing_asset += 1
+        start_val = rec.get("maintenance_start_time") or rec.get("actual_start_time") or ""
+        end_val   = rec.get("maintenance_end_time") or rec.get("actual_end_time") or ""
+        if not start_val or not end_val:
+            missing_dates += 1
+
+        # ttr_hours: use stored value (from PBI "Sum of TTR_Hours") or None.
+        ttr_val = rec.get("ttr_hours")
+        try:
+            ttr_val = float(ttr_val) if ttr_val is not None else None
+        except (ValueError, TypeError):
+            ttr_val = None
 
         rows.append((
             mr_number,
             wo_number,
-            str(rec.get("asset_id") or "").strip() or None,
+            asset_val or None,
             str(rec.get("machine_equipment_name") or rec.get("asset_name") or "").strip() or None,
             str(rec.get("raw_functional_location") or "").strip() or None,
             str(rec.get("resolved_stage") or rec.get("mappedStage") or "").strip() or None,
@@ -627,11 +816,17 @@ def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
             review_reason,
             str(rec.get("started_by") or "").strip() or None,
             str(rec.get("created_by") or "").strip() or None,
+            str(rec.get("worker_group") or "").strip() or None,
+            str(rec.get("normalized_status") or "").strip() or None,
+            ttr_val,
+            source_type or "work_orders",
             now,
         ))
 
     if not rows:
-        return {"rows": 0, "valid": 0, "invalid": 0}
+        return {"rows": 0, "valid": 0, "invalid": 0,
+                "inserted": 0, "updated": 0, "skipped": 0,
+                "missing_asset": missing_asset, "missing_dates": missing_dates}
 
     upsert_sql = """
         INSERT INTO work_orders
@@ -640,8 +835,9 @@ def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
              translated_description,
              job_type, trade, actual_start, actual_end, created_date,
              source_file, data_validity_status, review_reason,
-             started_by, created_by, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             started_by, created_by, worker_group,
+             normalized_status, ttr_hours, source_type, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(mr_number, wo_number) DO UPDATE SET
             asset_id               = excluded.asset_id,
             asset_name             = excluded.asset_name,
@@ -663,13 +859,53 @@ def upsert_work_orders(records: list[dict], source_file: str = "") -> dict:
             review_reason          = excluded.review_reason,
             started_by             = excluded.started_by,
             created_by             = excluded.created_by,
+            worker_group           = excluded.worker_group,
+            normalized_status      = excluded.normalized_status,
+            ttr_hours              = excluded.ttr_hours,
+            source_type            = excluded.source_type,
             updated_at             = excluded.updated_at
     """
 
     with get_connection() as conn:
+        count_before = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
         conn.executemany(upsert_sql, rows)
+        count_after = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
 
-    return {"rows": len(rows), "valid": valid_count, "invalid": invalid_count}
+    inserted = max(0, count_after - count_before)
+    updated  = max(0, len(rows) - inserted)
+
+    return {
+        "rows":          len(rows),
+        "valid":         valid_count,
+        "invalid":       invalid_count,
+        "inserted":      inserted,
+        "updated":       updated,
+        "skipped":       0,
+        "missing_asset": missing_asset,
+        "missing_dates": missing_dates,
+    }
+
+
+def clear_work_orders(source_types: list[str] | tuple[str, ...] | None = None) -> dict:
+    """Delete rows from the legacy work_orders table.
+
+    Used when an uploaded MR/WO file is explicitly imported in replace mode.
+    POWERBI_FULL_MR_WO_EXPORT imports use raw_powerbi_mr_wo_export batches and
+    are intentionally not touched here.
+    """
+    with get_connection() as conn:
+        before = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
+        if source_types:
+            values = [str(item or "").strip() for item in source_types if str(item or "").strip()]
+            if values:
+                placeholders = ",".join("?" for _ in values)
+                conn.execute(f"DELETE FROM work_orders WHERE source_type IN ({placeholders})", values)
+            else:
+                conn.execute("DELETE FROM work_orders")
+        else:
+            conn.execute("DELETE FROM work_orders")
+        after = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
+    return {"deleted": max(0, before - after), "remaining": after}
 
 
 def log_import(
@@ -725,9 +961,14 @@ def load_work_orders_from_sql(stage: str | None = None) -> list[dict]:
             wo.source_file, wo.data_validity_status, wo.review_reason,
             wo.started_by, wo.created_by,
             wo.updated_at,
-            am.criticality  AS am_criticality,
-            am.is_critical  AS am_is_critical,
-            am.area         AS am_area
+            wo.source_type, wo.normalized_status, wo.ttr_hours, wo.worker_group,
+            am.criticality       AS am_criticality,
+            am.is_critical       AS am_is_critical,
+            am.area              AS am_area,
+            am.functional_location AS am_func_loc,
+            am.maint_type_code   AS am_maint_type_code,
+            am.maint_type        AS am_maint_type,
+            am.func_loc_name     AS am_func_loc_name
         FROM work_orders wo
         LEFT JOIN asset_master am ON am.asset_id = wo.asset_id
         {where_sql}
@@ -737,6 +978,206 @@ def load_work_orders_from_sql(stage: str | None = None) -> list[dict]:
     with get_connection() as conn:
         rows = conn.execute(sql, params).fetchall()
 
+    return [dict(r) for r in rows]
+
+
+def repair_powerbi_quality_flags() -> dict:
+    """
+    Fix stored data_validity_status for Power BI records that were imported
+    before the 'Confirm' lifecycle fix or before ActualStart/ActualEnd aliases
+    were recognised.
+
+    Sets Valid for:
+      - Finished / Confirm records with both dates present and end >= start.
+      - New / In Progress records (no date requirement for KPI inclusion).
+    Leaves unchanged: Rejected / other review-status records.
+
+    Returns {"repaired": int, "skipped": int}.
+    """
+    _FINISHED = frozenset({"finished", "confirm", "completed", "closed", "resolved", "done"})
+    _OPEN     = frozenset({"new", "in progress", "inprogress"})
+
+    def _parse(s: str):
+        for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return datetime.strptime((s or "").strip(), fmt)
+            except ValueError:
+                pass
+        return None
+
+    with get_connection() as conn:
+        rows = conn.execute("""
+            SELECT rowid, status, actual_start, actual_end
+            FROM work_orders
+            WHERE source_type = 'powerbi'
+              AND data_validity_status != 'Valid'
+        """).fetchall()
+
+        repaired = 0
+        skipped  = 0
+        for row in rows:
+            status    = str(row["status"] or "").strip().lower()
+            start_iso = row["actual_start"] or ""
+            end_iso   = row["actual_end"]   or ""
+
+            if status in _FINISHED and start_iso and end_iso:
+                start_dt = _parse(start_iso)
+                end_dt   = _parse(end_iso)
+                if start_dt and end_dt and end_dt >= start_dt:
+                    conn.execute(
+                        "UPDATE work_orders SET data_validity_status = 'Valid', review_reason = NULL"
+                        " WHERE rowid = ?",
+                        (row["rowid"],),
+                    )
+                    repaired += 1
+                    continue
+            elif status in _OPEN:
+                conn.execute(
+                    "UPDATE work_orders SET data_validity_status = 'Valid', review_reason = NULL"
+                    " WHERE rowid = ?",
+                    (row["rowid"],),
+                )
+                repaired += 1
+                continue
+
+            skipped += 1
+
+    return {"repaired": repaired, "skipped": skipped}
+
+
+# ── Power BI Full MR/WO batch management ──────────────────────────────────────
+
+def create_import_batch(
+    batch_id: str,
+    source_type: str,
+    source_file: str,
+    imported_at: str,
+    total_rows: int = 0,
+    valid_rows: int = 0,
+    review_rows: int = 0,
+    notes: str = "",
+) -> dict:
+    """Insert a new import_batches row and return it as a dict."""
+    with get_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO import_batches
+                (batch_id, source_type, source_file, imported_at,
+                 is_active, total_rows, valid_rows, review_rows, notes)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (batch_id, source_type, source_file, imported_at,
+             total_rows, valid_rows, review_rows, notes or ""),
+        )
+    return {
+        "batch_id": batch_id, "source_type": source_type,
+        "source_file": source_file, "imported_at": imported_at,
+        "total_rows": total_rows, "valid_rows": valid_rows,
+        "review_rows": review_rows,
+    }
+
+
+def deactivate_old_batches(source_type: str) -> int:
+    """
+    Mark all currently active batches of the given source_type as inactive.
+    Called before inserting a new batch so the new one is the only active one.
+    Returns the count of deactivated rows.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE import_batches SET is_active = 0"
+            " WHERE source_type = ? AND is_active = 1",
+            (source_type,),
+        )
+        count = conn.execute(
+            "SELECT changes()"
+        ).fetchone()[0]
+    return count
+
+
+def get_active_powerbi_full_batch_id() -> str | None:
+    """
+    Return the batch_id of the latest active POWERBI_FULL_MR_WO_EXPORT batch,
+    or None if no active batch exists.
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT batch_id FROM import_batches
+            WHERE source_type = 'POWERBI_FULL_MR_WO_EXPORT' AND is_active = 1
+            ORDER BY imported_at DESC LIMIT 1
+            """,
+        ).fetchone()
+    return row["batch_id"] if row else None
+
+
+def get_active_powerbi_batch_info() -> dict | None:
+    """Return the full import_batches row for the latest active PBI full batch."""
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM import_batches
+            WHERE source_type = 'POWERBI_FULL_MR_WO_EXPORT' AND is_active = 1
+            ORDER BY imported_at DESC LIMIT 1
+            """,
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_powerbi_full_records(batch_id: str, records: list[dict]) -> dict:
+    """
+    Bulk-insert rows into raw_powerbi_mr_wo_export for the given batch.
+    Returns {"inserted": int}.
+    """
+    if not records:
+        return {"inserted": 0}
+
+    cols = (
+        "import_batch_id", "source_file", "imported_at",
+        "request_id", "work_order_id", "asset_id", "asset_name",
+        "request_state", "requester", "description", "location",
+        "job_trade", "job_type_id", "request_type_id", "responsible", "worker_group",
+        "priority", "actual_start", "actual_end",
+        "normalized_status", "ttr_hours", "data_quality_flag", "review_reason",
+    )
+    placeholders = ", ".join("?" * len(cols))
+    sql = f"INSERT INTO raw_powerbi_mr_wo_export ({', '.join(cols)}) VALUES ({placeholders})"
+
+    rows = [tuple(r.get(c) for c in cols) for r in records]
+    with get_connection() as conn:
+        conn.executemany(sql, rows)
+    return {"inserted": len(rows)}
+
+
+def load_powerbi_full_records(batch_id: str, stage: str | None = None) -> list[dict]:
+    """
+    Load all rows for a batch from raw_powerbi_mr_wo_export,
+    LEFT JOIN asset_master for stage/criticality/area.
+    Optional stage filter applied via asset_master.stage.
+    """
+    params: list = [batch_id]
+    stage_clause = ""
+    if stage:
+        stage_clause = "AND (am.stage = ? OR (am.stage IS NULL AND ? = 'Unmapped'))"
+        params.extend([stage, stage])
+
+    sql = f"""
+        SELECT
+            pbi.*,
+            am.stage        AS am_stage,
+            am.category     AS am_category,
+            am.machine_group AS am_machine_group,
+            am.criticality  AS am_criticality,
+            am.is_critical  AS am_is_critical,
+            am.area         AS am_area
+        FROM raw_powerbi_mr_wo_export pbi
+        LEFT JOIN asset_master am ON am.asset_id = pbi.asset_id
+        WHERE pbi.import_batch_id = ?
+        {stage_clause}
+        ORDER BY pbi.actual_start DESC
+    """
+    with get_connection() as conn:
+        rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -983,4 +1424,112 @@ def load_spare_parts_from_sql(
     """
     with get_connection() as conn:
         rows = conn.execute(sql, params).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Phase 8: Spare PO Lines (PO Spare 24-26.csv) ──────────────────────────────
+
+def upsert_spare_po_lines(rows: list[dict]) -> int:
+    """Replace all spare_po_lines and insert the new batch. Returns row count."""
+    if not rows:
+        return 0
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with get_connection() as conn:
+        conn.execute("DELETE FROM spare_po_lines")
+        conn.executemany(
+            """
+            INSERT INTO spare_po_lines
+                (po_number, item_code, item_description, ordered_qty, uom,
+                 unit_price, currency, po_value_thb, requested_delivery_date,
+                 source_file, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    str(r.get("po_number") or ""),
+                    str(r.get("item_code") or ""),
+                    str(r.get("item_description") or ""),
+                    r.get("ordered_qty"),
+                    str(r.get("uom") or ""),
+                    r.get("unit_price"),
+                    str(r.get("currency") or "THB"),
+                    r.get("po_value_thb"),
+                    str(r.get("requested_delivery_date") or ""),
+                    str(r.get("source_file") or ""),
+                    r.get("updated_at") or now,
+                )
+                for r in rows
+            ],
+        )
+    return len(rows)
+
+
+def load_spare_po_lines() -> list[dict]:
+    """Load all spare_po_lines rows."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM spare_po_lines ORDER BY requested_delivery_date DESC, po_number"
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ── Phase 8: Inventory Item Mapping (On-hand list.xlsx) ───────────────────────
+
+def upsert_inventory_item_mapping(rows: list[dict]) -> int:
+    """Replace all inventory_item_mapping rows and insert the new batch."""
+    if not rows:
+        return 0
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    with get_connection() as conn:
+        conn.execute("DELETE FROM inventory_item_mapping")
+        conn.executemany(
+            """
+            INSERT INTO inventory_item_mapping
+                (item_number, product_name, inventory_unit, item_group,
+                 available_physical, physical_inventory, total_available,
+                 on_order, ordered_in_total, vendor_name, stock_status,
+                 source_file, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(item_number) DO UPDATE SET
+                product_name        = excluded.product_name,
+                inventory_unit      = excluded.inventory_unit,
+                item_group          = excluded.item_group,
+                available_physical  = excluded.available_physical,
+                physical_inventory  = excluded.physical_inventory,
+                total_available     = excluded.total_available,
+                on_order            = excluded.on_order,
+                ordered_in_total    = excluded.ordered_in_total,
+                vendor_name         = excluded.vendor_name,
+                stock_status        = excluded.stock_status,
+                source_file         = excluded.source_file,
+                updated_at          = excluded.updated_at
+            """,
+            [
+                (
+                    str(r.get("item_number") or "").upper(),
+                    str(r.get("product_name") or ""),
+                    str(r.get("inventory_unit") or ""),
+                    str(r.get("item_group") or ""),
+                    r.get("available_physical"),
+                    r.get("physical_inventory"),
+                    r.get("total_available"),
+                    r.get("on_order"),
+                    r.get("ordered_in_total"),
+                    str(r.get("vendor_name") or ""),
+                    str(r.get("stock_status") or ""),
+                    str(r.get("source_file") or ""),
+                    r.get("updated_at") or now,
+                )
+                for r in rows
+            ],
+        )
+    return len(rows)
+
+
+def load_inventory_item_mapping() -> list[dict]:
+    """Load all inventory_item_mapping rows."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM inventory_item_mapping ORDER BY item_number"
+        ).fetchall()
     return [dict(r) for r in rows]

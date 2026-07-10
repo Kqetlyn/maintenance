@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>User Management | Maintenance Dashboard</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            margin: 0;
+            font-family: Inter, Arial, sans-serif;
+            background: #f8fafc;
+            color: #0f172a;
+        }
+        header {
+            background: #0f172a;
+            color: #fff;
+            padding: 18px 28px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+        }
+        header h1 { margin: 0; font-size: 1.15rem; letter-spacing: 0; }
+        header a { color: #bfdbfe; text-decoration: none; font-weight: 800; }
+        main {
+            width: min(1120px, calc(100vw - 32px));
+            margin: 28px auto;
+            display: grid;
+            gap: 18px;
+        }
+        .panel {
+            background: #fff;
+            border: 1px solid #dbe4ee;
+            border-radius: 8px;
+            box-shadow: 0 16px 32px rgba(15, 23, 42, 0.08);
+            padding: 18px;
+        }
+        h2 { margin: 0 0 14px; font-size: 1rem; }
+        .notice {
+            border-radius: 7px;
+            padding: 10px 12px;
+            font-weight: 800;
+        }
+        .notice.ok { background: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; }
+        .notice.error { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.88rem;
+        }
+        th, td {
+            border-bottom: 1px solid #e2e8f0;
+            padding: 10px;
+            text-align: left;
+            vertical-align: middle;
+        }
+        th {
+            color: #475569;
+            font-size: 0.74rem;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        form.inline-form {
+            display: grid;
+            grid-template-columns: minmax(120px, 1fr) 130px 120px auto;
+            align-items: center;
+            gap: 8px;
+        }
+        .create-grid {
+            display: grid;
+            grid-template-columns: minmax(160px, 1fr) minmax(160px, 1fr) 150px 120px;
+            gap: 10px;
+            align-items: end;
+        }
+        .create-actions { display: flex; justify-content: flex-end; margin-top: 12px; }
+        .create-grid > .create-actions {
+            grid-column: 1 / -1;
+        }
+        label { display: grid; gap: 6px; color: #475569; font-size: 0.78rem; font-weight: 800; }
+        input, select {
+            width: 100%;
+            border: 1px solid #cbd5e1;
+            border-radius: 7px;
+            padding: 9px 10px;
+            font: inherit;
+            color: #0f172a;
+            background: #fff;
+        }
+        button {
+            border: 0;
+            border-radius: 7px;
+            padding: 10px 12px;
+            background: #2563eb;
+            color: #fff;
+            font: inherit;
+            font-weight: 800;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        button:hover { background: #1d4ed8; }
+        .muted { color: #64748b; font-size: 0.82rem; }
+        .role-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin: 0 0 14px;
+        }
+        .role-pill {
+            border: 1px solid #cbd5e1;
+            border-radius: 999px;
+            padding: 6px 10px;
+            background: #f8fafc;
+            color: #334155;
+            font-size: 0.78rem;
+            font-weight: 800;
+        }
+        @media (max-width: 820px) {
+            table, tbody, tr, td { display: block; width: 100%; }
+            thead { display: none; }
+            tr { border-bottom: 1px solid #e2e8f0; padding: 10px 0; }
+            td { border: 0; padding: 6px 0; }
+            form.inline-form, .create-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>User Management</h1>
+        <a href="/?view=mira_overview">Back to dashboard</a>
+    </header>
+    <main>
+        {% if message %}<div class="notice ok">{{ message }}</div>{% endif %}
+        {% if error %}<div class="notice error">{{ error }}</div>{% endif %}
+
+        <section class="panel">
+            <h2>Roles</h2>
+            <div class="role-list">
+                <span class="role-pill">Restricted &middot; everything, including user management</span>
+                <span class="role-pill">Public &middot; PM schedule and downtime only</span>
+            </div>
+        </section>
+
+        <section class="panel">
+            <h2>Existing Users</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>User</th>
+                        <th>Role</th>
+                        <th>Created</th>
+                        <th>Status</th>
+                        <th>Change</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td><strong>{{ user.username }}</strong>{% if user.id == current_user_id %} <span class="muted">(you)</span>{% endif %}</td>
+                        <td>{{ role_labels.get(user.role, user.role) }}</td>
+                        <td>{{ user.created_at }}</td>
+                        <td>{{ "Active" if user.is_active else "Inactive" }}</td>
+                        <td>
+                            <form class="inline-form" method="post">
+                                <input type="hidden" name="action" value="update">
+                                <input type="hidden" name="user_id" value="{{ user.id }}">
+                                <input name="password" type="password" placeholder="New password" autocomplete="new-password">
+                                {% if user.id == current_user_id %}
+                                <input type="text" value="Restricted" disabled title="You can't demote your own account.">
+                                {% else %}
+                                <select name="role" required>
+                                    <option value="restricted" {% if user.role == "restricted" %}selected{% endif %}>Restricted</option>
+                                    <option value="public" {% if user.role == "public" %}selected{% endif %}>Public</option>
+                                </select>
+                                {% endif %}
+                                <select name="is_active" {% if user.id == current_user_id %}disabled{% endif %}>
+                                    <option value="1" {% if user.is_active %}selected{% endif %}>active</option>
+                                    <option value="0" {% if not user.is_active %}selected{% endif %}>inactive</option>
+                                </select>
+                                <button type="submit">Save</button>
+                            </form>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </section>
+
+        <section class="panel">
+            <h2>Create User</h2>
+            <form class="create-grid" method="post">
+                <input type="hidden" name="action" value="create">
+                <label>Username <input name="username" type="text" required autocomplete="username"></label>
+                <label>Password <input name="password" type="password" value="0000" required autocomplete="new-password"></label>
+                <label>Role
+                    <select name="role" required>
+                        <option value="public">Public</option>
+                        <option value="restricted">Restricted</option>
+                    </select>
+                </label>
+                <label>Status
+                    <select name="is_active">
+                        <option value="1">active</option>
+                        <option value="0">inactive</option>
+                    </select>
+                </label>
+                <div class="create-actions">
+                    <button type="submit">Create</button>
+                </div>
+            </form>
+        </section>
+    </main>
+</body>
+</html>

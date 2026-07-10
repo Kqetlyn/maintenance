@@ -1,11 +1,13 @@
 let downtimePayload = null;
 let downtimeCachePayload = null;
+let renderDowntimePageToken = 0;
 const chartRefs = {};
 const workOrderSlaWarningKeys = new Set();
 const DOWNTIME_EMBED_MODE = !!window.DOWNTIME_EMBED_MODE;
 const DOWNTIME_STAGE_ALL = "all";
 const MACHINE_EXPLORER_ASSET_RENDER_LIMIT = 250;
 const MACHINE_HISTORY_RENDER_LIMIT = 500;
+const MR_MOVEMENT_BACKGROUND_LOAD_DELAY_MS = 6000;
 let downtimeEmbedHeightObserverStarted = false;
 
 function postEmbeddedHeight() {
@@ -31,7 +33,7 @@ function scheduleLowPriorityWork(callback, timeout = 500) {
     if (typeof window.requestIdleCallback === "function") {
         return { type: "idle", id: window.requestIdleCallback(callback, { timeout }) };
     }
-    return { type: "timeout", id: window.setTimeout(callback, 80) };
+    return { type: "timeout", id: window.setTimeout(callback, timeout) };
 }
 
 function cancelLowPriorityWork(handle) {
@@ -41,6 +43,20 @@ function cancelLowPriorityWork(handle) {
         return;
     }
     window.clearTimeout(handle.id);
+}
+
+// Hands control back to the browser for one frame so queued input/paint work can run.
+// Used to slice up renderDowntimePage() — without this, a full re-render (charts +
+// several large tables + KDI aggregation) runs as one uninterrupted task and trips
+// the browser's "Page Unresponsive" warning on large All-Years datasets.
+function _yieldToMainThread() {
+    return new Promise((resolve) => {
+        if (typeof window.requestAnimationFrame === "function") {
+            window.requestAnimationFrame(() => resolve());
+        } else {
+            window.setTimeout(resolve, 0);
+        }
+    });
 }
 
 function startEmbeddedHeightSync() {
@@ -127,6 +143,77 @@ function setDashboardTopic(topicKey) {
     scheduleEmbeddedHeightPost();
 }
 
+// Maps a MIRA Overview "Daily Action Alerts" navFocus key to the matching Downtime
+// topic tab. We always scroll to the top of the topic panel itself, not to a
+// nested sub-element (e.g. Machine Explorer loads its own asset list
+// asynchronously and keeps shifting position as it does, making it an unstable
+// scroll target) — landing at the top of the right topic is reliable and close
+// enough; the user can see the rest by scrolling within it.
+const _FOCUS_KEY_TO_TOPIC = {
+    machine_explorer: "data-reliability",
+    data_reliability: "data-reliability",
+    yearly_movement: "yearly-movement",
+};
+
+// wireDashboardTopicControls() (called from init(), see below) resets the topic
+// to its default ("mr-tracking") as part of its own setup. downtimeFocusSection()
+// becomes callable the instant this script finishes parsing — which can be
+// *before* init() has actually run — so a focus request that lands in that
+// window would get silently overwritten a moment later. Gate on this flag
+// (set once wireDashboardTopicControls has done its own default-topic reset)
+// so our topic switch always happens last and wins.
+let _downtimeTopicControlsReady = false;
+
+// Entry point for the MIRA Overview "Daily Action Alerts" cards (called from the
+// parent frame via this same-origin iframe's contentWindow). Switches to the
+// matching topic tab, applies the Stage filter carried over from the alert, and
+// scrolls the relevant section into view — so the click lands on the specific
+// card the alert was about, not just the Downtime page in general.
+window.downtimeFocusSection = function downtimeFocusSection(focusKey, context, attempt) {
+    if (!_downtimeTopicControlsReady) {
+        if ((attempt || 0) < 40) window.setTimeout(() => downtimeFocusSection(focusKey, context, (attempt || 0) + 1), 50);
+        return;
+    }
+
+    const ctx = context || {};
+    if (ctx.stageFilter) {
+        const stageSelect = document.getElementById("downtime-stage-filter");
+        if (stageSelect && stageSelect.value !== ctx.stageFilter && Array.from(stageSelect.options).some((o) => o.value === ctx.stageFilter)) {
+            stageSelect.value = ctx.stageFilter;
+            stageSelect.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+    }
+    const topicKey = _FOCUS_KEY_TO_TOPIC[focusKey];
+    if (topicKey) setDashboardTopic(topicKey);
+
+    // Force an immediate height sync (bypassing the rAF-scheduled one) so the
+    // parent <iframe> element resizes to fit the newly-revealed topic panel
+    // *before* we compute where to scroll. The iframe grows to fit its full
+    // content (it has no internal scrollbar of its own), so scrolling has to
+    // happen on the parent page — and if we scroll before the parent resizes
+    // the iframe, the page grows underneath us right after and the target
+    // ends up below the fold.
+    postEmbeddedHeight();
+
+    window.setTimeout(() => {
+        postEmbeddedHeight();
+        const target = topicKey && document.querySelector(`[data-topic-panel="${topicKey}"]`);
+        if (!target) return;
+        const frameEl = window.frameElement;
+        if (frameEl && window.parent && window.parent !== window) {
+            // Same-origin parent: scroll the PARENT window to the target's real
+            // position, rather than calling scrollIntoView() inside this iframe
+            // (which has nothing of its own to scroll — it grows to fit its
+            // full content).
+            const frameTop = frameEl.getBoundingClientRect().top + window.parent.scrollY;
+            const targetTop = target.getBoundingClientRect().top;
+            window.parent.scrollTo({ top: Math.max(0, frameTop + targetTop - 16), behavior: "smooth" });
+        } else {
+            target.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+    }, 200);
+};
+
 function wireDashboardTopicControls() {
     relocateOperationalTopicSections();
     document.querySelectorAll("[data-topic-target]").forEach((button) => {
@@ -145,6 +232,7 @@ function wireDashboardTopicControls() {
         });
     });
     setDashboardTopic(selectedDashboardTopic);
+    _downtimeTopicControlsReady = true;
 }
 
 // Machine Explorer state
@@ -169,6 +257,17 @@ let allWorkOrderRowsPromise = null;
 // Mirrors backend asset_mapping._GROUP_TO_CATEGORY so old cached rows (without an
 // equipment_category field) still classify correctly.
 let selectedEquipmentCategory = "all"; // all | Production Equipment | Utilities | Unclassified
+let inactiveCriticalMachineState = {
+    loading: false,
+    loaded: false,
+    error: "",
+    scopeKey: "",
+    rows: [],
+    meta: {},
+    counts: { active: {}, inactive: {} },
+};
+let inactiveCriticalMachineSearch = "";
+let inactiveCriticalMachineRequestToken = 0;
 const EQUIP_GROUP_TO_CATEGORY = {
     "Production Equipment": "Production Equipment",
     "Utilities / Support": "Utilities",
@@ -182,9 +281,17 @@ function getRowEquipmentCategory(row) {
     if (c) return c;
     return EQUIP_GROUP_TO_CATEGORY[String((row && row.machine_group) || "").trim()] || "Unclassified";
 }
+// A single render pass calls this ~15x with the same (rows, category) pair across
+// different sections — memoize by reference so repeat calls skip the full-array scan.
+let _categoryFilterCache = { rows: null, category: null, result: null };
 function applyCategoryFilter(rows) {
     if (!Array.isArray(rows) || selectedEquipmentCategory === "all") return rows || [];
-    return rows.filter((r) => getRowEquipmentCategory(r) === selectedEquipmentCategory);
+    if (_categoryFilterCache.rows === rows && _categoryFilterCache.category === selectedEquipmentCategory) {
+        return _categoryFilterCache.result;
+    }
+    const result = rows.filter((r) => getRowEquipmentCategory(r) === selectedEquipmentCategory);
+    _categoryFilterCache = { rows, category: selectedEquipmentCategory, result };
+    return result;
 }
 // Category-scoped all-year rows — single chokepoint replacing the many
 // `getCategoryScopedAllRows()` reads.
@@ -242,6 +349,9 @@ let machineHistorySearch = "";
 let machineExplorerRefrigSubgroup = "";          // active subgroup key inside Refrigeration
 let machineExplorerAssetCriticalityFilter = "";
 let machineExplorerAckFilter = "";
+let meMainTypeFilter = "";   // Equip. Function / maint_type filter (e.g. "Cooking Equipment")
+let meZoneFilter = "";       // Zone filter (e.g. "ZN2")
+let meFuncLocFilter = "";    // Functional Location filter (e.g. "ZN2-CL1")
 // Spare part trend data cache (loaded once, reused on scope change)
 let cmcSpareTrendData = null;
 
@@ -930,8 +1040,13 @@ function isOpenLifecycleState(value) {
 function getTtrHours(row) {
     if (row?.valid_mttr_ttr === false || row?.valid_ttr === false) return null;
     if (row?.data_quality_flag && row.data_quality_flag !== "Valid") return null;
-    const status = getMrStatus(row);
-    if (status && status !== "--" && !isMrFinishedStatus(status)) return null;
+    // When the backend explicitly marks a row valid for MTTR, skip the status gate.
+    // This handles Confirm and reWork statuses in PBI full imports which are
+    // MTTR-eligible but are not "Finished" by the frontend's isMrFinishedStatus check.
+    if (row?.valid_mttr_ttr !== true) {
+        const status = getMrStatus(row);
+        if (status && status !== "--" && !isMrFinishedStatus(status)) return null;
+    }
     const raw = row?.ttr_hours ?? row?.duration_hours ?? row?.original_ttr_hours;
     if (raw !== null && raw !== undefined && !(typeof raw === "string" && raw.trim() === "")) {
         const hours = Number(raw);
@@ -2531,7 +2646,15 @@ function renderDowntimeOverviewFromRows(rows = []) {
     });
     const qualityValid = kpiRows.filter(isDataQualityValid).length;
     const invalidCount = kpiRows.length - qualityValid;
-    const reviewCount = kpiRows.filter((row) => getDataQualityFlags(row).some((flag) => flag === "Review status") || getAcknowledgementStatus(row) === "Review").length;
+    const reviewCount = kpiRows.filter((row) => {
+        // For PBI imports, only count rows with actual data-quality flags as "review".
+        // Confirm and reWork are valid operational statuses, not data reliability issues.
+        const srcType = String(row?.source_type || "").toLowerCase();
+        if (srcType === "powerbi_full" || srcType === "powerbi") {
+            return getDataQualityFlags(row).some((flag) => flag !== "Valid");
+        }
+        return getDataQualityFlags(row).some((flag) => flag === "Review status") || getAcknowledgementStatus(row) === "Review";
+    }).length;
 
     setText("kpi-maintenance-resolution-time", fmtNumber(openRows.length));
     setText("kpi-maintenance-resolution-sub", `${fmtNumber(newRows.length)} New MR + ${fmtNumber(inProgressRows.length)} In progress MR`);
@@ -2567,7 +2690,13 @@ function renderTopicDataReliabilityPanel() {
     }
     const qualityValid = scoped.filter(isDataQualityValid).length;
     const invalidCount = scoped.length - qualityValid;
-    const reviewCount = scoped.filter((row) => getDataQualityFlags(row).some((flag) => flag === "Review status") || getAcknowledgementStatus(row) === "Review").length;
+    const reviewCount = scoped.filter((row) => {
+        const srcType = String(row?.source_type || "").toLowerCase();
+        if (srcType === "powerbi_full" || srcType === "powerbi") {
+            return getDataQualityFlags(row).some((flag) => flag !== "Valid");
+        }
+        return getDataQualityFlags(row).some((flag) => flag === "Review status") || getAcknowledgementStatus(row) === "Review";
+    }).length;
     setText("topic-data-reliability-pct", fmtPercent((qualityValid / scoped.length) * 100));
     setText("topic-invalid-work-orders", fmtNumber(invalidCount));
     setText("topic-data-review-count", fmtNumber(reviewCount));
@@ -5578,7 +5707,11 @@ function renderDataReliabilityActionList(entries = []) {
     dataReviewActionSnapshots = {};
     const actionRows = (entries || []).filter((entry) => {
         const qualityFlags = getDataQualityFlags(entry.row).filter((flag) => flag !== "Valid");
-        return qualityFlags.length || isWorkOrderSlaMissingStatus(entry.slaStatus);
+        if (qualityFlags.length) return true;
+        // Power BI exports have no SLA data — skip SLA check for all PBI source types.
+        const srcType = String(entry.row?.source_type || "").toLowerCase();
+        if (srcType === "powerbi" || srcType === "powerbi_full") return false;
+        return isWorkOrderSlaMissingStatus(entry.slaStatus);
     }).slice(0, 250);
     if (!actionRows.length) {
         body.innerHTML = `<tr><td colspan="9" class="empty-cell">No data-quality action records in the current scope. Confirmed rows now count toward KPIs.</td></tr>`;
@@ -5779,6 +5912,9 @@ function getMachineExplorerFilterState() {
         quality: getMachineExplorerFilterValue("machine-explorer-quality"),
         assetCriticality: getMachineExplorerFilterValue("machine-explorer-asset-criticality") || machineExplorerAssetCriticalityFilter,
         acknowledgement: getMachineExplorerFilterValue("machine-explorer-ack-filter") || machineExplorerAckFilter,
+        maintType: (document.getElementById("me-maint-type")?.value || meMainTypeFilter || ""),
+        zone: (document.getElementById("me-zone")?.value || meZoneFilter || ""),
+        funcLoc: (document.getElementById("me-func-loc")?.value || meFuncLocFilter || ""),
     };
 }
 
@@ -5865,6 +6001,78 @@ function populateMachineExplorerFilters(rows = []) {
         input.max = maxRaised;
     });
     syncMachineHistoryPeriodInputs();
+
+    // ── Maintenance Type (Equip. Function) — contextual to current Category scope ──
+    // We want all rows in the current category scope (not filtered by ME state), so
+    // the chip list shows every type that exists in scope — not just the filtered subset.
+    populateMeMainTypeSelect(rows);
+
+    // ── Zone + Area/Line — from all ME rows (orthogonal filter) ──
+    populateMeZoneSelect(rows);
+}
+
+function populateMeMainTypeSelect(rows) {
+    const sel = document.getElementById("me-maint-type");
+    if (!sel) return;
+    const prev = sel.value;
+    const types = new Map(); // maint_type → display label with count
+    rows.forEach((row) => {
+        const code = String(row.maint_type_code || "").trim();
+        const label = String(row.maint_type || "").trim();
+        if (!label || label === "Unassigned") return;
+        const display = label + (code && code !== "Unassigned" ? ` (${code})` : "");
+        if (!types.has(label)) types.set(label, display);
+    });
+    const sorted = [...types.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    sel.innerHTML = `<option value="">All Types</option>` +
+        sorted.map(([val, disp]) => `<option value="${escapeHtml(val)}">${escapeHtml(disp)}</option>`).join("") +
+        (rows.some((r) => !r.maint_type || r.maint_type === "Unassigned")
+            ? `<option value="Unassigned">Unassigned</option>` : "");
+    sel.value = [...types.keys()].includes(prev) || prev === "Unassigned" ? prev : "";
+}
+
+const _ZONE_DISPLAY = {
+    ZN1: "ZN1 — Preparation",
+    ZN2: "ZN2 — Cooking",
+    ZN3: "ZN3 — Assembly",
+    ZN4: "ZN4 — Packing",
+};
+function populateMeZoneSelect(rows) {
+    const zoneSel = document.getElementById("me-zone");
+    if (!zoneSel) return;
+    const prevZone = zoneSel.value;
+    const zones = new Map(); // zone code → display label
+    rows.forEach((row) => {
+        const z = String(row.zone || "").trim();
+        if (!z || z === "Unassigned") return;
+        if (!zones.has(z)) zones.set(z, _ZONE_DISPLAY[z] || z);
+    });
+    const sortedZones = [...zones.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    const hasUnassigned = rows.some((r) => !r.zone || r.zone === "Unassigned");
+    zoneSel.innerHTML = `<option value="">All Zones</option>` +
+        sortedZones.map(([val, disp]) => `<option value="${escapeHtml(val)}">${escapeHtml(disp)}</option>`).join("") +
+        (hasUnassigned ? `<option value="Unassigned">Unassigned</option>` : "");
+    zoneSel.value = [...zones.keys()].includes(prevZone) || prevZone === "Unassigned" ? prevZone : "";
+    populateMeFuncLocSelect(rows, zoneSel.value);
+}
+
+function populateMeFuncLocSelect(rows, zoneValue) {
+    const flSel = document.getElementById("me-func-loc");
+    if (!flSel) return;
+    const prev = flSel.value;
+    const locs = new Map(); // func_loc code → display (func_loc_name or code)
+    rows.forEach((row) => {
+        const z = String(row.zone || "").trim();
+        if (zoneValue && z !== zoneValue) return;
+        const code = String(row.func_loc || "").trim();
+        const name = String(row.func_loc_name || "").trim();
+        if (!code || code === "Unassigned") return;
+        if (!locs.has(code)) locs.set(code, name ? `${name} (${code})` : code);
+    });
+    const sorted = [...locs.entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    flSel.innerHTML = `<option value="">All Areas</option>` +
+        sorted.map(([val, disp]) => `<option value="${escapeHtml(val)}">${escapeHtml(disp)}</option>`).join("");
+    flSel.value = [...locs.keys()].includes(prev) ? prev : "";
 }
 
 function rowIsCritical(row) {
@@ -5927,6 +6135,18 @@ function filterMachineExplorerRows(rows = [], options = {}) {
         if (state.startedBy && getMrStartedBy(row) !== state.startedBy) return false;
         if (state.createdBy && getMrCreatedBy(row) !== state.createdBy) return false;
         if (state.quality && !getDataQualityFlags(row).includes(state.quality)) return false;
+        if (state.maintType) {
+            const rowMt = String(row.maint_type || "").trim();
+            if (rowMt !== state.maintType) return false;
+        }
+        if (state.zone) {
+            const rowZone = String(row.zone || "").trim();
+            if (rowZone !== state.zone) return false;
+        }
+        if (state.funcLoc) {
+            const rowFl = String(row.func_loc || "").trim();
+            if (rowFl !== state.funcLoc) return false;
+        }
         return true;
     });
 }
@@ -6322,7 +6542,7 @@ function renderRefrigCdeDetail(rows) {
 
     if (!historyBody) return;
     if (!selRows.length) {
-        historyBody.innerHTML = `<tr><td colspan="18" class="empty-cell">No WO/MR records for this selection.</td></tr>`;
+        historyBody.innerHTML = `<tr><td colspan="17" class="empty-cell">No WO/MR records for this selection.</td></tr>`;
         return;
     }
     const sorted = [...selRows].sort(compareMachineHistoryRows);
@@ -6349,7 +6569,6 @@ function renderRefrigCdeDetail(rows) {
             <td class="description-cell" title="${escapeHtml(row.translated_description || "")}">${escapeHtml(row.translated_description && row.translated_description !== description ? row.translated_description : "--")}</td>
             <td>${escapeHtml(getMrCreatedBy(row))}</td>
             <td>${escapeHtml(getMrStartedBy(row))}</td>
-            <td>${escapeHtml(raised ? fmtDateTime(raised) : "--")}</td>
             <td>${escapeHtml(actualStart ? fmtDateTime(actualStart) : "--")}</td>
             <td>${escapeHtml(actualEnd ? fmtDateTime(actualEnd) : "--")}</td>
             <td>${escapeHtml(getRowAgeOrDuration(row))}</td>
@@ -6600,7 +6819,6 @@ function renderMachineHistoryRow(row, index) {
             <td class="description-cell" title="${escapeHtml(row.translated_description || "")}">${escapeHtml(row.translated_description && row.translated_description !== description ? row.translated_description : "--")}</td>
             <td>${escapeHtml(getMrStartedBy(row))}</td>
             <td>${escapeHtml(getMrCreatedBy(row))}</td>
-            <td>${escapeHtml(raised ? fmtDateTime(raised) : "--")}</td>
             <td>${escapeHtml(actualStart ? fmtDateTime(actualStart) : "--")}</td>
             <td>${escapeHtml(actualEnd ? fmtDateTime(actualEnd) : "--")}</td>
             <td>${escapeHtml(getRowAgeOrDuration(row))}</td>
@@ -6661,14 +6879,14 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         setText("machine-explorer-helper", `All Assets view includes every WO/MR that matches the current Machine Explorer filters in ${groupLabel}, plus any history filters applied below.`);
         if (!filtered.length) {
             setHistoryEmpty(true);
-            body.innerHTML = `<tr><td colspan="16" class="empty-cell">No WO/MR records match the current filters.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="15" class="empty-cell">No WO/MR records match the current filters.</td></tr>`;
             return;
         }
         setHistoryEmpty(false);
         const shownHistoryRows = filtered.slice(0, MACHINE_HISTORY_RENDER_LIMIT);
         const hiddenCount = Math.max(0, filtered.length - shownHistoryRows.length);
         body.innerHTML = shownHistoryRows.map((row, index) => renderMachineHistoryRow(row, index)).join("") + (hiddenCount
-            ? `<tr><td colspan="16" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
+            ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
             : "");
         return;
     }
@@ -6682,7 +6900,7 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         setText("machine-explorer-meta", "Select a machine/asset from Step 2. The table stays empty until an asset is selected.");
         setText("machine-explorer-helper", "Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location.");
         setHistoryEmpty(true);
-        body.innerHTML = `<tr><td colspan="16" class="empty-cell">Select an asset above to view WO/MR history.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="15" class="empty-cell">Select an asset above to view WO/MR history.</td></tr>`;
         return;
     }
 
@@ -6717,13 +6935,13 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
             : 'Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location. Toggle "Include possible related matches" to also show low-confidence matches.'
     );
     if (!filtered.length) {
-        body.innerHTML = `<tr><td colspan="16" class="empty-cell">No WO/MR records match this asset and the current filters.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="15" class="empty-cell">No WO/MR records match this asset and the current filters.</td></tr>`;
         return;
     }
     const shownHistoryRows = filtered.slice(0, MACHINE_HISTORY_RENDER_LIMIT);
     const hiddenCount = Math.max(0, filtered.length - shownHistoryRows.length);
     body.innerHTML = shownHistoryRows.map((row, index) => renderMachineHistoryRow(row, index)).join("") + (hiddenCount
-        ? `<tr><td colspan="16" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
+        ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
         : "");
 }
 
@@ -7058,8 +7276,10 @@ function scheduleAllYearWorkOrderRefresh(rows = []) {
 }
 
 function requestMrMovementLoad() {
-    renderMrMovementSection(allWorkOrderRowsCache);
-    renderMrTrackingSection(allWorkOrderRowsCache);
+    const currentRows = getWorkOrderRows(getManagement());
+    const previewRows = allWorkOrderRowsCache || currentRows;
+    renderMrMovementSection(previewRows);
+    renderMrTrackingSection(previewRows);
     if (allWorkOrderRowsCache) {
         scheduleAllYearWorkOrderRefresh(allWorkOrderRowsCache);
         return;
@@ -7085,10 +7305,21 @@ function requestMrMovementLoad() {
 
 function scheduleMrMovementLoad() {
     cancelLowPriorityWork(deferredMrMovementHandle);
-    deferredMrMovementHandle = scheduleLowPriorityWork(() => {
+    const currentRows = getWorkOrderRows(getManagement());
+    if (downtimePayload?.meta?.period !== "all_years") {
+        renderMrMovementSection(currentRows);
+        renderMrTrackingSection(currentRows);
+        scheduleAllYearWorkOrderRefresh(currentRows);
+        return;
+    }
+    const delay = downtimePayload?.meta?.period === "all_years" ? 900 : MR_MOVEMENT_BACKGROUND_LOAD_DELAY_MS;
+    deferredMrMovementHandle = { type: "timeout", id: window.setTimeout(() => {
         deferredMrMovementHandle = null;
-        requestMrMovementLoad();
-    }, 900);
+        deferredMrMovementHandle = scheduleLowPriorityWork(() => {
+            deferredMrMovementHandle = null;
+            requestMrMovementLoad();
+        }, 1500);
+    }, delay) };
 }
 
 function parseTimeToMinutes(value) {
@@ -7508,7 +7739,7 @@ async function loadDowntimeData(period, month, start, end) {
 
     downtimePayload = payload;
     applySlaTargetConfig(downtimePayload);
-    renderDowntimePage();
+    await renderDowntimePage();
     lastDowntimeRefreshAt = Date.now();
 }
 
@@ -9104,7 +9335,70 @@ function renderPeriodHelper(meta = {}) {
     banner.classList.remove("hidden");
 }
 
-function renderDowntimePage() {
+// ── Import Status Badge ───────────────────────────────────────────────────────
+
+const _STATUS_ORDER = ["Finished", "In Progress", "New", "Confirm", "reWork", "Rejected", "Unknown"];
+const _STATUS_COLORS = {
+    "Finished":    "#16a34a",
+    "In Progress": "#2563eb",
+    "New":         "#7c3aed",
+    "Confirm":     "#d97706",
+    "reWork":      "#ea580c",
+    "Rejected":    "#dc2626",
+};
+
+function renderImportStatusBadge(summary = {}) {
+    const bar = document.getElementById("import-status-badge");
+    if (!bar) return;
+
+    const statusCounts = summary.status_counts;
+    const batchTotal   = summary.batch_total_rows;
+    const openExcl     = summary.open_excluded_from_mttr_count ?? 0;
+    const invExcl      = summary.invalid_date_excluded_from_mttr_count ?? 0;
+    const validTtr     = summary.valid_ttr_work_orders ?? 0;
+
+    if (!statusCounts || Object.keys(statusCounts).length === 0) {
+        bar.style.display = "none";
+        return;
+    }
+    bar.style.display = "";
+
+    const total = batchTotal ?? Object.values(statusCounts).reduce((a, b) => a + b, 0);
+    setText("import-badge-total", `${fmtNumber(total)} total requests`);
+
+    const sorted = Object.entries(statusCounts).sort((a, b) => {
+        const ai = _STATUS_ORDER.indexOf(a[0]);
+        const bi = _STATUS_ORDER.indexOf(b[0]);
+        return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+    });
+    const pills = sorted.map(([status, count]) => {
+        const color = _STATUS_COLORS[status] || "#6b7280";
+        return `<span class="isb-pill" style="--isb-color:${escapeHtml(color)}">
+            <span class="isb-dot"></span>
+            <span class="isb-label">${escapeHtml(status)}</span>
+            <span class="isb-count">${fmtNumber(count)}</span>
+        </span>`;
+    }).join("");
+    setHtml("import-badge-pills", pills);
+
+    const notes = [];
+    if (validTtr > 0) notes.push(`${fmtNumber(validTtr)} valid for TTR/MTTR`);
+    if (openExcl > 0) notes.push(`${fmtNumber(openExcl)} open — no ActualEnd (excluded from MTTR)`);
+    if (invExcl > 0)  notes.push(`${fmtNumber(invExcl)} invalid date sequence (excluded from MTTR)`);
+    setText("import-badge-note", notes.join(" · "));
+}
+
+// Renders the whole Downtime page. Split into animation-frame-separated slices —
+// charts, the WO table, MTBF, the machine-group/utilities tables, trend charts, and
+// the KDI section each run in their own task — so a full re-render on large All-Years
+// datasets never blocks the main thread long enough to trigger the browser's "Page
+// Unresponsive" warning. Every slice checks `stillCurrent()` first and bails out if a
+// newer render started in the meantime (e.g. the user changed the Category/Stage
+// filter again before the previous render finished), so renders never interleave.
+async function renderDowntimePage() {
+    const token = ++renderDowntimePageToken;
+    const stillCurrent = () => token === renderDowntimePageToken;
+
     const management = getManagement();
     const meta = downtimePayload?.meta || {};
     const downtimeSummary = downtimePayload?.summary || {};
@@ -9112,18 +9406,39 @@ function renderDowntimePage() {
     setText("last-synced", meta.last_synced ? `Last synced ${fmtDateTime(meta.last_synced)}` : "Last synced unavailable");
     renderPeriodHelper(meta);
     renderAlerts(management.alerts || []);
+    renderImportStatusBadge(management.summary || {});
     renderSummary(management.summary || {}, downtimeSummary, management, meta);
     renderCriticalityCards(management.criticality_rows || []);
-    renderCharts(management);
     populateFilters(management);
+
+    await _yieldToMainThread();
+    if (!stillCurrent()) return;
+    renderCharts(management);
+
+    await _yieldToMainThread();
+    if (!stillCurrent()) return;
     renderWorkOrderResponseSection(getWorkOrderRows(management));
+
+    await _yieldToMainThread();
+    if (!stillCurrent()) return;
     populateMtbfPeriodFilters();
     renderMtbfSection();
-    requestMtbfHistoryLoad();
+    if (meta.period === "all_years") {
+        requestMtbfHistoryLoad();
+    }
+
+    await _yieldToMainThread();
+    if (!stillCurrent()) return;
     renderMachineGroupTable();
     renderUtilitiesTable();
+
+    await _yieldToMainThread();
+    if (!stillCurrent()) return;
     renderHistoricalTrend(management.historical_trend || []);
     renderActivityStatusCharts();
+
+    await _yieldToMainThread();
+    if (!stillCurrent()) return;
     updateKdiSection();
     scheduleMrMovementLoad();
 
@@ -9153,12 +9468,12 @@ function handlePeriodChange() {
     });
 }
 
-function handleEquipmentCategoryChange(event) {
+async function handleEquipmentCategoryChange(event) {
     // Frontend-only filter — no re-fetch needed; the page re-renders from the
     // already-loaded rows with the category filter applied in getWorkOrderRows().
     selectedEquipmentCategory = event?.target?.value || "all";
     try {
-        renderDowntimePage();
+        await renderDowntimePage();
         if (document.getElementById("utilities-panel")?.classList.contains("active")) {
             renderMachineExplorer(getCategoryScopedAllRows());
         }
@@ -9289,6 +9604,24 @@ function wireFilters() {
     document.getElementById("custom-end")?.addEventListener("change", handlePeriodChange);
     document.getElementById("downtime-stage-filter")?.addEventListener("change", handleDowntimeStageChange);
     document.getElementById("downtime-category-filter")?.addEventListener("change", handleEquipmentCategoryChange);
+
+    // ── Machine Explorer: Maintenance Type + Zone + Area/Line filters ──
+    document.getElementById("me-maint-type")?.addEventListener("change", (e) => {
+        meMainTypeFilter = e.target.value || "";
+        renderMachineExplorer(getCategoryScopedAllRows());
+    });
+    document.getElementById("me-zone")?.addEventListener("change", (e) => {
+        meZoneFilter = e.target.value || "";
+        meFuncLocFilter = "";
+        const flSel = document.getElementById("me-func-loc");
+        if (flSel) flSel.value = "";
+        populateMeFuncLocSelect(getCategoryScopedAllRows(), meZoneFilter);
+        renderMachineExplorer(getCategoryScopedAllRows());
+    });
+    document.getElementById("me-func-loc")?.addEventListener("change", (e) => {
+        meFuncLocFilter = e.target.value || "";
+        renderMachineExplorer(getCategoryScopedAllRows());
+    });
     document.getElementById("refresh-asset-mapping-btn")?.addEventListener("click", handleAssetMappingRefresh);
 
     // Topic-panel scoped filters — only the dedicated panels respect these.
@@ -9631,6 +9964,139 @@ function getCriticalMachineActivityStatus(row) {
     return "active";
 }
 
+function getInactiveCriticalMachineScopeKey() {
+    const period = document.getElementById("period-select")?.value || "ytd";
+    const start = document.getElementById("custom-start")?.value || "";
+    const end = document.getElementById("custom-end")?.value || "";
+    const stage = getSelectedDowntimeStage() || DOWNTIME_STAGE_ALL;
+    return [period, start, end, stage, selectedEquipmentCategory || "all"].join("|");
+}
+
+function buildInactiveCriticalMachineApiUrl() {
+    const query = new URLSearchParams({ _: String(Date.now()) });
+    const period = document.getElementById("period-select")?.value || "ytd";
+    const start = document.getElementById("custom-start")?.value || "";
+    const end = document.getElementById("custom-end")?.value || "";
+    if (period) query.set("period", period);
+    if (start) query.set("start", start);
+    if (end) query.set("end", end);
+    const stage = getSelectedDowntimeStage();
+    if (stage && stage !== DOWNTIME_STAGE_ALL) query.set("stage", stage);
+    if (selectedEquipmentCategory && selectedEquipmentCategory !== "all") query.set("category", selectedEquipmentCategory);
+    return `/api/maintenance/critical-machines/inactive?${query.toString()}`;
+}
+
+function formatCriticalMachineCategoryCounts(map = {}) {
+    const parts = [];
+    const prod = Number(map["Production Equipment"] || 0);
+    const util = Number(map.Utilities || 0);
+    const other = Number(map.Unclassified || map.Other || 0);
+    if (prod) parts.push(`Production ${fmtNumber(prod)}`);
+    if (util) parts.push(`Utilities ${fmtNumber(util)}`);
+    if (other) parts.push(`Other ${fmtNumber(other)}`);
+    return parts.join(" | ") || "--";
+}
+
+function renderCriticalMachineStatusCardFromState() {
+    const meta = inactiveCriticalMachineState.meta || {};
+    const counts = inactiveCriticalMachineState.counts || {};
+    const total = Number(meta.total_critical ?? getFilteredCriticalAssetDetails().length ?? 0);
+    const inactive = Number(meta.inactive_count ?? inactiveCriticalMachineState.rows.length ?? 0);
+    const inactiveIssues = Number(meta.inactive_issue_count ?? inactive);
+    const active = Number(meta.active_count ?? Math.max(0, total - inactive));
+
+    if (inactiveCriticalMachineState.loading) {
+        setText("act-count-active", "--");
+        setText("act-count-maintenance", "--");
+        setText("act-count-total", total ? fmtNumber(total) : "--");
+        setText("cma-active-detail", "");
+        setText("cma-inactive-detail", "Loading affected machines...");
+        setText("cma-total-detail", total ? `${fmtNumber(total)} critical machines in scope` : "");
+        setText("critical-status-card-note", "Checking all open MR/WO history for inactive critical machines.");
+        return;
+    }
+
+    if (inactiveCriticalMachineState.error) {
+        setText("act-count-active", "--");
+        setText("act-count-maintenance", "--");
+        setText("act-count-total", total ? fmtNumber(total) : "--");
+        setText("cma-active-detail", "");
+        setText("cma-inactive-detail", "Open drawer for error details");
+        setText("cma-total-detail", total ? `${fmtNumber(total)} critical machines in scope` : "");
+        setText("critical-status-card-note", "Critical machine status could not be refreshed from the inactive-machine API.");
+        return;
+    }
+
+    setText("act-count-active", fmtNumber(active));
+    setText("act-count-maintenance", fmtNumber(inactive));
+    setText("act-count-total", fmtNumber(total));
+    setText("cma-active-detail", formatCriticalMachineCategoryCounts(counts.active || {}));
+    setText("cma-inactive-detail", inactive ? `${formatCriticalMachineCategoryCounts(counts.inactive || {})} | ${fmtNumber(inactiveIssues)} open issue${inactiveIssues === 1 ? "" : "s"}` : "No inactive critical machines");
+    setText("cma-total-detail", formatCriticalMachineCategoryCounts({
+        "Production Equipment": Number(counts.active?.["Production Equipment"] || 0) + Number(counts.inactive?.["Production Equipment"] || 0),
+        Utilities: Number(counts.active?.Utilities || 0) + Number(counts.inactive?.Utilities || 0),
+        Unclassified: Number(counts.active?.Unclassified || 0) + Number(counts.inactive?.Unclassified || 0),
+    }));
+    setText(
+        "critical-status-card-note",
+        inactive
+            ? `${fmtNumber(inactive)} inactive critical machine row${inactive === 1 ? "" : "s"} found from ${fmtNumber(inactiveIssues)} open issue${inactiveIssues === 1 ? "" : "s"}.`
+            : "All critical machines in scope are active; no open MR/WO is keeping a critical machine inactive."
+    );
+}
+
+async function refreshInactiveCriticalMachines({ force = false } = {}) {
+    const scopeKey = getInactiveCriticalMachineScopeKey();
+    if (!force && inactiveCriticalMachineState.loaded && inactiveCriticalMachineState.scopeKey === scopeKey) {
+        renderCriticalMachineStatusCardFromState();
+        renderInactiveCriticalDrawer();
+        return inactiveCriticalMachineState;
+    }
+
+    const token = ++inactiveCriticalMachineRequestToken;
+    inactiveCriticalMachineState = {
+        ...inactiveCriticalMachineState,
+        loading: true,
+        loaded: false,
+        error: "",
+        scopeKey,
+    };
+    renderCriticalMachineStatusCardFromState();
+    renderInactiveCriticalDrawer();
+
+    try {
+        const response = await fetch(buildInactiveCriticalMachineApiUrl(), { cache: "no-store" });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+        }
+        if (token !== inactiveCriticalMachineRequestToken) return inactiveCriticalMachineState;
+        inactiveCriticalMachineState = {
+            loading: false,
+            loaded: true,
+            error: "",
+            scopeKey,
+            rows: Array.isArray(payload.machines) ? payload.machines : [],
+            meta: payload.meta || {},
+            counts: payload.counts || { active: {}, inactive: {} },
+        };
+    } catch (error) {
+        if (token !== inactiveCriticalMachineRequestToken) return inactiveCriticalMachineState;
+        inactiveCriticalMachineState = {
+            ...inactiveCriticalMachineState,
+            loading: false,
+            loaded: true,
+            error: error.message || String(error),
+            rows: [],
+            counts: { active: {}, inactive: {} },
+        };
+    }
+
+    renderCriticalMachineStatusCardFromState();
+    renderInactiveCriticalDrawer();
+    return inactiveCriticalMachineState;
+}
+
 function renderActivityStatusCharts() {
     destroyChart("activityDonutChart");
     const setCounts = (activeText, maintenanceText, totalText) => {
@@ -9660,12 +10126,21 @@ function renderActivityStatusCharts() {
 
     const criticalAssets = getFilteredCriticalAssetDetails();
     const total = criticalAssets.length;
+    const inactiveScopeKey = getInactiveCriticalMachineScopeKey();
     if (!total) {
         setCounts("0", "0", "0");
         setDetails("", "", "No critical machines in scope");
         setNote("No critical machines found for the selected scope.");
         return;
     }
+    if ((inactiveCriticalMachineState.loaded || inactiveCriticalMachineState.loading) && inactiveCriticalMachineState.scopeKey === inactiveScopeKey) {
+        renderCriticalMachineStatusCardFromState();
+        return;
+    }
+    refreshInactiveCriticalMachines().catch((error) => {
+        console.error("Inactive critical machine refresh failed:", error);
+    });
+    return;
 
     // Build assetId → category lookup
     const assetCategoryMap = new Map(criticalAssets.map((a) => [a.assetId, a.category]));
@@ -9723,6 +10198,232 @@ function renderActivityStatusCharts() {
     } else {
         setNote(`${fmtNumber(latestByAsset.size)} of ${fmtNumber(total)} critical machine${total === 1 ? "" : "s"} had WOs in this period.`);
     }
+}
+
+function isInactiveCriticalDrawerOpen() {
+    return document.getElementById("inactive-critical-drawer")?.classList.contains("open");
+}
+
+function openInactiveCriticalDrawer() {
+    const drawer = document.getElementById("inactive-critical-drawer");
+    const backdrop = document.getElementById("inactive-critical-backdrop");
+    if (!drawer) return;
+    drawer.classList.add("open");
+    drawer.setAttribute("aria-hidden", "false");
+    document.getElementById("critical-inactive-trigger")?.setAttribute("aria-expanded", "true");
+    if (backdrop) backdrop.hidden = false;
+    renderInactiveCriticalDrawer();
+    refreshInactiveCriticalMachines({ force: !inactiveCriticalMachineState.loaded }).catch((error) => {
+        console.error("Inactive critical machine drawer refresh failed:", error);
+    });
+    window.setTimeout(() => document.getElementById("inactive-critical-search")?.focus(), 80);
+}
+
+function closeInactiveCriticalDrawer() {
+    const drawer = document.getElementById("inactive-critical-drawer");
+    const backdrop = document.getElementById("inactive-critical-backdrop");
+    if (drawer) {
+        drawer.classList.remove("open");
+        drawer.setAttribute("aria-hidden", "true");
+    }
+    if (backdrop) backdrop.hidden = true;
+    document.getElementById("critical-inactive-trigger")?.setAttribute("aria-expanded", "false");
+}
+
+function getInactiveCriticalSearchText(row) {
+    return [
+        row.asset_id,
+        row.related_assets,
+        row.machine_name,
+        row.display_machine,
+        row.exact_machine_detected,
+        row.machine_group,
+        row.category,
+        row.stage,
+        row.functional_location,
+        row.area,
+        row.area_type,
+        row.critical_type,
+        row.mapping_confidence,
+        row.validation_flag,
+        row.latest_mr,
+        row.latest_wo,
+        row.status,
+        row.severity,
+        row.actual_start,
+        row.actual_end,
+        row.open_age_label,
+        row.description,
+        row.description_original,
+        row.description_english,
+        row.problem_job_trade,
+        row.owner,
+        ...(row.issues || []).flatMap((issue) => [
+            issue.asset_id,
+            issue.machine_name,
+            issue.latest_mr,
+            issue.latest_wo,
+            issue.description,
+            issue.description_english,
+            issue.validation_flag,
+        ]),
+    ].join(" ").toLowerCase();
+}
+
+function renderInactiveCriticalDrawer() {
+    if (!isInactiveCriticalDrawerOpen()) return;
+    const body = document.getElementById("inactive-critical-body");
+    const message = document.getElementById("inactive-critical-message");
+    const subtitle = document.getElementById("inactive-critical-subtitle");
+    const searchInput = document.getElementById("inactive-critical-search");
+    if (!body || !message || !subtitle) return;
+
+    if (searchInput && searchInput.value !== inactiveCriticalMachineSearch) {
+        searchInput.value = inactiveCriticalMachineSearch;
+    }
+
+    const rows = inactiveCriticalMachineState.rows || [];
+    const meta = inactiveCriticalMachineState.meta || {};
+    const search = inactiveCriticalMachineSearch.trim().toLowerCase();
+    const filteredRows = search
+        ? rows.filter((row) => getInactiveCriticalSearchText(row).includes(search))
+        : rows;
+
+    const issueTotal = Number(meta.inactive_issue_count || rows.reduce((sum, row) => sum + Number(row.issue_count || 1), 0));
+    subtitle.textContent = `${fmtNumber(rows.length)} machine row${rows.length === 1 ? "" : "s"} from ${fmtNumber(issueTotal)} open issue${issueTotal === 1 ? "" : "s"}; ${fmtNumber(Number(meta.total_critical || rows.length || 0))} critical assets in scope`;
+    message.classList.toggle("error", !!inactiveCriticalMachineState.error);
+
+    if (inactiveCriticalMachineState.loading) {
+        message.textContent = "Loading inactive critical machines from all open MR/WO history...";
+        body.innerHTML = `<tr><td colspan="21" class="critical-drawer-empty">Loading affected machines...</td></tr>`;
+        return;
+    }
+
+    if (inactiveCriticalMachineState.error) {
+        message.textContent = `Unable to load inactive critical machines: ${inactiveCriticalMachineState.error}`;
+        body.innerHTML = `<tr><td colspan="21" class="critical-drawer-empty">No rows available while the API request is failing.</td></tr>`;
+        return;
+    }
+
+    message.textContent = meta.logic_note || "Inactive machines are based on open statuses or missing/placeholder Actual End dates, evaluated outside the visible date window.";
+
+    if (!rows.length) {
+        body.innerHTML = `<tr><td colspan="21" class="critical-drawer-empty">No inactive critical machines found for the selected stage/category.</td></tr>`;
+        return;
+    }
+
+    if (!filteredRows.length) {
+        body.innerHTML = `<tr><td colspan="21" class="critical-drawer-empty">No inactive critical machines match this search.</td></tr>`;
+        return;
+    }
+
+    body.innerHTML = filteredRows.map((row) => {
+        const issueCount = Number(row.issue_count || 1);
+        const relatedAssets = Array.isArray(row.related_assets) && row.related_assets.length
+            ? row.related_assets.join(", ")
+            : row.asset_id;
+        const machineLabel = `${row.display_machine || row.machine_name || "--"}${issueCount > 1 ? ` - ${issueCount} open issues` : ""}`;
+        const descriptionHtml = `
+            <div>${escapeHtml(row.description_original || row.description || "--")}</div>
+            ${row.description_english && row.description_english !== (row.description_original || row.description)
+                ? `<div class="critical-desc-translation">${escapeHtml(row.description_english)}</div>`
+                : ""}
+        `;
+        const issueDetails = issueCount > 1 ? `
+            <tr class="critical-issue-detail-row">
+                <td colspan="21">
+                    <details>
+                        <summary>${escapeHtml(machineLabel)} detail records</summary>
+                        <div class="critical-issue-list">
+                            ${(row.issues || []).map((issue) => `
+                                <div class="critical-issue-item">
+                                    <strong>${escapeHtml(issue.asset_id || "--")} / ${escapeHtml(issue.latest_wo || "--")}</strong>
+                                    <span>${escapeHtml([issue.machine_name, issue.latest_mr, issue.status, issue.mapping_confidence].filter(Boolean).join(" | "))}</span>
+                                    <span>${escapeHtml(issue.validation_flag || "No validation flag")}</span>
+                                </div>
+                            `).join("")}
+                        </div>
+                    </details>
+                </td>
+            </tr>
+        ` : "";
+        return `
+            <tr>
+                <td>${escapeHtml(issueCount > 1 ? relatedAssets : row.asset_id || "--")}</td>
+                <td>${escapeHtml(machineLabel)}</td>
+                <td>${escapeHtml(row.exact_machine_detected || "--")}</td>
+                <td>${escapeHtml([row.machine_group, row.category].filter(Boolean).join(" / ") || "--")}</td>
+                <td>${escapeHtml(row.stage || "--")}</td>
+                <td>${escapeHtml([row.functional_location, row.area].filter(Boolean).join(" / ") || "--")}</td>
+                <td>${escapeHtml(row.area_type || "--")}</td>
+                <td>${escapeHtml(row.critical_type || "--")}</td>
+                <td>${escapeHtml(row.mapping_confidence || "--")}</td>
+                <td>${escapeHtml(row.validation_flag || "--")}</td>
+                <td>${escapeHtml(row.latest_mr || "--")}</td>
+                <td>${escapeHtml(row.latest_wo || "--")}</td>
+                <td>${escapeHtml(row.status || "--")}</td>
+                <td>${escapeHtml(row.severity || "--")}</td>
+                <td>${escapeHtml(row.actual_start || "--")}</td>
+                <td>${escapeHtml(row.actual_end || "--")}</td>
+                <td>${escapeHtml(row.open_age_label || "--")}</td>
+                <td>${descriptionHtml}</td>
+                <td>${escapeHtml(row.problem_job_trade || "--")}</td>
+                <td>${escapeHtml(row.owner || "--")}</td>
+                <td><button type="button" class="critical-drilldown-btn" data-critical-asset-id="${escapeHtml(row.asset_id || "")}">Open</button></td>
+            </tr>
+            ${issueDetails}
+        `;
+    }).join("");
+}
+
+function drillIntoInactiveCriticalMachine(assetId) {
+    const normalizedAssetId = String(assetId || "").trim().toUpperCase();
+    if (!normalizedAssetId) return;
+    closeInactiveCriticalDrawer();
+    setPerformanceView("utilities");
+    machineExplorerSelectedGroup = MACHINE_EXPLORER_ALL_GROUP;
+    machineExplorerRefrigSubgroup = "";
+    machineExplorerRefrigCondenserGroupId = "";
+    machineExplorerRefrigExpandedCondensers = new Set();
+    machineExplorerSelectedAssetId = normalizedAssetId;
+    const groupSelect = document.getElementById("machine-explorer-group");
+    const assetSelect = document.getElementById("machine-explorer-asset");
+    const machineSelect = document.getElementById("machine-name-select");
+    if (groupSelect) groupSelect.value = MACHINE_EXPLORER_ALL_GROUP;
+    if (assetSelect) assetSelect.value = normalizedAssetId;
+    if (machineSelect) machineSelect.value = normalizedAssetId;
+    renderMachineExplorer(getCategoryScopedAllRows());
+    const section = document.querySelector(".machine-explorer-module, .machine-performance-card");
+    if (section) section.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function wireInactiveCriticalMachineDrawer() {
+    const trigger = document.getElementById("critical-inactive-trigger");
+    trigger?.addEventListener("click", openInactiveCriticalDrawer);
+    trigger?.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            openInactiveCriticalDrawer();
+        }
+    });
+    document.getElementById("inactive-critical-close")?.addEventListener("click", closeInactiveCriticalDrawer);
+    document.getElementById("inactive-critical-backdrop")?.addEventListener("click", closeInactiveCriticalDrawer);
+    document.getElementById("inactive-critical-refresh")?.addEventListener("click", () => {
+        refreshInactiveCriticalMachines({ force: true }).catch((error) => {
+            console.error("Inactive critical machine manual refresh failed:", error);
+        });
+    });
+    document.getElementById("inactive-critical-search")?.addEventListener("input", (event) => {
+        inactiveCriticalMachineSearch = event.target.value || "";
+        renderInactiveCriticalDrawer();
+    });
+    document.getElementById("inactive-critical-body")?.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-critical-asset-id]");
+        if (button) drillIntoInactiveCriticalMachine(button.dataset.criticalAssetId);
+    });
+    document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && isInactiveCriticalDrawerOpen()) closeInactiveCriticalDrawer();
+    });
 }
 
 function getWorkOrdersForAsset(assetId) {
@@ -10059,10 +10760,24 @@ function renderOpenWoKpi() {
 
 async function loadOpenWorkOrders() {
     try {
-        const response = await fetch("./open-workorders.json", { cache: "no-store" });
+        const response = await fetch(buildInactiveCriticalMachineApiUrl(), { cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const data = await response.json();
-        openWorkOrdersData = data.open_work_orders || [];
+        if (Array.isArray(data.open_work_orders)) {
+            openWorkOrdersData = data.open_work_orders;
+        } else {
+            const machines = Array.isArray(data.machines) ? data.machines : [];
+            openWorkOrdersData = machines.flatMap((machine) => {
+                const issues = Array.isArray(machine.issues) && machine.issues.length ? machine.issues : [machine];
+                return issues.map((issue) => ({
+                    ...issue,
+                    asset_id: issue.asset_id || machine.asset_id,
+                    asset_name: issue.machine_name || machine.machine_name || machine.display_machine,
+                    request_state: issue.request_state || issue.status || machine.status,
+                    actual_start: issue.actual_start || machine.actual_start,
+                }));
+            });
+        }
         openWorkOrdersLoaded = true;
         renderCurrentDowntimeKpi();
         if (assetListLoaded || assetListLoadFailed) renderActivityStatusCharts();
@@ -11304,6 +12019,7 @@ async function _runExport(btn) {
 async function init() {
     wireDashboardTopicControls();
     wireFilters();
+    wireInactiveCriticalMachineDrawer();
     setSummaryView("criticality");
     setPerformanceView("utilities");
     const period = document.getElementById("period-select")?.value || "ytd";
@@ -11351,149 +12067,72 @@ async function init() {
         renderAlerts([{ level: "critical", message: "Downtime data could not be loaded from the current imported work order source." }]);
     }
 
-    // Apply alert context from MIRA Overview action button if present.
-    applyMiraAlertContextToDowntime();
-}
-
-// ── MIRA Alert Context ────────────────────────────────────────────────────────
-// Reads alert context written to sessionStorage by the MIRA Overview action
-// buttons, shows a dismissable banner, and focuses the relevant section.
-
-const ALERT_CTX_KEY = "mira_alert_ctx";
-
-function applyMiraAlertContextToDowntime(ctx) {
-    try {
-        ctx = ctx || JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
-    } catch (_) { return; }
-    if (!ctx || ctx.page !== "downtime") return;
-
-    showMiraAlertBanner(ctx.alertDescription || "Showing records related to a Daily Action Alert.");
-
-    const focus = ctx.focus || ctx.navFocus;
-    if (focus === "machine_explorer") {
-        // Scroll the Machine Explorer section into view and optionally pre-set the
-        // status filter to highlight open/in-progress MR.
-        const machineSection = document.querySelector(".machine-explorer-module, .machine-performance-card");
-        if (machineSection) {
-            window.setTimeout(() => {
-                machineSection.scrollIntoView({ behavior: "smooth", block: "start" });
-            }, 350);
-        }
-        // Pre-select "Open" or "In Progress" status if the alert is for open MR.
-        if (ctx.statusFilter === "open") {
-            const statusSel = document.getElementById("machine-explorer-status");
-            if (statusSel && statusSel.options.length > 1) {
-                // Try to find an "Open" or "In Progress" option.
-                const openOpt = Array.from(statusSel.options).find(
-                    (o) => /^(open|new|in.?progress)$/i.test(o.value.trim())
-                );
-                if (openOpt) {
-                    statusSel.value = openOpt.value;
-                    statusSel.dispatchEvent(new Event("change", { bubbles: true }));
+    // Wire the "Repair PBI Flags" button in the data quality card.
+    const repairPbiFlagsBtn = document.getElementById("repair-pbi-flags-btn");
+    if (repairPbiFlagsBtn) {
+        repairPbiFlagsBtn.addEventListener("click", async () => {
+            repairPbiFlagsBtn.disabled = true;
+            repairPbiFlagsBtn.textContent = "Repairing…";
+            try {
+                const res = await fetch("/api/import/repair-quality-flags", { method: "POST" });
+                const data = await res.json();
+                if (data.ok) {
+                    repairPbiFlagsBtn.textContent = `Done (${data.repaired} fixed)`;
+                    await loadDowntimeData(
+                        document.getElementById("period-select")?.value || "ytd",
+                        downtimeStageFilter || ""
+                    );
+                } else {
+                    repairPbiFlagsBtn.textContent = "Failed";
+                    console.error("Repair failed:", data.message);
                 }
+            } catch (err) {
+                repairPbiFlagsBtn.textContent = "Error";
+                console.error("Repair PBI flags error:", err);
             }
-        }
-        // Apply stage filter from alert context (e.g. "Stage 1" / "Stage 2" / "all").
-        if (ctx.stageFilter && ctx.stageFilter !== "all") {
-            const stageSel = document.getElementById("downtime-stage-filter");
-            if (stageSel) {
-                stageSel.value = ctx.stageFilter;
-                stageSel.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-        }
-        // If we have a specific asset/area, apply it to the asset search/filter.
-        if (ctx.areaOrAsset) {
-            const assetSel = document.getElementById("machine-explorer-asset");
-            if (assetSel && assetSel.options.length > 1) {
-                const match = Array.from(assetSel.options).find(
-                    (o) => o.text.toLowerCase().includes(ctx.areaOrAsset.toLowerCase())
-                        || ctx.areaOrAsset.toLowerCase().includes(o.text.toLowerCase())
-                );
-                if (match) {
-                    assetSel.value = match.value;
-                    assetSel.dispatchEvent(new Event("change", { bubbles: true }));
-                }
-            }
-        }
-    } else if (focus === "data_reliability") {
-        // Switch to the Data Reliability topic panel in Downtime.
-        if (typeof setDashboardTopic === "function") setDashboardTopic("data-reliability");
-        if (ctx.stageFilter && ctx.stageFilter !== "all") {
-            const stageSel = document.getElementById("downtime-stage-filter");
-            if (stageSel) {
-                stageSel.value = ctx.stageFilter;
-                stageSel.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-        }
-        window.setTimeout(() => {
-            const panel = document.getElementById("topic-data-reliability");
-            if (panel) panel.scrollIntoView({ behavior: "smooth", block: "start" });
-        }, 300);
-    } else if (focus === "yearly_movement") {
-        // Switch to the Yearly MR Movement topic panel and pre-filter the
-        // Carry-over MR Breakdown table to match the alert (previous-year open MR).
-        if (typeof setDashboardTopic === "function") setDashboardTopic("yearly-movement");
-        // Apply stage filter first so the panel data loads scoped correctly.
-        if (ctx.stageFilter && ctx.stageFilter !== "all") {
-            const stageSel = document.getElementById("downtime-stage-filter");
-            if (stageSel) {
-                stageSel.value = ctx.stageFilter;
-                stageSel.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-        }
-        const filterValue = ctx.carryoverFilter || "previous_year_open";
-        window.setTimeout(() => {
-            const filterSel = document.getElementById("mr-carryover-filter");
-            if (filterSel) {
-                filterSel.value = filterValue;
-                filterSel.dispatchEvent(new Event("change", { bubbles: true }));
-            }
-            // Scroll to the Carry-over MR Breakdown table inside the yearly-movement panel.
-            const carryoverCard = document.querySelector(
-                "#topic-yearly-movement .mr-carryover-table-card"
-            );
-            if (carryoverCard) {
-                carryoverCard.scrollIntoView({ behavior: "smooth", block: "start" });
-            }
-        }, 300);
-    }
-}
-
-function showMiraAlertBanner(message) {
-    const banner = document.getElementById("mira-alert-ctx-banner");
-    const textEl = document.getElementById("mira-alert-ctx-text");
-    const clearBtn = document.getElementById("mira-alert-ctx-clear");
-    if (!banner || !textEl) return;
-    textEl.textContent = "Showing records related to Daily Action Alert: " + message;
-    banner.classList.remove("hidden");
-    if (clearBtn && !clearBtn.dataset.bound) {
-        clearBtn.dataset.bound = "true";
-        clearBtn.addEventListener("click", () => {
-            banner.classList.add("hidden");
-            try { sessionStorage.removeItem(ALERT_CTX_KEY); } catch (_) {}
-            // Reset filters applied by the alert.
-            const statusSel = document.getElementById("machine-explorer-status");
-            if (statusSel) { statusSel.value = ""; statusSel.dispatchEvent(new Event("change", { bubbles: true })); }
-            const assetSel = document.getElementById("machine-explorer-asset");
-            if (assetSel) { assetSel.value = ""; assetSel.dispatchEvent(new Event("change", { bubbles: true })); }
-            const stageSel = document.getElementById("downtime-stage-filter");
-            if (stageSel) { stageSel.value = "all"; stageSel.dispatchEvent(new Event("change", { bubbles: true })); }
-            const carryoverSel = document.getElementById("mr-carryover-filter");
-            if (carryoverSel) { carryoverSel.value = "all"; carryoverSel.dispatchEvent(new Event("change", { bubbles: true })); }
         });
     }
+
+    // Apply D365 lens URL params: maintType, zone, funcLoc
+    _applyMeLensUrlParams();
+
 }
 
-// Handle postMessage from the maintenance.html parent (when Downtime runs in an iframe
-// and was already loaded before the alert button was clicked).
-window.addEventListener("message", (event) => {
-    if (event.origin !== window.location.origin) return;
-    if (event.data?.type !== "mira_alert_focus") return;
-    try {
-        const ctx = JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
-        if (ctx && ctx.page === "downtime") applyMiraAlertContextToDowntime(ctx);
-    } catch (_) {}
-});
+function _applyMeLensUrlParams() {
+    const params = new URLSearchParams(window.location.search);
+    const maintType = params.get("maintType") || "";
+    const zone      = params.get("zone")      || "";
+    const funcLoc   = params.get("funcLoc")   || "";
+    if (!maintType && !zone && !funcLoc) return;
+
+    const mtSel = document.getElementById("me-maint-type");
+    const zoneSel = document.getElementById("me-zone");
+    const flSel = document.getElementById("me-func-loc");
+
+    if (maintType && mtSel) {
+        // maint_type is the full label (e.g. "Cooking Equipment"); maintType param uses the code (CE).
+        // Try code match first, then label match.
+        const opt = Array.from(mtSel.options).find(
+            (o) => o.value === maintType || (o.text && o.text.includes(`(${maintType})`))
+        );
+        if (opt) { mtSel.value = opt.value; meMainTypeFilter = opt.value; }
+    }
+    if (zone && zoneSel) {
+        const opt = Array.from(zoneSel.options).find((o) => o.value === zone);
+        if (opt) {
+            zoneSel.value = zone;
+            meZoneFilter = zone;
+            populateMeFuncLocSelect(getCategoryScopedAllRows(), zone);
+        }
+    }
+    if (funcLoc && flSel) {
+        const opt = Array.from(flSel.options).find((o) => o.value === funcLoc);
+        if (opt) { flSel.value = funcLoc; meFuncLocFilter = funcLoc; }
+    }
+    if (maintType || zone || funcLoc) {
+        renderMachineExplorer(getCategoryScopedAllRows());
+    }
+}
 
 function refreshCurrentView(options = {}) {
     const minRefreshGapMs = options.force ? 0 : 60000;

@@ -970,7 +970,6 @@ def _scope_section(tasks, *, scope, today, sel_year, sel_month, mapped_asset_tot
         "charts": charts,
         top_label: _counter_to_chart(top_counter, top=10),
         "tables": {
-            "all": all_rows[:1000],
             "allCount": len(all_rows),
             "overdue": overdue[:300],
             "dueSoon": due_soon[:300],
@@ -1005,7 +1004,6 @@ def _schedule_section(tasks) -> dict:
         "tasks": rows,
         "filterOptions": _schedule_filter_options(tasks),
         "tables": {
-            "all": rows,
             "allCount": len(rows),
             "overdue": overdue,
             "dueSoon": due_soon,
@@ -1048,6 +1046,7 @@ def build_pm_schedule_payload(stage="all", year=None, month=None, period_mode=No
     page_cache_key = (
         today.isoformat(), stage_filter, sel_year, sel_month,
         str(period_mode or ("monthly" if sel_month else "ytd")), str(start), str(end),
+        _pm_page_source_signature(),
     )
     cached_page = _PM_PAGE_PAYLOAD_CACHE.get(page_cache_key)
     if cached_page is not None:

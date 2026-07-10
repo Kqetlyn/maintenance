@@ -43,6 +43,9 @@
     const STATUS_BREAKDOWN_ORDER = ["Pending", "Done", "Backlog", "Deferred", "Not Applicable", "Cancelled"];
     const API = "/api/maintenance/pm-schedule";
     const COMPLIANCE_TARGET = 90;
+    const TABLE_RENDER_CHUNK_SIZE = 60;
+    const TASK_TABLE_RENDER_LIMIT = 300;
+    const DONE_TABLE_RENDER_LIMIT = 300;
 
     const charts = {};
     const state = {
@@ -57,9 +60,10 @@
         calendarDate: null,
         selectedDate: null,
         taskSearch: "",
-        taskMonth: "all",
+        taskMonth: String(new Date().getMonth() + 1),
         taskDateFrom: "",
         taskDateTo: "",
+        taskStatus: "all",
         doneSearch: "",
         monthFy: null,
         sortKey: "plannedDate",
@@ -262,87 +266,6 @@
         }
     }
 
-    // ── MIRA Alert Context ────────────────────────────────────────────────────
-    // Reads alert context from sessionStorage (set by MIRA Overview action buttons)
-    // and from mira:alert:navigate events dispatched in the same page.
-
-    const ALERT_CTX_KEY = "mira_alert_ctx";
-
-    function applyPmAlertContext(ctx) {
-        if (!ctx || ctx.page !== "pm_schedule") return;
-        showPmAlertBanner(ctx.alertDescription || "Showing records related to a Daily Action Alert.");
-        const focus = ctx.focus || ctx.navFocus;
-        if (focus === "task_list") {
-            const taskSection = document.getElementById("pm-task-list-section");
-            if (taskSection) {
-                window.setTimeout(() => taskSection.scrollIntoView({ behavior: "smooth", block: "start" }), 200);
-            }
-            if (ctx.statusFilter === "Overdue") {
-                // Filter the task list to show only overdue items by applying a search term
-                // that the task list filters on opStatus (displayStatus).
-                state.taskSearch = "Overdue";
-                const searchEl = el("pm-task-search");
-                if (searchEl) searchEl.value = "Overdue";
-                if (ctx.sortKey === "plannedDate") {
-                    state.sortKey = "plannedDate";
-                    state.sortDir = ctx.sortDir || 1;
-                }
-                renderTaskList();
-            }
-        } else if (focus === "pm_calendar") {
-            const calSection = document.getElementById("pm-calendar-section");
-            if (calSection) {
-                window.setTimeout(() => calSection.scrollIntoView({ behavior: "smooth", block: "start" }), 200);
-            }
-        }
-    }
-
-    function showPmAlertBanner(message) {
-        let banner = document.getElementById("mira-alert-pm-banner");
-        if (!banner) {
-            banner = document.createElement("div");
-            banner.id = "mira-alert-pm-banner";
-            banner.className = "mira-alert-ctx-banner";
-            banner.setAttribute("role", "status");
-            const taskSection = document.getElementById("pm-task-list-section");
-            const parent = taskSection ? taskSection.parentNode : document.getElementById("pm-overview");
-            if (parent && taskSection) parent.insertBefore(banner, taskSection);
-            else if (parent) parent.prepend(banner);
-        }
-        banner.innerHTML =
-            `<span class="mira-alert-ctx-icon">&#9432;</span>` +
-            `<span class="mira-alert-ctx-text">Showing records related to Daily Action Alert: ${message.replace(/</g,"&lt;")}</span>` +
-            `<button type="button" class="mira-alert-ctx-clear">Clear alert filter</button>`;
-        banner.classList.remove("hidden");
-        banner.querySelector(".mira-alert-ctx-clear").addEventListener("click", () => {
-            banner.classList.add("hidden");
-            try { sessionStorage.removeItem(ALERT_CTX_KEY); } catch (_) {}
-            state.taskSearch = "";
-            const searchEl = el("pm-task-search");
-            if (searchEl) searchEl.value = "";
-            renderTaskList();
-        });
-    }
-
-    // Apply on initial load if context was set before the page loaded.
-    document.addEventListener("DOMContentLoaded", () => {
-        window.setTimeout(() => {
-            try {
-                const ctx = JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
-                applyPmAlertContext(ctx);
-            } catch (_) {}
-        }, 600);
-    });
-
-    // Apply when the MIRA Overview dispatches a same-page navigation event.
-    document.addEventListener("mira:alert:navigate", (event) => {
-        if (!event.detail || event.detail.target !== "pm") return;
-        try {
-            const ctx = JSON.parse(sessionStorage.getItem(ALERT_CTX_KEY) || "null");
-            applyPmAlertContext(ctx);
-        } catch (_) {}
-    });
-
     function syncYearSelect(meta) {
         if (!meta) return;
         state.queryYear = String(meta.year || state.queryYear || new Date().getFullYear());
@@ -423,7 +346,7 @@
             scope: String(state.queryScope || "all").toLowerCase(),
             system: "all",
             assetGroup: "all",
-            status: "all",
+            status: state.taskStatus || "all",
         };
     }
 
@@ -521,6 +444,49 @@
         let timer = null;
         return (...args) => { window.clearTimeout(timer); timer = window.setTimeout(() => fn(...args), wait); };
     }
+    function scheduleRenderChunk(fn) {
+        if (typeof window.requestIdleCallback === "function") {
+            window.requestIdleCallback(fn, { timeout: 120 });
+            return;
+        }
+        window.setTimeout(fn, 16);
+    }
+    function renderTableRowsChunked(body, rows, { limit, colSpan, emptyHtml, rowHtml, moreLabel }) {
+        if (!body) return;
+        const token = `${Date.now()}-${Math.random()}`;
+        body.dataset.renderToken = token;
+        if (!rows.length) {
+            body.innerHTML = emptyHtml;
+            return;
+        }
+
+        const visibleRows = rows.slice(0, limit);
+        let index = 0;
+        let started = false;
+        body.innerHTML = `<tr><td colspan="${colSpan}" class="empty-row">Rendering ${fmt(visibleRows.length)} PM records...</td></tr>`;
+
+        function appendChunk() {
+            if (body.dataset.renderToken !== token) return;
+            if (!started) {
+                body.innerHTML = "";
+                started = true;
+            }
+            const end = Math.min(index + TABLE_RENDER_CHUNK_SIZE, visibleRows.length);
+            let html = "";
+            for (; index < end; index += 1) html += rowHtml(visibleRows[index]);
+            if (html) body.insertAdjacentHTML("beforeend", html);
+            if (index < visibleRows.length) {
+                scheduleRenderChunk(appendChunk);
+                return;
+            }
+            if (rows.length > limit) {
+                body.insertAdjacentHTML("beforeend",
+                    `<tr><td colspan="${colSpan}" class="empty-row">${esc(moreLabel(rows.length, limit))}</td></tr>`);
+            }
+        }
+
+        scheduleRenderChunk(appendChunk);
+    }
 
     function countBy(rows, keyFn) {
         const counts = {};
@@ -568,9 +534,13 @@
         hydratePmFilterOptions();
         renderOverview();
         renderCalendar();
-        renderTaskList();
-        renderDoneList();
-        renderAnalysisCharts();
+        // Defer table + chart rendering to avoid blocking the main thread for
+        // 5+ seconds when the payload is large (triggers Chrome "not responding").
+        setTimeout(function () {
+            renderTaskList();
+            renderDoneList();
+            setTimeout(renderAnalysisCharts, 0);
+        }, 0);
     }
 
     function renderSourceSummary() {
@@ -943,10 +913,16 @@
             body.innerHTML = `<tr><td colspan="${TABLE_COLS.length}" class="empty-row">No PM tasks match the current filters.</td></tr>`;
             return;
         }
-        body.innerHTML = rows.slice(0, 1000).map((task) => {
-            const rowClass = isOverdueOp(task) ? "pm-row-overdue" : (isBacklogTask(task) ? "pm-row-backlog" : "");
-            return `<tr class="${rowClass}">${TABLE_COLS.map(([key]) => taskCell(key, task)).join("")}</tr>`;
-        }).join("");
+        renderTableRowsChunked(body, rows, {
+            limit: TASK_TABLE_RENDER_LIMIT,
+            colSpan: TABLE_COLS.length,
+            emptyHtml: `<tr><td colspan="${TABLE_COLS.length}" class="empty-row">No PM tasks match the current filters.</td></tr>`,
+            moreLabel: (total, limit) => `Showing first ${limit.toLocaleString()} of ${total.toLocaleString()} PM records. Use search, month, or date filters to narrow the list.`,
+            rowHtml: (task) => {
+                const rowClass = isOverdueOp(task) ? "pm-row-overdue" : (isBacklogTask(task) ? "pm-row-backlog" : "");
+                return `<tr class="${rowClass}">${TABLE_COLS.map(([key]) => taskCell(key, task)).join("")}</tr>`;
+            },
+        });
     }
 
     function sortRows(rows) {
@@ -1013,7 +989,13 @@
             body.innerHTML = `<tr><td colspan="${DONE_COLS.length}" class="empty-row">No PM are marked as Done for the current Stage / Year. Mark a PM Done from the Task List or calendar and it will appear here for review.</td></tr>`;
             return;
         }
-        body.innerHTML = rows.slice(0, 1000).map((task) => `<tr>${DONE_COLS.map(([key]) => doneCell(key, task)).join("")}</tr>`).join("");
+        renderTableRowsChunked(body, rows, {
+            limit: DONE_TABLE_RENDER_LIMIT,
+            colSpan: DONE_COLS.length,
+            emptyHtml: `<tr><td colspan="${DONE_COLS.length}" class="empty-row">No PM are marked as Done for the current Stage / Year. Mark a PM Done from the Task List or calendar and it will appear here for review.</td></tr>`,
+            moreLabel: (total, limit) => `Showing first ${limit.toLocaleString()} of ${total.toLocaleString()} completed PM records. Use search to narrow the review list.`,
+            rowHtml: (task) => `<tr>${DONE_COLS.map(([key]) => doneCell(key, task)).join("")}</tr>`,
+        });
     }
 
     function doneCell(key, task) {
@@ -1504,6 +1486,21 @@
             if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Add PM Task"; }
         }
     }
+
+    // Entry point for the MIRA Overview "Daily Action Alerts" cards — jumps to the
+    // task list, applies the requested status filter/sort, and scrolls it into view.
+    window.pmScheduleFocusTaskList = function pmScheduleFocusTaskList(options) {
+        const opts = options || {};
+        if (opts.statusFilter) {
+            state.taskStatus = opts.statusFilter === "Overdue" ? "Overdue" : "all";
+        }
+        if (opts.sortKey) {
+            state.sortKey = opts.sortKey;
+            state.sortDir = opts.sortDir === -1 ? -1 : 1;
+        }
+        renderTaskList();
+        el("pm-task-list-section")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    };
 
     // ── Small utils ──────────────────────────────────────────────────────────
     function esc(value) {
