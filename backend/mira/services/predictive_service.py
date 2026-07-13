@@ -3457,12 +3457,33 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
         if score <= 0:
             continue
 
+        # Next-likely-occurrence: needs the full available history for this
+        # specific issue on this asset, not just the 30-day scoring window
+        # (current_rows/issue_rows above) — a handful of same-week WOs give a
+        # wildly short, meaningless gap. Re-classify this asset's whole row
+        # set (rows, not current_rows) against the same issue label so gaps
+        # are measured across its real recurrence history.
+        next_occurrence = None
+        if latest_issue and latest_issue != "Unclassified":
+            full_issue_rows = [
+                r for r in rows
+                if classify_specific_issue(_row_issue_text(r) or _row_description(r)) == latest_issue
+            ]
+            recurrence = _compute_recurrence_v2(full_issue_rows)
+            if len(recurrence.get("clean_gaps") or []) >= 3:
+                next_occurrence = {
+                    "label": _recurrence_window_label_v2(recurrence, today),
+                    "median_gap_days": recurrence.get("median_gap"),
+                    "based_on_cycles": recurrence.get("cycles"),
+                }
+
         latest_pattern = {
             "issue": latest_issue or "Unclassified",
             "count": int(repeated_issue[1]) if repeated_issue else 1,
             "latest_date": (_occurrence_date(latest_issue_row).isoformat() if _occurrence_date(latest_issue_row) else None),
             "latest_description": _clean_issue_phrase(_row_issue_text(latest_issue_row) or _row_description(latest_issue_row), max_words=18),
             "keywords": _extract_issue_tokens(issue_rows or [latest_issue_row], latest_issue or ""),
+            "next_likely_occurrence": next_occurrence,
         }
         card = {
             "asset_name": entry["asset_name"],

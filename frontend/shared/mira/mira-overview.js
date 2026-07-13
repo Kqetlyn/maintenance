@@ -1195,6 +1195,13 @@
         patternSec.append(_drawerKV("Similar cases", pattern.count != null ? pattern.count : "Not available"));
         patternSec.append(_drawerKV("Latest observed date", pattern.latest_date || "Not available"));
         patternSec.append(_drawerKV("Description", pattern.latest_description || "Not available"));
+        const nextOcc = pattern.next_likely_occurrence;
+        patternSec.append(_drawerKV(
+            "Next likely occurrence",
+            nextOcc && nextOcc.label
+                ? `${nextOcc.label} (based on ${nextOcc.based_on_cycles} past cycles, median ${nextOcc.median_gap_days}d apart)`
+                : "Not enough recurrence history to estimate"
+        ));
         wrap.append(patternSec);
 
         // C. Current Maintenance Status
@@ -3384,10 +3391,12 @@
         const predCardsAll = Array.isArray(pred.cards) ? [...pred.cards].sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0)) : [];
         const _cardToPdfRow = (c, i) => {
             const pat = c.latest_recurring_issue_pattern || {};
+            const nextOcc = pat.next_likely_occurrence;
             return {
                 rank: i + 1,
                 machine: c.asset_name || c.machine_group || "—",
                 issue: pat.issue || "—",
+                nextLikely: (nextOcc && nextOcc.label) || "Not enough recurrence history",
                 riskLevel: c.risk_level || "—",
                 riskScore: c.risk_score,
                 isCritical: (c.main_signals || []).some(s => s.label === "Asset marked critical"),
@@ -3728,6 +3737,8 @@
             const isCritical = (c.main_signals || []).some(s => s.label === "Asset marked critical");
             const sig = [(pat.count || 1) + " occurrence" + (pat.count === 1 ? "" : "s")];
             if (pat.latest_date) sig.push("Last " + String(pat.latest_date).slice(0, 10));
+            const nextOcc = pat.next_likely_occurrence;
+            if (nextOcc && nextOcc.label) sig.push(nextOcc.label);
             return {
                 rank:        rank,
                 category:    c.category || "—",
@@ -3737,6 +3748,7 @@
                 issue:       _ovTrunc(pat.issue || "—", 48),
                 description: _ovTrunc(pat.latest_description || "", 64),
                 signal:      sig.join(" \xb7 "),
+                nextLikely:  (nextOcc && nextOcc.label) || "Not enough recurrence history",
                 openWoSummary: _ovTrunc(openStatus.summary || "No aged open WO signal.", 40),
                 suggestedAction: _ovTrunc(c.suggested_maintenance_action || "—", 46),
                 isCritical,
@@ -4187,7 +4199,8 @@
         s5.addShape(pptx.ShapeType.roundRect, { x: 0.18, y: ps3Y + 0.28, w: 6.30, h: 1.00, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
         s5.addText("Top Recurring Issue:", { x: 0.32, y: ps3Y + 0.36, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
         s5.addText(ps.recurringIssue, { x: 0.32, y: ps3Y + 0.58, w: 6.0, h: 0.30, fontSize: 10, bold: true, color: OVC.accent, fontFace: FF });
-        const psRfMachine = (R.recurringForecast[0] && R.recurringForecast[0].machine) || "";
+        const topRf = R.recurringForecast[0];
+        const psRfMachine = topRf ? topRf.machine + (topRf.nextLikely ? "  \xb7  " + topRf.nextLikely : "") : "";
         if (psRfMachine) s5.addText(psRfMachine, { x: 0.32, y: ps3Y + 0.88, w: 6.0, h: 0.20, fontSize: 7.5, color: OVC.slate, fontFace: FF });
         s5.addShape(pptx.ShapeType.roundRect, { x: 6.85, y: ps3Y + 0.28, w: 6.30, h: 1.00, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
         s5.addText("MTTR / MTBF Data Coverage:", { x: 6.99, y: ps3Y + 0.36, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
@@ -4449,11 +4462,11 @@
         }</tbody></table>` : `<p class="mu">No active alerts for this period.</p>`;
 
         const machHtml = activeCat && activeCat.top_machines && activeCat.top_machines.length
-            ? `<table class="mtbl"><thead><tr><th>#</th><th>Machine</th><th>Issue Signature</th><th>Risk</th><th>Suggested Action</th></tr></thead><tbody>${
+            ? `<table class="mtbl"><thead><tr><th>#</th><th>Machine</th><th>Issue Signature</th><th>Next Likely</th><th>Risk</th><th>Suggested Action</th></tr></thead><tbody>${
                 activeCat.top_machines.slice(0, 5).map(m => {
                     const cc = m.riskLevel === "High" ? "#dc2626" : m.riskLevel === "Medium" ? "#d97706" : "#16a34a";
                     const riskLabel = m.riskLevel + (m.riskScore != null ? ` (${m.riskScore}/10)` : "");
-                    return `<tr><td>${m.rank || ""}</td><td>${_ovEsc(m.machine)}${m.isCritical ? " <b class='cb'>Crit</b>" : ""}</td><td style="color:#4f46e5">${_ovEsc(m.issue)}</td><td style="color:${cc};font-weight:700">${_ovEsc(riskLabel)}</td><td class="mu">${_ovEsc(m.suggestedAction)}</td></tr>`;
+                    return `<tr><td>${m.rank || ""}</td><td>${_ovEsc(m.machine)}${m.isCritical ? " <b class='cb'>Crit</b>" : ""}</td><td style="color:#4f46e5">${_ovEsc(m.issue)}</td><td class="mu">${_ovEsc(m.nextLikely)}</td><td style="color:${cc};font-weight:700">${_ovEsc(riskLabel)}</td><td class="mu">${_ovEsc(m.suggestedAction)}</td></tr>`;
                 }).join("")
             }</tbody></table><p class="mu" style="margin-top:5px">Technician/Engineer verification required before action.</p>`
             : `<p class="mu">No risk-scored assets for this period.</p>`;
