@@ -3553,25 +3553,27 @@
 
         // ── MR action-needed filter (broad — same logic as the dashboard) ────
         // Backend sets is_open=true and acknowledgement_status="Pending" for open records.
-        // status_category="Open" is the canonical indicator. Fall through to status text.
+        // status_category="Open" is the canonical indicator. request_state ("Finished",
+        // "In Progress", "New", "Rejected") is the actual per-row status field on this
+        // row shape — there is no plain "status" field on it.
         const _isActionNeeded = (r) => {
             if (r.is_open === true) return true;
             const cat = String(r.status_category || "").toLowerCase();
             if (cat === "open") return true;
-            const st = String(r.status || "").toLowerCase();
+            const st = String(r.request_state || "").toLowerCase();
             if (/\b(new|open|in.?progress|pending|awaiting|backlog)\b/.test(st)) return true;
             const ack = String(r.acknowledgement_status || "").toLowerCase();
             if (ack === "pending" || ack.includes("awaiting") || ack === "not acknowledged") return true;
             return false;
         };
         const _mrToRow = (r) => ({
-            mrNo:        _ovTrunc(r.maintenance_order_id || r.request_id || r.mr_id || r.mr_number || "—", 22),
+            mrNo:        _ovTrunc(r.request_id || r.maintenance_order_id || r.mr_id || r.mr_number || "—", 22),
             woNo:        _ovTrunc(r.work_order_id || r.wo_id || "—", 22),
-            machine:     _ovTrunc(r.asset_name || r.mappedAssetName || r.machine_group || r.functional_location || "—", 42),
-            severity:    r.severity || r.fallback_severity || "—",
-            daysWaiting: daysAgo(r.created_date || r.start_time),
-            status:      _ovTrunc(r.status || "—", 22),
-            raisedDate:  String(r.created_date || r.start_time || "").slice(0, 10),
+            machine:     _ovTrunc(r.asset_display_name || r.machine_name || r.machine_equipment_name || r.machine_group || r.raw_functional_location || "—", 42),
+            severity:    r.criticality || r.normalized_criticality || "—",
+            daysWaiting: daysAgo(r.request_created_time || r.start_time),
+            status:      _ovTrunc(r.request_state || r.status_category || "—", 22),
+            raisedDate:  String(r.request_created_time || r.start_time || "").slice(0, 10),
             description: _ovTrunc(r.translated_description || r.description || "—", 60),
         });
 
@@ -3584,7 +3586,7 @@
             _mrFallback = true;
             window.console.warn("[PPT] MR mismatch: KPI open=" + (wo.open || 0) + " but filter returned 0. Using non-closed records as fallback.");
             actionRows = mrRows.filter(r => {
-                const st = String(r.status || "").toLowerCase();
+                const st = String(r.request_state || r.status_category || "").toLowerCase();
                 return !/\b(closed|confirmed|resolved|done|finished|completed)\b/.test(st);
             }).map(_mrToRow);
             window.console.debug("[PPT] MR fallback rows:", actionRows.length);
@@ -3618,24 +3620,23 @@
             if (/clean|dirty|ล้าง|ทำความสะอาด/.test(t))                                    return "Cleaning / hygiene";
             return "Other maintenance";
         };
-        // _getMg: prefer machine_family (canonical specific group, e.g. "Combi Oven")
-        // over broad machine_group (e.g. "Production Equipment").
-        // Also strip trailing unit numbers from asset_name as a frontend fallback.
+        // _getMg: this row shape has no dedicated "machine family" field (machine_group/
+        // equipment_category/building are all just the broad category, e.g. "Production
+        // Equipment") — derive a specific group by stripping the trailing unit number off
+        // the specific asset name instead (e.g. "Combi oven No.1" -> "Combi oven"), same
+        // idea the old machine_family field was meant to provide.
         const _stripUnit = (s) => String(s || "").replace(/\s+(?:no\.?\s*|#\s*|unit\s*|-\s*)?\d+[\w-]*$/i, "").trim();
         const _BROAD_MG = /^(production equipment|facility[/ ]*building|facility|utilities|refrigeration|unknown|unmapped|review|unclassified)$/i;
+        const _getSpecificAssetName = (r) => r.asset_display_name || r.machine_name || r.machine_equipment_name || "";
         const _getMg = (r) => {
-            const mf = r.machine_family;
-            if (mf && !_BROAD_MG.test(mf)) return mf;
-            const mmg = r.mappedMachineGroup || r.asset_machine_group;
-            if (mmg && !_BROAD_MG.test(mmg)) return mmg;
-            const an = r.asset_name || r.mappedAssetName;
+            const an = _getSpecificAssetName(r);
             const stripped = an ? _stripUnit(an) : "";
             if (stripped && !_BROAD_MG.test(stripped) && stripped.length >= 3) return stripped;
-            const mg = r.machine_group || r.mainAssetGroup;
+            const mg = r.machine_group || r.equipment_category || r.building;
             if (mg && !_BROAD_MG.test(mg)) return mg;
-            return r.functional_location || "Unmapped / Review";
+            return r.raw_functional_location || "Unmapped / Review";
         };
-        const _getAn = (r) => r.asset_name || r.mappedAssetName || r.asset_id || "Unknown";
+        const _getAn = (r) => _getSpecificAssetName(r) || r.asset_id || "Unknown";
 
         const mttrByGroup = (() => {
             const groups = {};
@@ -4329,9 +4330,6 @@
             });
         });
 
-        // Footer note
-        s6.addText("Data based on selected dashboard period and filters. Technician/Engineer verification required before action.",
-            { x: 0.18, y: 7.15, w: 13.0, h: 0.16, fontSize: 6.5, color: OVC.sub, italic: true, fontFace: FF });
         foot(s6);
 
         const fileName = "Maintenance_Overview_Report_" + (R.filters.label || "YTD").replace(/[\s/]/g, "_") + ".pptx";
