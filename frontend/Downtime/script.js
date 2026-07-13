@@ -9552,6 +9552,13 @@ async function handleWorkOrderImport(event) {
         );
         await loadWorkOrderImportStatus();
         setImportStatus(`${result.message || "Work order file imported."} Page data refreshed.`, "ok");
+        // Notify the parent Maintenance page (this page runs embedded in an
+        // iframe there) so it can auto-refresh and re-export the management
+        // PPT if the Overview tab has already been loaded this session — see
+        // bindDowntimeEmbedFrame() in Maintenance/script.js for the listener.
+        if (window.parent && window.parent !== window) {
+            window.parent.postMessage({ type: "maintenance-work-order-imported" }, window.location.origin);
+        }
     } catch (error) {
         console.error("Work order import failed:", error);
         setImportStatus(`Import failed: ${error.message}`, "error");

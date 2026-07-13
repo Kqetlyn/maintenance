@@ -628,9 +628,14 @@ document.addEventListener("DOMContentLoaded", () => {
 
         window.addEventListener("message", (event) => {
             if (event.origin !== window.location.origin) return;
-            if (event.data?.type !== "maintenance-downtime-height") return;
-            const nextHeight = Math.max(Number(event.data.height) || 0, 900);
-            frame.style.height = `${nextHeight}px`;
+            if (event.data?.type === "maintenance-downtime-height") {
+                const nextHeight = Math.max(Number(event.data.height) || 0, 900);
+                frame.style.height = `${nextHeight}px`;
+                return;
+            }
+            if (event.data?.type === "maintenance-work-order-imported") {
+                window.miraOverviewAutoExportPptAfterImport?.();
+            }
         });
 
         window.addEventListener("resize", debounce(syncHeight, 120));

@@ -17,6 +17,8 @@
     let mounted = false;
     let loadToken = 0;
     let lastOverview = null;        // cached verified payload for duplicate-load guard
+    let overviewLoadVersion = 0;    // bumped whenever lastOverview is (re)set — lets callers await a fresh load
+    let predictiveLoadVersion = 0;  // bumped whenever predictiveLatestPayload is (re)set
     let overviewAbort = null;
     let aiAbort = null;
     let inFlightSignature = "";
@@ -570,6 +572,7 @@
 
     function _renderPredRiskCards(d) {
         predictiveLatestPayload = d;
+        predictiveLoadVersion += 1;
         _assetDetailCache = new Map();
         const body = document.getElementById("mira-pred-cats-body");
         const rulesBody = document.getElementById("mira-pred-fault-body");
@@ -2193,6 +2196,7 @@
         if (!host) return;
         host.innerHTML = "";
         predictiveLatestPayload = d;
+        predictiveLoadVersion += 1;
         _renderPredKpiStrip(d);
         if (d.empty || !d.categories || !d.categories.length) {
             host.innerHTML = "<p class=\"mira-ov-muted\">No data for this period.</p>";
@@ -3192,6 +3196,7 @@
         const showWarmState = availability.complete === false && !hasUsableOverviewData(data, sections);
         const valueSource = showWarmState ? "warming-fallback" : availability.complete === false ? "partial-real-data" : "real-data";
         lastOverview = { data, pres };
+        overviewLoadVersion += 1;
 
         // Status
         const status = deriveStatus(data);
@@ -3373,10 +3378,29 @@
             });
         }
 
-        const predCategories = (pred.categories || []).filter(c => c.name === "Production Equipment" || c.name === "Utilities" || c.name === "Refrigeration");
-        const faultPattern = pred.fault_pattern || null;
-        const dataConfidence = pred.data_confidence || {};
-        const predKpiStrip = (document.getElementById("mira-pred-kpi-strip") || {}).textContent || "";
+        // Same live cards payload the PPT export reads (see buildPptReportData) —
+        // "categories"/"top_machines" belonged to a predictive-insights shape
+        // this app no longer returns.
+        const predCardsAll = Array.isArray(pred.cards) ? [...pred.cards].sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0)) : [];
+        const _cardToPdfRow = (c, i) => {
+            const pat = c.latest_recurring_issue_pattern || {};
+            return {
+                rank: i + 1,
+                machine: c.asset_name || c.machine_group || "—",
+                issue: pat.issue || "—",
+                riskLevel: c.risk_level || "—",
+                riskScore: c.risk_score,
+                isCritical: (c.main_signals || []).some(s => s.label === "Asset marked critical"),
+                suggestedAction: c.suggested_maintenance_action || "—",
+            };
+        };
+        const predCategories = ["Production Equipment", "Utilities", "Refrigeration"].map((catName) => {
+            const catCards = predCardsAll.filter((c) => c.category === catName);
+            return { name: catName, top_machines: catCards.slice(0, 5).map(_cardToPdfRow) };
+        });
+        const faultPattern = _buildFaultPatternSummary(predCardsAll);
+        const dataConfidence = _buildAssessmentCoverage(pred, predCardsAll);
+        const predKpiStrip = _buildPredKpiStripText(pred, predCardsAll);
 
         return {
             filters: { periodMode: state.periodMode, year: state.year, month: state.month, stage: state.stage, label: vdu.period_label || periodLabel(), dateRange: vdu.date_range || "" },
@@ -3395,32 +3419,6 @@
         };
     }
 
-    function _forecastPartsToPrepare(m) {
-        return (m && (m.spare_parts_to_prepare || m.suggested_spare_parts || m.spare_parts)) || [];
-    }
-
-    function _forecastPartNames(m, limit) {
-        var parts = _forecastPartsToPrepare(m).slice(0, limit || 3).map(function(p) {
-            return p && (p.label || p.name || p.part_name || p.item_code);
-        }).filter(Boolean);
-        return parts.join(", ") || "Verify manually";
-    }
-
-    function _forecastPurchaseStatus(m) {
-        var parts = _forecastPartsToPrepare(m);
-        if (!parts.length) return "Check store / verify manually";
-        if (parts.some(function(p) { return /purchase required|reorder/i.test(String(p.stock_status || p.purchase_recommendation || "")); })) {
-            return "Purchase required";
-        }
-        if (parts.some(function(p) { return /check store|not confirmed/i.test(String(p.stock_status || p.purchase_recommendation || "")); })) {
-            return "Check store";
-        }
-        if (parts.every(function(p) { return /in stock/i.test(String(p.stock_status || "")); })) {
-            return "Not required";
-        }
-        return "Check store / verify manually";
-    }
-
     // ── PPT helpers ────────────────────────────────────────────────────────────
     function _ovFmt(v) {
         if (v === null || v === undefined) return "—";
@@ -3430,6 +3428,58 @@
     function _ovTrunc(s, n) {
         const t = String(s || "").trim();
         return t.length > n ? t.slice(0, n - 1) + "…" : (t || "—");
+    }
+
+    // Most common recurring-issue category across all current risk cards —
+    // the closest honest equivalent to the old backend's single "dominant
+    // fault pattern" field, computed here since the live risk-cards payload
+    // doesn't provide one directly.
+    function _buildFaultPatternSummary(cards) {
+        const counts = {};
+        (cards || []).forEach((c) => {
+            const issue = (c.latest_recurring_issue_pattern || {}).issue;
+            if (issue && issue !== "Unclassified") counts[issue] = (counts[issue] || 0) + 1;
+        });
+        const top = Object.entries(counts).sort((a, b) => b[1] - a[1])[0];
+        if (!top) return { empty: true };
+        const groups = [...new Set(
+            (cards || [])
+                .filter((c) => (c.latest_recurring_issue_pattern || {}).issue === top[0])
+                .map((c) => c.machine_group)
+                .filter(Boolean)
+        )];
+        return {
+            fault_family: top[0],
+            count: top[1],
+            pct_of_total: cards.length ? Math.round((top[1] / cards.length) * 100) : 0,
+            affected_groups: groups,
+        };
+    }
+
+    // Replaces the old backend's "data confidence" (asset-mapping/date-
+    // completeness quality) with what the live risk-cards payload actually
+    // reports: how much of the asset base got assessed and how many produced
+    // an active risk signal. Different meaning, so the slide title/labels
+    // are adjusted alongside this — not a like-for-like substitution.
+    function _buildAssessmentCoverage(pred, cards) {
+        const assessed = pred.assets_assessed;
+        const scored = pred.scored_assets;
+        if (assessed == null) return { band: null, label: "Assessment coverage unavailable.", riskCounts: null };
+        const ratio = assessed ? (scored || 0) / assessed : 0;
+        const band = ratio >= 0.5 ? "High" : ratio >= 0.25 ? "Medium" : "Low";
+        const riskCounts = { High: 0, Medium: 0, Low: 0 };
+        (cards || []).forEach((c) => { if (riskCounts[c.risk_level] != null) riskCounts[c.risk_level] += 1; });
+        return {
+            band,
+            label: `${scored || 0} of ${assessed} assessed asset(s) have an active risk signal`,
+            riskCounts,
+        };
+    }
+
+    function _buildPredKpiStripText(pred, cards) {
+        if (pred.assets_assessed == null) return "";
+        const highRisk = (cards || []).filter((c) => c.risk_level === "High").length;
+        return `Assets Assessed: ${pred.assets_assessed}  \xb7  With Risk Signals: ${pred.scored_assets || 0}  \xb7  High Risk: ${highRisk}  \xb7  Period: ${pred.period || "—"}`;
     }
 
     // ── Build PPT data (async — fetches MR + PM rows) ─────────────────────────
@@ -3661,45 +3711,45 @@
             return acc;
         }, []);
 
-        const activeCat = (pred.categories || []).find(c => c.name === predictiveCategoryView) || (pred.categories || [])[0];
-        const _rfToRow = (m, categoryName) => {
-            const cnt = m.history_issue_count || m.dominant_count || m.mr_count || 0;
-            const total = m.history_mr_count || m.mr_count || cnt;
-            const t = m.timing || {};
-            const sig = [cnt + " cycle" + (cnt !== 1 ? "s" : "")];
-            const ld = m.cluster_last_occurrence || m.last_occurrence;
-            if (ld) sig.push("Last " + String(ld).slice(0, 10));
-            if (t.median_gap_days != null) sig.push("~" + t.median_gap_days + "d gap");
-            const spareParts = (m.spare_parts_to_prepare || m.spare_parts || []).slice(0, 2)
-                .map(p => _ovTrunc(p.label || p.part_name || p.name || "", 16)).filter(Boolean);
-            const issue = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
-            const pct = m.recurring_pct != null ? m.recurring_pct : null;
+        // ── Predictive Insights rows ─────────────────────────────────────────
+        // pred is the live risk-cards payload (predictiveLatestPayload — set by
+        // _renderPredRiskCards from /api/mira/predictive's current response
+        // shape: {cards: [...], assets_assessed, scored_assets, risk_rules,
+        // period}). There is no "pred.categories"/"top_machines" shape anymore
+        // — that belonged to a predictive-insights model this app no longer
+        // uses. Build report rows straight from the cards each risk card
+        // already carries (main_signals, latest_recurring_issue_pattern,
+        // open_wo_status, suggested_maintenance_action) rather than reading
+        // fields that were never part of the current API.
+        const predCards = Array.isArray(pred.cards) ? pred.cards : [];
+        const _cardToRfRow = (c, rank) => {
+            const pat = c.latest_recurring_issue_pattern || {};
+            const openStatus = c.open_wo_status || {};
+            const isCritical = (c.main_signals || []).some(s => s.label === "Asset marked critical");
+            const sig = [(pat.count || 1) + " occurrence" + (pat.count === 1 ? "" : "s")];
+            if (pat.latest_date) sig.push("Last " + String(pat.latest_date).slice(0, 10));
             return {
-                rank:        m.rank || "",
-                category:    categoryName || m.category || "—",
-                machine:     _ovTrunc(m.unit || m.specific_machine_group || m.machine_group || "—", 36),
-                patternType: m.pattern_type || "—",
-                isPreventive: !!m.is_preventive,
-                issue:       _ovTrunc(issue, 48),
-                patternLine: _ovTrunc((m.pattern_type || "—") + " · " + cnt + " of " + total + " history MRs" + (pct != null ? " · " + pct + "%" : ""), 70),
-                description: _ovTrunc(m.latest_issue_description || m.matched_wording || "", 64),
-                historyMrCount: total,
-                historyIssueCount: cnt,
-                historyPct: pct,
-                signal:      m.pattern_signal || sig.join(" \xb7 "),
-                nextWindow:  m.likely_recurrence_label || m.recurrence_gauge || "—",
-                confidence:  m.confidence || "—",
-                spare:       _ovTrunc(spareParts.join(", ") || "—", 28),
-                isCritical:  !!m.is_critical,
+                rank:        rank,
+                category:    c.category || "—",
+                machine:     _ovTrunc(c.asset_name || c.machine_group || "—", 36),
+                riskLevel:   c.risk_level || "—",
+                riskScore:   c.risk_score != null ? c.risk_score : null,
+                issue:       _ovTrunc(pat.issue || "—", 48),
+                description: _ovTrunc(pat.latest_description || "", 64),
+                signal:      sig.join(" \xb7 "),
+                openWoSummary: _ovTrunc(openStatus.summary || "No aged open WO signal.", 40),
+                suggestedAction: _ovTrunc(c.suggested_maintenance_action || "—", 46),
+                isCritical,
             };
         };
-        const recurringForecast = ((activeCat && activeCat.top_machines) || []).slice(0, 5).map(m => _rfToRow(m, activeCat && activeCat.name));
+        const cardsByRiskDesc = [...predCards].sort((a, b) => (b.risk_score || 0) - (a.risk_score || 0));
+        const recurringForecast = cardsByRiskDesc.slice(0, 5).map((c, i) => _cardToRfRow(c, i + 1));
         const rfCategories = ["Production Equipment", "Utilities", "Refrigeration"].map(catName => {
-            const catData = (pred.categories || []).find(c => c.name === catName);
+            const catCards = cardsByRiskDesc.filter(c => c.category === catName);
             return {
                 name: catName,
-                total_mrs: (catData && catData.total_mrs) || 0,
-                machines: ((catData && catData.top_machines) || []).slice(0, 5).map(m => _rfToRow(m, catName)),
+                total_mrs: catCards.length,
+                machines: catCards.slice(0, 5).map((c, i) => _cardToRfRow(c, i + 1)),
             };
         });
 
@@ -3811,10 +3861,10 @@
             perfSummary,
             recurringForecast,
             rfCategories,
-            activeCatName: activeCat ? activeCat.name : (predictiveCategoryView || "Production Equipment"),
-            faultPattern:        pred.fault_pattern || null,
-            dataConfidence:      pred.data_confidence || {},
-            predKpiStrip:        (document.getElementById("mira-pred-kpi-strip") || {}).textContent || "",
+            activeCatName: predictiveCategoryView || "Production Equipment",
+            faultPattern:        _buildFaultPatternSummary(predCards),
+            dataConfidence:      _buildAssessmentCoverage(pred, predCards),
+            predKpiStrip:        _buildPredKpiStripText(pred, predCards),
             unfinishedPm:        allUnfinished.slice(0, 10).map(_pmToRow),
             totalUnfinishedPm:   allUnfinished.length,
             pmFallbackNote: _pmFallback ? "List based on non-completed PM records — status field not available in this dataset." : null,
@@ -3830,7 +3880,7 @@
         pptx.layout = "LAYOUT_WIDE"; // 13.33 × 7.5"
         const stg  = R.filters.stage === "stage1" ? "Stage 1" : R.filters.stage === "stage2" ? "Stage 2" : "All Stages";
         const sub  = R.filters.label + (R.filters.dateRange ? "  \xb7  " + R.filters.dateRange : "") + "  \xb7  " + stg;
-        const TOTAL = 7;
+        const TOTAL = 6;
         const FF = "Calibri";
 
         function hdr(slide, title, n) {
@@ -3982,40 +4032,35 @@
         const s3 = pptx.addSlide();
         hdr(s3, "Recurring Machine Issue Forecast", 3);
         if (R.predKpiStrip) s3.addText(R.predKpiStrip, { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 8, color: OVC.slate, fontFace: FF });
-        s3.addText("Corrective/Breakdown patterns ranked first. Preventive/Routine tasks shown below. Uses full 2024–2026 history.",
+        s3.addText("Top risk-scored assets per category, ranked by calculated risk score. See Predictive Insights for full scoring detail.",
             { x: 0.18, y: 0.82, w: 13.0, h: 0.16, fontSize: 7, color: OVC.slate, italic: true, fontFace: FF });
 
-        const rfCols3 = [0.28, 1.15, 1.55, 2.02, 1.05, 0.92, 1.58, 1.05, 0.58, 2.82];
-        const rfHdr3  = tHdr(["#", "Category", "Machine", "Latest Recurring Issue", "Pattern Type", "History MR Count", "Pattern Signal", "Next Window", "Conf.", "Suggested Action / Spare Part"]);
+        const rfCols3 = [0.28, 1.15, 1.75, 2.10, 1.10, 2.30, 1.80, 2.52];
+        const rfHdr3  = tHdr(["#", "Category", "Machine", "Latest Recurring Issue", "Risk", "Open WO Status", "Pattern Signal", "Suggested Action"]);
         var s3Y = 1.02;
-        const rfCatColors = { "Corrective / Breakdown Pattern": OVC.red, "Preventive / Routine Pattern": OVC.green, "Mixed Pattern": OVC.amber };
 
         (R.rfCategories || []).forEach(cat => {
             const catHasMachines = cat.machines && cat.machines.length > 0;
-            const catLabel = cat.name + (cat.total_mrs ? "  (" + cat.total_mrs + " MR)" : "");
+            const catLabel = cat.name + (cat.total_mrs ? "  (" + cat.total_mrs + " flagged)" : "");
             secLabel(s3, 0.18, s3Y, 13.0, catLabel, catHasMachines ? cat.machines.length : null);
             s3Y += 0.24;
             if (!catHasMachines) {
-                s3.addText("No recurring pattern data for this category.", { x: 0.28, y: s3Y, w: 13.0, h: 0.22, fontSize: 8, color: OVC.sub, fontFace: FF });
+                s3.addText("No risk-scored assets for this category in the selected period.", { x: 0.28, y: s3Y, w: 13.0, h: 0.22, fontSize: 8, color: OVC.sub, fontFace: FF });
                 s3Y += 0.28;
                 return;
             }
             const rfRows3 = cat.machines.map((m, i) => {
-                const cc = String(m.confidence).toLowerCase() === "high" ? OVC.green : String(m.confidence).toLowerCase() === "medium" ? OVC.amber : OVC.slate;
-                const ptColor = rfCatColors[m.patternType] || OVC.slate;
-                const ptShort = /limited/i.test(m.patternType) ? "Limited" : /corrective|breakdown/i.test(m.patternType) ? "Corrective" : /preventive|routine/i.test(m.patternType) ? "Preventive" : "Mixed";
-                const histCount = (m.historyIssueCount || 0) + "/" + (m.historyMrCount || 0) + (m.historyPct != null ? " (" + m.historyPct + "%)" : "");
+                const cc = String(m.riskLevel).toLowerCase() === "high" ? OVC.red : String(m.riskLevel).toLowerCase() === "medium" ? OVC.amber : OVC.green;
+                const riskLabel = (m.riskLevel || "—") + (m.riskScore != null ? " (" + m.riskScore + "/10)" : "");
                 return tRow([
                     { v: m.rank || (i + 1), c: OVC.slate },
                     { v: m.category || cat.name, c: OVC.slate },
                     { v: m.machine + (m.isCritical ? " ★" : ""), b: m.isCritical },
                     { v: m.issue, c: OVC.accent },
-                    { v: ptShort, c: ptColor, b: true },
-                    { v: histCount, c: OVC.slate },
+                    { v: riskLabel, c: cc, b: true },
+                    { v: m.openWoSummary, c: OVC.slate },
                     { v: m.signal, c: OVC.slate },
-                    { v: m.nextWindow },
-                    { v: m.confidence, c: cc, b: true },
-                    { v: m.spare },
+                    { v: m.suggestedAction },
                 ], i);
             });
             s3.addTable([rfHdr3, ...rfRows3], { x: 0.18, y: s3Y, w: 13.0, fontFace: FF, colW: rfCols3, border: { color: OVC.border }, rowH: 0.24, fontSize: 5.8, margin: 0.02 });
@@ -4039,13 +4084,15 @@
         const conf = R.dataConfidence;
         const cbc  = conf.band === "High" ? OVC.green : conf.band === "Medium" ? OVC.amber : OVC.red;
         s3.addShape(pptx.ShapeType.roundRect, { x: 6.87, y: rfBotY3, w: 6.28, h: 1.50, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
-        secLabel(s3, 6.97, rfBotY3 + 0.10, 6.0, "Data Confidence");
-        s3.addText((conf.band || "—") + "  —  " + (conf.label || "Confidence data unavailable."),
+        secLabel(s3, 6.97, rfBotY3 + 0.10, 6.0, "Assessment Coverage");
+        s3.addText((conf.band || "—") + "  —  " + (conf.label || "Coverage data unavailable."),
             { x: 7.01, y: rfBotY3 + 0.36, w: 6.0, h: 0.26, fontSize: 9.5, color: cbc, bold: true, fontFace: FF });
-        [["Asset Mapped", conf.asset_mapping_pct], ["Complete Dates", conf.date_completeness_pct], ["WO Linked", conf.wo_link_pct]].forEach((pair, pi) => {
-            if (pair[1] != null) s3.addText(pair[0] + ": " + pair[1] + "%",
-                { x: 7.01, y: rfBotY3 + 0.64 + pi * 0.22, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
-        });
+        if (conf.riskCounts) {
+            s3.addText(
+                `High: ${conf.riskCounts.High}   \xb7   Medium: ${conf.riskCounts.Medium}   \xb7   Low: ${conf.riskCounts.Low}`,
+                { x: 7.01, y: rfBotY3 + 0.64, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF }
+            );
+        }
         foot(s3);
 
         // ─── Slide 4 — PM Schedule & Unfinished PM Tasks ─────────────────────
@@ -4298,6 +4345,51 @@
         }
     }
 
+    // Waits for a fresh loadOverview({force:true}) round-trip to actually land
+    // (both the overview payload and the predictive cards it kicks off) rather
+    // than assuming a fixed delay — loadOverview() is fire-and-forget, not
+    // awaitable, so this polls the version counters it bumps on completion.
+    function _waitForFreshOverviewLoad(timeoutMs) {
+        const startOverviewV = overviewLoadVersion;
+        const startPredictiveV = predictiveLoadVersion;
+        loadOverview({ force: true });
+        return new Promise((resolve, reject) => {
+            const startedAt = Date.now();
+            const poll = () => {
+                if (overviewLoadVersion > startOverviewV && predictiveLoadVersion > startPredictiveV) {
+                    resolve();
+                    return;
+                }
+                if (Date.now() - startedAt > timeoutMs) {
+                    reject(new Error("Timed out waiting for fresh overview/predictive data."));
+                    return;
+                }
+                window.setTimeout(poll, 300);
+            };
+            poll();
+        });
+    }
+
+    // Auto-triggered after a successful work-order import elsewhere in the app
+    // (see the "maintenance-work-order-imported" postMessage listener in
+    // Maintenance/script.js) — only runs if the Overview tab has actually been
+    // loaded at least once this session (lastOverview set), so a user who has
+    // never opened it doesn't get a surprise download. Deliberately silent
+    // (console only, no alerts) since this runs in the background regardless
+    // of which tab is currently visible.
+    window.miraOverviewAutoExportPptAfterImport = async function miraOverviewAutoExportPptAfterImport() {
+        if (!lastOverview || !window.PptxGenJS) return;
+        try {
+            await _waitForFreshOverviewLoad(45000);
+            const R = await buildPptReportData();
+            await generateOvPpt(R);
+            debugLog("ppt:auto-export-after-import", { ok: true });
+        } catch (e) {
+            console.warn("[PPT] Auto-export after import failed:", e && e.message);
+            debugLog("ppt:auto-export-after-import", { ok: false, error: e && e.message });
+        }
+    };
+
     // ── PDF export ─────────────────────────────────────────────────────────────
     function exportOverviewPDF() {
         if (!lastOverview) { alert("Overview data hasn’t loaded yet. Please wait and try again."); return; }
@@ -4357,16 +4449,14 @@
         }</tbody></table>` : `<p class="mu">No active alerts for this period.</p>`;
 
         const machHtml = activeCat && activeCat.top_machines && activeCat.top_machines.length
-            ? `<table class="mtbl"><thead><tr><th>#</th><th>Machine</th><th>Issue Signature</th><th>Suggested Spare Parts</th><th>Stock / Purchase Status</th></tr></thead><tbody>${
+            ? `<table class="mtbl"><thead><tr><th>#</th><th>Machine</th><th>Issue Signature</th><th>Risk</th><th>Suggested Action</th></tr></thead><tbody>${
                 activeCat.top_machines.slice(0, 5).map(m => {
-                    const unit = m.unit || m.specific_machine_group || m.machine_group || "—";
-                    const issue = (m.issue && m.issue.cluster) || m.recurring_issue || "—";
-                    const status = _forecastPurchaseStatus(m);
-                    const cc = status === "Purchase required" ? "#dc2626" : status === "Not required" ? "#16a34a" : "#d97706";
-                    return `<tr><td>${m.rank || ""}</td><td>${_ovEsc(unit)}${m.is_critical ? " <b class='cb'>Crit</b>" : ""}</td><td style="color:#4f46e5">${_ovEsc(issue)}</td><td class="mu">${_ovEsc(_forecastPartNames(m, 3))}</td><td style="color:${cc};font-weight:700">${_ovEsc(status)}</td></tr>`;
+                    const cc = m.riskLevel === "High" ? "#dc2626" : m.riskLevel === "Medium" ? "#d97706" : "#16a34a";
+                    const riskLabel = m.riskLevel + (m.riskScore != null ? ` (${m.riskScore}/10)` : "");
+                    return `<tr><td>${m.rank || ""}</td><td>${_ovEsc(m.machine)}${m.isCritical ? " <b class='cb'>Crit</b>" : ""}</td><td style="color:#4f46e5">${_ovEsc(m.issue)}</td><td style="color:${cc};font-weight:700">${_ovEsc(riskLabel)}</td><td class="mu">${_ovEsc(m.suggestedAction)}</td></tr>`;
                 }).join("")
             }</tbody></table><p class="mu" style="margin-top:5px">Technician/Engineer verification required before action.</p>`
-            : `<p class="mu">No recurring machine data for this period.</p>`;
+            : `<p class="mu">No risk-scored assets for this period.</p>`;
 
         const fp = R.faultPattern;
         const faultHtml = fp && !fp.empty
@@ -4374,8 +4464,8 @@
             : `<span class="mu">No dominant fault pattern detected.</span>`;
         const conf = R.dataConfidence;
         const cbc = conf.band === "High" ? "#16a34a" : conf.band === "Medium" ? "#d97706" : "#dc2626";
-        const confHtml = `<strong style="color:${cbc}">${_ovEsc(conf.band || "—")}</strong>&nbsp;—&nbsp;${_ovEsc(conf.label || "Confidence data unavailable.")}` +
-            (conf.total > 0 ? `<ul class="mu" style="margin:5px 0 0;padding-left:16px"><li>Asset Mapped: ${conf.asset_mapping_pct != null ? conf.asset_mapping_pct + "%" : "—"}</li><li>Complete Dates: ${conf.date_completeness_pct != null ? conf.date_completeness_pct + "%" : "—"}</li><li>WO Linked: ${conf.wo_link_pct != null ? conf.wo_link_pct + "%" : "—"}</li></ul>` : "");
+        const confHtml = `<strong style="color:${cbc}">${_ovEsc(conf.band || "—")}</strong>&nbsp;—&nbsp;${_ovEsc(conf.label || "Coverage data unavailable.")}` +
+            (conf.riskCounts ? `<ul class="mu" style="margin:5px 0 0;padding-left:16px"><li>High risk: ${conf.riskCounts.High}</li><li>Medium risk: ${conf.riskCounts.Medium}</li><li>Low risk: ${conf.riskCounts.Low}</li></ul>` : "");
 
         return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Maintenance Overview Report</title>
 <style>
@@ -4433,7 +4523,7 @@ ${R.predKpiStrip ? `<p class="mu" style="margin-bottom:7px">${_ovEsc(R.predKpiSt
 ${machHtml}
 <div class="br">
 <div class="bc"><div class="sl2">Dominant Fault Pattern</div>${faultHtml}</div>
-<div class="bc"><div class="sl2">Data Confidence</div>${confHtml}</div>
+<div class="bc"><div class="sl2">Assessment Coverage</div>${confHtml}</div>
 </div>
 </div>
 </body></html>`;
