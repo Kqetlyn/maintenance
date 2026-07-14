@@ -30,6 +30,7 @@ from asset_mapping import (
     load_asset_mapping,
 )
 from machine_family import classify_machine_family
+from mixer_alias_mapping import FOOD_MIXER_GROUP, apply_mixer_alias_mapping
 
 _log = logging.getLogger(__name__)
 
@@ -399,7 +400,7 @@ def _pbi_full_row_to_enriched(row: dict) -> dict:
     mapping_status   = "Mapped" if has_am_match else "Unmapped"
     mapping_source   = "Asset_Master.xlsx" if has_am_match else "fallback"
 
-    return {
+    enriched = {
         # IDs
         "work_order_id":            work_order_id,
         "maintenance_order_id":     request_id,
@@ -505,6 +506,15 @@ def _pbi_full_row_to_enriched(row: dict) -> dict:
         "source_type":              "powerbi_full",
         "worker_group":             worker_group,
     }
+    mixer_fields = apply_mixer_alias_mapping(enriched)
+    enriched.update(mixer_fields)
+    if mixer_fields.get("mixer_related"):
+        enriched["machine_family"] = FOOD_MIXER_GROUP
+        enriched["mappedSubAssetGroup"] = FOOD_MIXER_GROUP
+        enriched["mapped_sub_asset_group"] = FOOD_MIXER_GROUP
+        enriched["mapping_status"] = mixer_fields.get("alias_mapping_status") or enriched.get("mapping_status")
+        enriched["mappingStatus"] = enriched["mapping_status"]
+    return enriched
 
 
 def _sql_row_to_enriched(row: dict) -> dict:
@@ -675,7 +685,7 @@ def _sql_row_to_enriched(row: dict) -> dict:
     else:
         status_category = "Review"
 
-    return {
+    enriched = {
         # IDs
         "work_order_id": wo_number,
         "maintenance_order_id": mr_number,
@@ -780,6 +790,15 @@ def _sql_row_to_enriched(row: dict) -> dict:
         "source_type": stored_source_type or "work_orders",
         "worker_group": str(row.get("worker_group") or ""),
     }
+    mixer_fields = apply_mixer_alias_mapping(enriched)
+    enriched.update(mixer_fields)
+    if mixer_fields.get("mixer_related"):
+        enriched["machine_family"] = FOOD_MIXER_GROUP
+        enriched["mappedSubAssetGroup"] = FOOD_MIXER_GROUP
+        enriched["mapped_sub_asset_group"] = FOOD_MIXER_GROUP
+        enriched["mapping_status"] = mixer_fields.get("alias_mapping_status") or enriched.get("mapping_status")
+        enriched["mappingStatus"] = enriched["mapping_status"]
+    return enriched
 
 
 def load_work_order_downtime_sql(stage: str | None = None) -> dict:

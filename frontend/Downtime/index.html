@@ -1621,6 +1621,44 @@
                         </div>
                     </div>
                     <div class="card nested-card">
+                        <div class="alias-review-head">
+                            <div>
+                                <div class="card-title">Alias Mapping Review</div>
+                                <p class="card-subtitle">Food Mixer Gold / Silver nickname mappings from MR descriptions. Specific Asset Master IDs remain authoritative; unresolved Gold rows are excluded from individual-machine MTBF until verified.</p>
+                            </div>
+                            <div class="alias-review-controls">
+                                <label class="inline-label" for="alias-mapping-review-filter">Status</label>
+                                <select id="alias-mapping-review-filter" class="inline-select">
+                                    <option value="all">All</option>
+                                    <option value="confirmed">Confirmed</option>
+                                    <option value="inferred">Alias inferred</option>
+                                    <option value="conflict">Conflict</option>
+                                    <option value="unresolved">Unresolved</option>
+                                </select>
+                                <button type="button" class="export-btn" id="alias-mapping-review-export-btn">Export XLSX</button>
+                            </div>
+                        </div>
+                        <div class="card-subtitle" id="alias-mapping-review-count">Loading alias mapping review.</div>
+                        <div class="table-wrapper wo-response-table-wrapper">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>MR / WO</th>
+                                        <th>Source Asset</th>
+                                        <th>Alias</th>
+                                        <th>Canonical Asset</th>
+                                        <th>Status</th>
+                                        <th>Confidence</th>
+                                        <th>Note</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="alias-mapping-review-body">
+                                    <tr><td colspan="7" class="empty-cell">Loading alias mappings.</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <div class="card nested-card">
                         <div class="card-title">Historical Total MR and WO</div>
                         <p class="card-subtitle" id="data-reliability-history-note">Counts use created / raised year and the current lifecycle status of those records.</p>
                         <div class="table-wrapper">

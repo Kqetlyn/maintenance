@@ -2255,7 +2255,10 @@ def predictive_insights():
     raw = _read_filters()
     filters = ctx.normalize_filters(raw)
     try:
-        data = predictive_service.build_predictive_risk_cards(filters)
+        # top_n=200: the management-table redesign needs every scored asset
+        # (Priority Assets + collapsed Watchlist), not just a top-10 slice —
+        # 200 is a generous ceiling well above any realistic asset count.
+        data = predictive_service.build_predictive_risk_cards(filters, top_n=200)
         return jsonify({"ok": True, "filters": filters, "data": data,
                         "draft_label": config.DRAFT_LABEL})
     except Exception as exc:

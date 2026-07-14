@@ -13,6 +13,7 @@ from asset_mapping import (
     MACHINE_GROUPS,
 )
 from machine_family import classify_machine_family
+from mixer_alias_mapping import FOOD_MIXER_GROUP, alias_review_bucket
 
 CRITICALITY_CRITICAL = "Critical"
 CRITICALITY_NON_CRITICAL = "Non-Critical / Facility"
@@ -55,6 +56,36 @@ def _clean_text(value, fallback=""):
     text = str(value or "").replace("\ufeff", " ").strip()
     text = re.sub(r"\s+", " ", text)
     return text or fallback
+
+
+def _metric_asset_id(row):
+    if row.get("mixer_related") and row.get("canonical_asset_id"):
+        return row.get("canonical_asset_id")
+    return row.get("asset_id")
+
+
+def _metric_asset_name(row):
+    if row.get("mixer_related") and row.get("canonical_asset_name"):
+        return row.get("canonical_asset_name")
+    return row.get("asset_display_name") or row.get("machine_name") or row.get("asset_name") or row.get("asset_id")
+
+
+def _metric_machine_group(row):
+    if row.get("mixer_related"):
+        return row.get("canonical_machine_group") or FOOD_MIXER_GROUP
+    return (
+        row.get("machine_family")
+        or row.get("mappedMachineGroup")
+        or row.get("asset_machine_group")
+        or row.get("machine_group")
+        or row.get("machine_name_display")
+        or row.get("asset_id")
+        or "Unmapped Asset"
+    )
+
+
+def _include_row_in_individual_mtbf(row):
+    return not (row.get("mixer_related") and row.get("alias_mtbf_include") is False)
 
 
 def _normalize_key(value):
@@ -540,6 +571,8 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
             continue
         if _is_mtbf_general_area(row):   # skip area/location placeholders
             continue
+        if not _include_row_in_individual_mtbf(row):
+            continue
         if actual_start is None or actual_end is None:
             continue
         if actual_end <= actual_start:
@@ -563,7 +596,9 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
 
     rows_by_asset = defaultdict(list)
     for row in eligible_rows:
-        rows_by_asset[row["asset_id"]].append(row)
+        metric_asset_id = _metric_asset_id(row)
+        if metric_asset_id:
+            rows_by_asset[metric_asset_id].append(row)
 
     for asset_id, asset_items in rows_by_asset.items():
         asset_items.sort(key=lambda item: item["_actual_start"])
@@ -615,14 +650,14 @@ def _compute_mtbf_payload(rows, scope_label="Selected Period"):
 
         asset_row = {
             "asset_id": asset_id,
-            "asset_name": latest_item.get("asset_display_name") or latest_item.get("machine_name") or asset_id,
-            "machine_group": (
-                latest_item.get("machine_family")
-                or latest_item.get("mappedMachineGroup")
-                or latest_item.get("machine_group")
-                or latest_item.get("machine_name_display")
-                or asset_id
-            ),
+            "asset_name": _metric_asset_name(latest_item) or asset_id,
+            "machine_group": _metric_machine_group(latest_item),
+            "source_asset_id": latest_item.get("source_asset_id") or latest_item.get("asset_id"),
+            "source_asset_name": latest_item.get("source_asset_name") or latest_item.get("asset_name"),
+            "mixer_alias": latest_item.get("mixer_alias"),
+            "alias_mapping_status": latest_item.get("alias_mapping_status"),
+            "mapping_confidence": latest_item.get("mapping_confidence"),
+            "mapping_note": latest_item.get("mapping_note"),
             "criticality": latest_item.get("criticality") or CRITICALITY_NON_CRITICAL,
             "raw_criticality": latest_item["raw_criticality"] if "raw_criticality" in latest_item else latest_item.get("criticality", ""),
             "normalized_criticality": latest_item.get("normalized_criticality") or latest_item.get("criticality") or CRITICALITY_NON_CRITICAL,
@@ -1061,17 +1096,9 @@ def build_management_downtime_payload(
 
         # Group by machine_family (specific, e.g. "Combi Oven") rather than
         # the broad machine_group (e.g. "Production Equipment").
-        group_name = (
-            row.get("machine_family")
-            or row.get("mappedMachineGroup")
-            or row.get("asset_machine_group")
-            or row.get("machine_group")
-            or row.get("machine_name_display")
-            or row.get("asset_id")
-            or "Unmapped Asset"
-        )
+        group_name = _metric_machine_group(row)
         machine_category = row.get("equipment_category") or row.get("mappedMainAssetGroup") or row.get("machine_group") or ""
-        group_key = f"{group_name}__{location_key}"
+        group_key = group_name if row.get("mixer_related") else f"{group_name}__{location_key}"
         group_row = machine_group_map.setdefault(
             group_key,
             {
@@ -1110,14 +1137,21 @@ def build_management_downtime_payload(
         if row.get("mtbf_missing_reasons"):
             group_row["mtbf_missing_count"] += 1
             group_row["mtbf_missing_reasons"].update(row.get("mtbf_missing_reasons") or [])
-        if row.get("asset_id"):
-            group_row["asset_ids"].add(row["asset_id"])
+        metric_asset_id = _metric_asset_id(row)
+        if metric_asset_id:
+            group_row["asset_ids"].add(metric_asset_id)
             asset_row = group_row["asset_ttr_map"].setdefault(
-                row["asset_id"],
+                metric_asset_id,
                 {
-                    "asset_id": row["asset_id"],
-                    "asset_label": row.get("asset_label") or row["asset_id"],
-                    "asset_display_name": row.get("asset_display_name") or row.get("raw_machine_name") or row.get("machine_name_display") or row["asset_id"],
+                    "asset_id": metric_asset_id,
+                    "source_asset_id": row.get("source_asset_id") or row.get("asset_id"),
+                    "source_asset_name": row.get("source_asset_name") or row.get("asset_name"),
+                    "asset_label": row.get("asset_label") or metric_asset_id,
+                    "asset_display_name": _metric_asset_name(row) or metric_asset_id,
+                    "mixer_alias": row.get("mixer_alias"),
+                    "alias_mapping_status": row.get("alias_mapping_status"),
+                    "mapping_confidence": row.get("mapping_confidence"),
+                    "mapping_note": row.get("mapping_note"),
                     "work_order_count": 0,
                     "valid_ttr_count": 0,
                     "total_ttr_hours": 0.0,
@@ -1239,6 +1273,21 @@ def build_management_downtime_payload(
             "work_order_id": row.get("work_order_id") or "--",
             "request_id": row.get("maintenance_order_id") or "--",
             "asset_id": asset_id,
+            "source_asset_id": row.get("source_asset_id") or asset_id,
+            "source_asset_name": row.get("source_asset_name") or row.get("asset_name") or "",
+            "mixer_alias": row.get("mixer_alias"),
+            "mixer_aliases": row.get("mixer_aliases") or [],
+            "mixer_related": bool(row.get("mixer_related")),
+            "mixer_multiple_machines": bool(row.get("mixer_multiple_machines")),
+            "canonical_asset_id": row.get("canonical_asset_id") or asset_id,
+            "canonical_asset_name": row.get("canonical_asset_name") or row.get("asset_display_name") or row.get("asset_name") or "",
+            "canonical_machine_group": row.get("canonical_machine_group") or "",
+            "alias_mtbf_include": row.get("alias_mtbf_include"),
+            "alias_mapping_status": row.get("alias_mapping_status"),
+            "alias_mapping_review_status": row.get("alias_mapping_review_status"),
+            "alias_mapping_review_required": bool(row.get("alias_mapping_review_required")),
+            "mapping_confidence": row.get("mapping_confidence"),
+            "mapping_note": row.get("mapping_note"),
             "machine_group": row.get("machine_group") or row.get("machine_name_display") or "--",
             "equipment_category": row.get("equipment_category") or group_to_category(row.get("machine_group")),
             "machine_name": row.get("machine_name_display") or row.get("machine_group") or "--",
@@ -1288,6 +1337,41 @@ def build_management_downtime_payload(
             "actual_end_time": row.get("actual_end_time") or row.get("maintenance_end_time") or row.get("end_time"),
         }
         detailed_rows.append(detail)
+
+    alias_mapping_review = []
+    for row in detailed_rows:
+        if not row.get("mixer_related"):
+            continue
+        bucket = alias_review_bucket(row)
+        source_is_generic = str(row.get("source_asset_id") or "").upper() == "ENWA-240009"
+        needs_review = (
+            row.get("alias_mapping_review_required")
+            or bucket in {"Conflict", "Unresolved"}
+            or source_is_generic
+            or row.get("mixer_multiple_machines")
+        )
+        if not needs_review and bucket == "Confirmed":
+            continue
+        alias_mapping_review.append({
+            "mr_number": row.get("request_id") or "--",
+            "wo_number": row.get("work_order_id") or "--",
+            "source_asset_id": row.get("source_asset_id") or row.get("asset_id") or "",
+            "source_asset_name": row.get("source_asset_name") or row.get("asset_display_name") or "",
+            "detected_alias": row.get("mixer_alias") or "",
+            "canonical_asset_id": row.get("canonical_asset_id") or "",
+            "canonical_asset_name": row.get("canonical_asset_name") or "",
+            "mapping_status": row.get("alias_mapping_status") or bucket or "",
+            "review_status": bucket or "",
+            "mapping_confidence": row.get("mapping_confidence") or "",
+            "confidence": row.get("mapping_confidence") or "",
+            "mapping_note": row.get("mapping_note") or "",
+            "multiple_machines": bool(row.get("mixer_multiple_machines")),
+            "mtbf_included": bool(row.get("alias_mtbf_include")),
+            "actual_start_time": row.get("actual_start_time"),
+            "actual_end_time": row.get("actual_end_time"),
+            "repair_duration_hours": row.get("ttr_hours"),
+            "description": row.get("description") or "",
+        })
 
     alerts = []
     if highest_mttr_group and float(highest_mttr_group.get("mttr_hours") or 0) >= HIGH_MTTR_THRESHOLD_HOURS:
@@ -1366,6 +1450,7 @@ def build_management_downtime_payload(
         "location_rows": location_rows,
         "trend": _build_trend(detailed_rows, period_start, period_end),
         "work_orders": detailed_rows,
+        "alias_mapping_review": alias_mapping_review,
         "filters": filters,
         "alerts": alerts,
         "mapping_meta": mapping_meta if mapping_meta is not None else get_grouped_machine_mapping_meta(data_dir),

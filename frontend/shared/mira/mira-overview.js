@@ -443,34 +443,114 @@
         const sec = el("section", "mira-ov-pred-section");
         sec.append(el("div", "mira-ov-section-label", "Predictive Maintenance Insights"));
         sec.append(el("p", "mira-ov-pred-subtitle",
-            "Rule-based risk cards from verified WO/MR history, MTBF movement, criticality, aged open work orders, and linked spare-part consumption."));
+            "Management overview of at-a-glance asset risk, built from verified WO/MR history, MTBF movement, criticality, aged open work orders, and linked spare-part consumption."));
         sec.append(el("p", "mira-ov-disclaimer",
-            "Calculated risk is shown first. AI wording is limited to short summaries of the structured card data; no open-ended chat is used."));
+            "Calculated risk is shown first. AI wording is limited to short summaries of the structured card data; no open-ended chat is used. Management reviews this information and decides any action — the table does not suggest one."));
+
+        const kpiStrip = el("div", "mira-pred-kpi-strip");
+        kpiStrip.id = "mira-pred-kpi-strip";
+        sec.append(kpiStrip);
+
+        const filterBar = el("div", "mira-pred-filter-bar");
+        filterBar.id = "mira-pred-filter-bar";
+        sec.append(filterBar);
+
         const catsWrap = el("div", "mira-pred-cats-wrap");
         catsWrap.id = "mira-pred-cats-body";
         catsWrap.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-lg\" style=\"height:120px\"></div>";
         sec.append(catsWrap);
-        const bottomRow = el("div", "mira-pred-bottom-row");
-        const card2 = el("div", "mira-ov-pred-card");
-        card2.id = "mira-pred-card2";
-        card2.append(el("div", "mira-ov-pred-card-title", "Scoring Rules"));
-        const card2Body = el("div");
-        card2Body.id = "mira-pred-fault-body";
-        card2Body.innerHTML = "<div class=\"mira-ov-skeleton mira-sk-line mira-sk-md\"></div>";
-        card2.append(card2Body);
-        bottomRow.append(card2);
-        sec.append(bottomRow);
 
-        const footnote = el("p", "mira-pred-methodology-footnote");
-        footnote.append(document.createTextNode(
-            "Risk scores from 0–10 are calculated from verified maintenance indicators. AI-generated summaries explain the calculated results and do not determine the score. "
-        ));
-        const methodologyLink = el("button", "mira-pred-methodology-link", "Risk score methodology");
+        const footRow = el("div", "mira-pred-foot-row");
+        const methodologyLink = el("button", "mira-pred-methodology-link", "How risk is calculated");
         methodologyLink.type = "button";
         methodologyLink.addEventListener("click", _openRiskMethodologyModal);
-        footnote.append(methodologyLink);
-        sec.append(footnote);
+        footRow.append(methodologyLink);
+        const dataUpdated = el("span", "mira-pred-data-updated");
+        dataUpdated.id = "mira-pred-data-updated";
+        footRow.append(dataUpdated);
+        sec.append(footRow);
         return sec;
+    }
+
+    // ── Predictive table: filter/priority state (client-side only — same
+    // cards array the KPI strip, table, and Watchlist all read, per the
+    // spec's "every KPI/row must follow active filters" requirement) ────────
+    let predictiveFilterState = {
+        assetCategory: "", machineGroup: "", riskLevel: "", criticality: "", partsStatus: "",
+        recurrencePeriod: "", search: "", kpi: "",
+    };
+    const PRIORITY_ROW_LIMIT = 5;
+    const PRED_ASSET_CATEGORY_UNKNOWN = "Unknown / Unclassified";
+    const PRED_ASSET_CATEGORY_OPTIONS = [
+        ["", "All"],
+        ["Production Equipment", "Production Equipment"],
+        ["Utilities", "Utilities"],
+        [PRED_ASSET_CATEGORY_UNKNOWN, PRED_ASSET_CATEGORY_UNKNOWN],
+    ];
+    const PRED_PRODUCTION_GROUP_KEYS = new Set([
+        "air blast chiller", "air blast chillers", "air blast freezer", "air blast freezers",
+        "batch fryer", "batch fryers", "bowl cutter", "bowl cutters", "bowl cutter chopper",
+        "bratt pan", "bratt pans", "checkweigher", "checkweighers", "combi oven", "combi ovens",
+        "conveyor", "conveyors", "crimping machine", "crimping machines", "digital weighing scale",
+        "digital weighing scales", "fryer", "fryers", "index conveyor", "index conveyors",
+        "inline printer", "inline printers", "peeler", "peelers", "spiral freezer", "spiral freezers",
+        "steam box", "steam boxes", "steambox", "steamboxes", "transport conveyor",
+        "transport conveyors", "vacuum tumbler", "vacuum tumblers", "x ray",
+    ]);
+    const PRED_UTILITY_GROUP_KEYS = new Set([
+        "air compressor", "air compressors", "air dryer", "air dryers", "boiler", "boilers",
+        "boiler compressed air", "building utilities", "carbon filter tank", "carbon filter tanks",
+        "cold room condenser", "cold room condensers", "electrical", "electrical distribution",
+        "evaporator", "evaporators", "facility building", "fire safety", "generator", "generators",
+        "hot oil boiler", "hot oil boilers", "hvac", "ice maker", "ice makers", "laundry", "mdb",
+        "mdb electrical distribution", "pressure vessel", "pressure vessels", "refrigeration",
+        "resin tank", "resin tanks", "ro filter ro system", "sand filter tank", "sand filter tanks",
+        "steam boiler", "steam boilers", "transfer pump", "transfer pumps", "uv machine",
+        "uv machines", "wastewater treatment", "water system", "water treatment", "wwtp",
+    ]);
+
+    function _predCategoryKey(value) {
+        return String(value || "")
+            .toLowerCase()
+            .replace(/&/g, " and ")
+            .replace(/[^a-z0-9]+/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
+    function _predGroupBucketFromKey(groupKey) {
+        if (!groupKey) return "";
+        if (PRED_PRODUCTION_GROUP_KEYS.has(groupKey)) return "Production Equipment";
+        if (PRED_UTILITY_GROUP_KEYS.has(groupKey)) return "Utilities";
+        return "";
+    }
+
+    function _predAssetCategory(card) {
+        const explicit = String(card.asset_category || card.assetCategory || "").trim();
+        if (explicit === "Production Equipment" || explicit === "Utilities" || explicit === PRED_ASSET_CATEGORY_UNKNOWN) {
+            return explicit;
+        }
+        const categoryKey = _predCategoryKey(card.category);
+        const groupBucket = _predGroupBucketFromKey(_predCategoryKey(card.machine_group));
+        if (categoryKey === "production equipment") return "Production Equipment";
+        if (categoryKey === "utilities" || categoryKey === "utilities support") return "Utilities";
+        if (categoryKey === "facility building") return "Utilities";
+        if (categoryKey === "refrigeration") return groupBucket || "Utilities";
+        if (!categoryKey || categoryKey === "unknown" || categoryKey === "unknown review" || categoryKey === "unclassified") {
+            return groupBucket || PRED_ASSET_CATEGORY_UNKNOWN;
+        }
+        return groupBucket || PRED_ASSET_CATEGORY_UNKNOWN;
+    }
+
+    function _fmtDataUpdated(iso) {
+        if (!iso) return "Data updated: unavailable";
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return "Data updated: unavailable";
+        const MS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+        const dd = String(d.getDate()).padStart(2, "0");
+        const hh = String(d.getHours()).padStart(2, "0");
+        const mm = String(d.getMinutes()).padStart(2, "0");
+        return `Data updated: ${dd} ${MS[d.getMonth()]} ${d.getFullYear()}, ${hh}:${mm}`;
     }
 
     // ── Risk score methodology modal ─────────────────────────────────────────
@@ -575,53 +655,340 @@
         predictiveLoadVersion += 1;
         _assetDetailCache = new Map();
         const body = document.getElementById("mira-pred-cats-body");
-        const rulesBody = document.getElementById("mira-pred-fault-body");
         const cards = d.cards || [];
-        // Rule list is read verbatim from the backend's risk_rules.factors — this
-        // is the single shared source (predictive_service.py's _RISK_SCORE_RULES);
-        // never hand-type these numbers/labels here.
-        if (rulesBody) {
-            const factors = (d.risk_rules && d.risk_rules.factors) || [];
-            rulesBody.innerHTML = factors.length
-                ? "<ul class=\"mira-pred-rule-list\">" +
-                  factors.map((r) => `<li>+${r.points} for ${escOv(r.label)}</li>`).join("") +
-                  "</ul>"
-                : "<p class=\"mira-ov-muted\">Scoring rules unavailable.</p>";
+
+        const dataUpdatedEl = document.getElementById("mira-pred-data-updated");
+        if (dataUpdatedEl) dataUpdatedEl.textContent = _fmtDataUpdated(d.data_last_updated);
+
+        _renderPredFilterBar(cards);
+        _renderPredTableAndKpis(cards);
+
+        if (!body) return;
+        if (!cards.length) {
+            body.innerHTML = "";
+            body.append(el("p", "mira-ov-muted", "No predictive risk signals met the scoring threshold for the selected period."));
         }
+    }
+
+    // ── KPI computation. Counts are taken over cards matching every OTHER
+    // active filter (machine group/risk/criticality/parts/recurrence/search)
+    // but not the KPI chip's own toggle — a faceted-search count, so a KPI's
+    // number reflects "how many would show if you clicked this" rather than
+    // collapsing to itself once already active. Same predicate the table
+    // filter uses (_cardMatchesKpi), so the strip and table can never disagree. ──
+    function _cardMatchesKpi(card, kpiKey) {
+        switch (kpiKey) {
+            case "high_risk": return card.risk_level === "High";
+            case "due_soon": {
+                const occ = (card.latest_recurring_issue_pattern || {}).next_likely_occurrence;
+                return !!(occ && occ.expected_within_7_days);
+            }
+            case "parts_unavailable": {
+                if (card.criticality !== "Critical" || !card.parts_readiness_computed) return false;
+                const st = (card.parts_readiness || {}).status;
+                return st === "out_of_stock" || st === "not_linked";
+            }
+            case "mtbf_declining": return (card.mtbf_trend || {}).state === "declining";
+            case "aged_critical_wo": return card.criticality === "Critical" && ((card.open_wo_status || {}).oldest_age_days || 0) > 7;
+            default: return true;
+        }
+    }
+
+    const _PRED_KPI_DEFS = [
+        ["high_risk", "High-risk assets"],
+        ["due_soon", "Expected to recur within 7 days"],
+        ["parts_unavailable", "Critical assets, spare parts unavailable"],
+        ["mtbf_declining", "Assets with declining MTBF"],
+        ["aged_critical_wo", "Critical open WOs older than 7 days"],
+    ];
+
+    function _renderPredManagementKpiStrip(cards) {
+        const strip = document.getElementById("mira-pred-kpi-strip");
+        if (!strip) return;
+        strip.innerHTML = "";
+        const scoped = cards.filter((c) => _cardMatchesFilters(c, { ignoreKpi: true }));
+        _PRED_KPI_DEFS.forEach(([key, label]) => {
+            const count = scoped.filter((c) => _cardMatchesKpi(c, key)).length;
+            const chip = el("button", "mira-pred-kpi-chip" + (predictiveFilterState.kpi === key ? " active" : ""));
+            chip.type = "button";
+            chip.append(el("span", "mira-pred-kpi-count", String(count)));
+            chip.append(el("span", "mira-pred-kpi-label", label));
+            chip.addEventListener("click", () => {
+                predictiveFilterState.kpi = predictiveFilterState.kpi === key ? "" : key;
+                _renderPredTableAndKpis(predictiveLatestPayload ? (predictiveLatestPayload.cards || []) : cards);
+            });
+            strip.append(chip);
+        });
+    }
+
+    // ── Filter bar (client-side over the already-fetched cards array; Stage
+    // itself is the page-level selector already driving this fetch, so it's
+    // not duplicated here) ───────────────────────────────────────────────────
+    function _renderPredFilterBar(cards) {
+        const bar = document.getElementById("mira-pred-filter-bar");
+        if (!bar) return;
+        bar.innerHTML = "";
+
+        const categoryScopedCards = predictiveFilterState.assetCategory
+            ? cards.filter((c) => _predAssetCategory(c) === predictiveFilterState.assetCategory)
+            : cards;
+        const machineGroups = Array.from(new Set(categoryScopedCards.map((c) => c.machine_group).filter(Boolean))).sort();
+        if (predictiveFilterState.machineGroup && !machineGroups.includes(predictiveFilterState.machineGroup)) {
+            predictiveFilterState.machineGroup = "";
+        }
+
+        function makeSelect(labelText, options, currentVal, onChange) {
+            const wrap = el("label", "mira-pred-filter-field");
+            wrap.append(el("span", "mira-pred-filter-label", labelText));
+            const sel = el("select", "mira-pred-filter-select");
+            options.forEach(([val, text]) => {
+                const o = el("option", null, text);
+                o.value = val;
+                if (val === currentVal) o.selected = true;
+                sel.append(o);
+            });
+            sel.addEventListener("change", () => onChange(sel.value));
+            wrap.append(sel);
+            return wrap;
+        }
+
+        bar.append(makeSelect("Asset category", PRED_ASSET_CATEGORY_OPTIONS,
+            predictiveFilterState.assetCategory, (v) => {
+                predictiveFilterState.assetCategory = v;
+                const allowedGroups = new Set((v ? cards.filter((c) => _predAssetCategory(c) === v) : cards)
+                    .map((c) => c.machine_group).filter(Boolean));
+                if (predictiveFilterState.machineGroup && !allowedGroups.has(predictiveFilterState.machineGroup)) {
+                    predictiveFilterState.machineGroup = "";
+                }
+                _renderPredFilterBar(cards);
+                _renderPredTableAndKpis(cards);
+            }));
+
+        bar.append(makeSelect("Machine group", [["", "All"]].concat(machineGroups.map((g) => [g, g])),
+            predictiveFilterState.machineGroup, (v) => { predictiveFilterState.machineGroup = v; _renderPredTableAndKpis(cards); }));
+
+        bar.append(makeSelect("Risk level", [["", "All"], ["High", "High"], ["Medium", "Medium"], ["Low", "Low"]],
+            predictiveFilterState.riskLevel, (v) => { predictiveFilterState.riskLevel = v; _renderPredTableAndKpis(cards); }));
+
+        bar.append(makeSelect("Criticality", [["", "All"], ["Critical", "Critical"], ["Non-critical", "Non-critical"], ["Unknown", "Unknown"]],
+            predictiveFilterState.criticality, (v) => { predictiveFilterState.criticality = v; _renderPredTableAndKpis(cards); }));
+
+        bar.append(makeSelect("Parts status", [
+            ["", "All"], ["available", "Available"], ["low_stock", "Low stock"], ["out_of_stock", "Out of stock"],
+            ["not_linked", "Not linked"], ["unknown", "Stock data unavailable"],
+        ], predictiveFilterState.partsStatus, (v) => { predictiveFilterState.partsStatus = v; _renderPredTableAndKpis(cards); }));
+
+        bar.append(makeSelect("Expected recurrence", [
+            ["", "All"], ["7d", "Within 7 days"], ["30d", "Within 30 days"], ["insufficient", "Insufficient history"],
+        ], predictiveFilterState.recurrencePeriod, (v) => { predictiveFilterState.recurrencePeriod = v; _renderPredTableAndKpis(cards); }));
+
+        const searchWrap = el("label", "mira-pred-filter-field mira-pred-filter-search");
+        searchWrap.append(el("span", "mira-pred-filter-label", "Search"));
+        const searchInput = el("input", "mira-pred-filter-select");
+        searchInput.type = "search";
+        searchInput.placeholder = "Asset name or ID…";
+        searchInput.value = predictiveFilterState.search;
+        searchInput.addEventListener("input", () => { predictiveFilterState.search = searchInput.value; _renderPredTableAndKpis(cards); });
+        searchWrap.append(searchInput);
+        bar.append(searchWrap);
+
+        if (predictiveFilterState.kpi || predictiveFilterState.assetCategory || predictiveFilterState.machineGroup || predictiveFilterState.riskLevel ||
+            predictiveFilterState.criticality || predictiveFilterState.partsStatus || predictiveFilterState.recurrencePeriod ||
+            predictiveFilterState.search) {
+            const clearBtn = el("button", "mira-pred-filter-clear", "Clear filters");
+            clearBtn.type = "button";
+            clearBtn.addEventListener("click", () => {
+                predictiveFilterState = { assetCategory: "", machineGroup: "", riskLevel: "", criticality: "", partsStatus: "", recurrencePeriod: "", search: "", kpi: "" };
+                _renderPredFilterBar(cards);
+                _renderPredTableAndKpis(cards);
+            });
+            bar.append(clearBtn);
+        }
+    }
+
+    function _cardMatchesFilters(card, opts) {
+        const f = predictiveFilterState;
+        const skipKpi = opts && opts.ignoreKpi;
+        if (f.assetCategory && _predAssetCategory(card) !== f.assetCategory) return false;
+        if (f.machineGroup && card.machine_group !== f.machineGroup) return false;
+        if (f.riskLevel && card.risk_level !== f.riskLevel) return false;
+        if (f.criticality && card.criticality !== f.criticality) return false;
+        if (f.partsStatus && (card.parts_readiness || {}).status !== f.partsStatus) return false;
+        if (f.recurrencePeriod) {
+            const occ = (card.latest_recurring_issue_pattern || {}).next_likely_occurrence;
+            const days = occ ? occ.days_until_next_likely : null;
+            if (f.recurrencePeriod === "7d" && !(days !== null && days !== undefined && days <= 7)) return false;
+            if (f.recurrencePeriod === "30d" && !(days !== null && days !== undefined && days <= 30)) return false;
+            if (f.recurrencePeriod === "insufficient" && !(!occ || occ.confidence === "Insufficient history")) return false;
+        }
+        if (f.search) {
+            const needle = f.search.trim().toLowerCase();
+            const hay = `${card.asset_name || ""} ${card.asset_id || ""}`.toLowerCase();
+            if (needle && !hay.includes(needle)) return false;
+        }
+        if (!skipKpi && f.kpi && !_cardMatchesKpi(card, f.kpi)) return false;
+        return true;
+    }
+
+    // ── Priority ordering (spec §3: risk, criticality, parts availability,
+    // recurrence proximity, declining MTBF, oldest open WO — in that order) ──
+    function _priorityRank(card) {
+        const riskRank = { High: 0, Medium: 1, Low: 2 }[card.risk_level] ?? 3;
+        const critRank = { Critical: 0, "Non-critical": 1, Unknown: 2 }[card.criticality] ?? 2;
+        const partsRank = { out_of_stock: 0, low_stock: 1, not_linked: 2, unknown: 3, available: 4 }[(card.parts_readiness || {}).status] ?? 3;
+        const occ = (card.latest_recurring_issue_pattern || {}).next_likely_occurrence;
+        const days = occ ? occ.days_until_next_likely : null;
+        const recurrenceRank = (days === null || days === undefined) ? 100000 : days;
+        const mtbfRank = (card.mtbf_trend || {}).state === "declining" ? 0 : 1;
+        const openWoRank = -(((card.open_wo_status || {}).oldest_age_days) || 0);
+        return [riskRank, critRank, partsRank, recurrenceRank, mtbfRank, openWoRank];
+    }
+    function _comparePriority(a, b) {
+        const ra = _priorityRank(a), rb = _priorityRank(b);
+        for (let i = 0; i < ra.length; i++) { if (ra[i] !== rb[i]) return ra[i] - rb[i]; }
+        return (a.asset_name || "").localeCompare(b.asset_name || "");
+    }
+
+    let watchlistExpanded = false;
+
+    function _renderPredTableAndKpis(cards) {
+        _renderPredManagementKpiStrip(cards);
+        const filtered = cards.filter(_cardMatchesFilters);
+        const ordered = filtered.slice().sort(_comparePriority);
+        const priority = ordered.slice(0, PRIORITY_ROW_LIMIT);
+        const watchlist = ordered.slice(PRIORITY_ROW_LIMIT);
+        _renderPredTable(priority, watchlist, filtered.length, cards.length);
+    }
+
+    const _PRED_TABLE_COLUMNS = ["Asset & Risk", "Failure Timing", "Recurring Issue", "Reliability", "Operational Impact", "Spare-Parts Readiness", "Details"];
+
+    function _renderPredTable(priority, watchlist, filteredCount, totalCount) {
+        const body = document.getElementById("mira-pred-cats-body");
         if (!body) return;
         body.innerHTML = "";
-        if (!cards.length) {
-            body.append(el("p", "mira-ov-muted", "No predictive risk signals met the scoring threshold for the selected period."));
+
+        if (!filteredCount) {
+            body.append(el("p", "mira-ov-muted", "No assessed assets match the selected filters."));
             return;
         }
-        const grid = el("div", "mira-pred-risk-grid");
-        cards.forEach((card) => {
-            const tone = _riskTone(card.risk_level);
-            const item = el("article", "mira-pred-risk-card mira-pred-risk-" + tone);
-            const head = el("div", "mira-pred-risk-head");
-            const title = el("div");
-            title.append(el("h3", null, card.asset_name || "Unknown asset"));
-            title.append(el("p", "mira-ov-muted", card.machine_group || "Unknown machine group"));
-            const badge = el("span", "mira-ov-risk-badge mira-ov-risk-" + tone, `${card.risk_level || "Low"} · ${card.risk_score || 0}`);
-            head.append(title, badge);
-            item.append(head);
 
-            const signals = el("div", "mira-pred-risk-block");
-            signals.append(el("div", "mira-pred-risk-block-title", "Risk Score"));
-            const sigList = el("ul", "mira-pred-risk-list");
-            (card.main_signals || []).slice(0, 3).forEach((signal) => {
-                sigList.append(el("li", null, `${signal.label || signal} (+${signal.points || 0})`));
+        const summaryLine = el("p", "mira-ov-muted mira-pred-table-summary",
+            `Showing ${filteredCount} of ${totalCount} assessed assets.`);
+        body.append(summaryLine);
+
+        body.append(el("div", "mira-pred-table-section-label", `PRIORITY ASSETS (${priority.length})`));
+        body.append(_buildPredTable(priority));
+
+        if (watchlist.length) {
+            const wlHead = el("button", "mira-pred-watchlist-toggle",
+                `${watchlistExpanded ? "▾" : "▸"} Watchlist — ${watchlist.length} asset${watchlist.length === 1 ? "" : "s"}${watchlistExpanded ? "" : " [Expand]"}`);
+            wlHead.type = "button";
+            wlHead.addEventListener("click", () => {
+                watchlistExpanded = !watchlistExpanded;
+                _renderPredTableAndKpis(predictiveLatestPayload ? (predictiveLatestPayload.cards || []) : []);
             });
-            signals.append(sigList);
-            item.append(signals);
+            body.append(wlHead);
+            if (watchlistExpanded) body.append(_buildPredTable(watchlist));
+        }
+    }
 
-            const viewBtn = el("button", "mira-pred-view-details-btn", "View details →");
-            viewBtn.type = "button";
-            viewBtn.addEventListener("click", () => _openAssetDetailDrawer(card));
-            item.append(viewBtn);
-            grid.append(item);
-        });
-        body.append(grid);
+    function _buildPredTable(rows) {
+        const table = el("table", "mira-pred-table");
+        const thead = el("thead");
+        const headRow = el("tr");
+        _PRED_TABLE_COLUMNS.forEach((c) => headRow.append(el("th", null, c)));
+        thead.append(headRow);
+        table.append(thead);
+        const tbody = el("tbody");
+        rows.forEach((card) => tbody.append(_buildPredTableRow(card)));
+        table.append(tbody);
+        return table;
+    }
+
+    function _partsReadinessTone(status) {
+        if (status === "out_of_stock") return "high";
+        if (status === "low_stock") return "medium";
+        if (status === "available") return "low";
+        return "neutral";
+    }
+
+    function _buildPredTableRow(card) {
+        const tone = _riskTone(card.risk_level);
+        const tr = el("tr", "mira-pred-row mira-pred-row-" + tone);
+
+        // Asset & Risk
+        const c1 = el("td", "mira-pred-cell");
+        c1.append(el("div", "mira-pred-cell-strong", card.asset_name || "Unknown asset"));
+        // Machine group is sometimes identical to the asset's own name (single-unit
+        // groups) — skip the redundant sub-line rather than repeating the title.
+        if (card.machine_group && card.machine_group !== card.asset_name) {
+            c1.append(el("div", "mira-pred-cell-sub", card.machine_group));
+        }
+        c1.append(el("span", "mira-ov-risk-badge mira-ov-risk-" + tone, `${card.risk_level || "Low"} · ${card.risk_score || 0}`));
+        c1.append(el("div", "mira-pred-cell-sub", card.criticality || "Unknown"));
+        tr.append(c1);
+
+        // Failure Timing
+        const c2 = el("td", "mira-pred-cell");
+        const lastFail = card.last_failure;
+        c2.append(el("div", null, lastFail ? `Last failure: ${lastFail.date} (${lastFail.days_ago}d ago)` : "Last failure: none recorded"));
+        const occ = (card.latest_recurring_issue_pattern || {}).next_likely_occurrence;
+        if (occ) {
+            c2.append(el("div", "mira-pred-cell-sub", `Expected recurrence: ${occ.label || occ.confidence}`));
+            if (occ.confidence !== "Insufficient history") c2.append(el("div", "mira-pred-cell-sub", `Confidence: ${occ.confidence}`));
+        } else {
+            c2.append(el("div", "mira-pred-cell-sub", "Expected recurrence: Insufficient history"));
+        }
+        tr.append(c2);
+
+        // Recurring Issue
+        const c3 = el("td", "mira-pred-cell");
+        const pattern = card.latest_recurring_issue_pattern || {};
+        c3.append(el("div", null, pattern.issue && pattern.issue !== "Unclassified" ? pattern.issue : "No confirmed recurring issue"));
+        if (pattern.count > 1) c3.append(el("div", "mira-pred-cell-sub", `${pattern.count} similar occurrences`));
+        tr.append(c3);
+
+        // Reliability
+        const c4 = el("td", "mira-pred-cell");
+        const mtbf = card.mtbf_trend || {};
+        if (mtbf.state === "insufficient" || mtbf.current_days === null || mtbf.current_days === undefined) {
+            c4.append(el("div", null, "MTBF: Insufficient data"));
+        } else {
+            const arrow = mtbf.state === "declining" ? "↓" : mtbf.state === "improving" ? "↑" : "→";
+            const pct = mtbf.pct_change !== null && mtbf.pct_change !== undefined ? `${arrow}${Math.abs(mtbf.pct_change)}%` : "";
+            const basis = mtbf.basis_label || "previous period";
+            c4.append(el("div", null, `MTBF: ${mtbf.current_days}d${pct ? " / " + pct : ""}`));
+            c4.append(el("div", "mira-pred-cell-sub",
+                mtbf.state === "current_only"
+                    ? `Past 12 months; ${basis} unavailable`
+                    : mtbf.state.charAt(0).toUpperCase() + mtbf.state.slice(1) + " vs " + basis));
+        }
+        tr.append(c4);
+
+        // Operational Impact
+        const c5 = el("td", "mira-pred-cell");
+        c5.append(el("div", null, `Criticality: ${card.criticality || "Unknown"}`));
+        c5.append(el("div", "mira-pred-cell-sub", (card.redundancy || {}).label || "Redundancy: Unknown"));
+        tr.append(c5);
+
+        // Spare-Parts Readiness
+        const c6 = el("td", "mira-pred-cell");
+        const pr = card.parts_readiness || { status: "unknown", label: "Stock data unavailable" };
+        const prTone = _partsReadinessTone(pr.status);
+        const prBadge = el("span", "mira-ov-risk-badge mira-ov-risk-" + prTone, pr.label);
+        c6.append(prBadge);
+        if (!card.parts_readiness_computed) c6.append(el("div", "mira-pred-cell-sub", "Calculating…"));
+        tr.append(c6);
+
+        // Details
+        const c7 = el("td", "mira-pred-cell mira-pred-cell-details");
+        const viewBtn = el("button", "mira-pred-view-details-btn", "View details →");
+        viewBtn.type = "button";
+        viewBtn.addEventListener("click", () => _openAssetDetailDrawer(card));
+        c7.append(viewBtn);
+        tr.append(c7);
+
+        return tr;
     }
 
     // ── "View Details" drill-down drawer ─────────────────────────────────────
@@ -670,7 +1037,9 @@
         const headTop = el("div", "mira-pred-detail-header-top");
         const nameBlock = el("div");
         nameBlock.append(el("h3", null, card.asset_name || "Unknown asset"));
-        nameBlock.append(el("p", "mira-ov-muted", card.machine_group || "Unknown machine group"));
+        if (card.machine_group && card.machine_group !== card.asset_name) {
+            nameBlock.append(el("p", "mira-pred-detail-machine-group", card.machine_group));
+        }
         headTop.append(nameBlock, el("span", "mira-ov-risk-badge mira-ov-risk-" + tone, `${card.risk_level || "Low"} · ${card.risk_score || 0}/10`));
         header.append(headTop);
 
@@ -967,8 +1336,42 @@
             return wrap;
         }
 
+        // Parts actually tied to this asset's own usage/repair history, with a
+        // relationship classification and readiness — direct/repeated-use parts
+        // first, since not every part in the machine group is confirmed
+        // failure-related for this specific asset.
+        if (sp.relevant_parts && sp.relevant_parts.length) {
+            const relSec = _drawerSection("Spare-Parts Readiness");
+            if (sp.readiness_summary && sp.readiness_summary.label) {
+                relSec.append(_drawerKV("Summary", sp.readiness_summary.label));
+            }
+            const table = el("table", "mira-pred-sp-table");
+            table.innerHTML = "<thead><tr>" + ["Part", "Relationship", "On Hand", "Minimum", "Recent Usage", "Status"].map((h) => `<th>${escOv(h)}</th>`).join("") + "</tr></thead>";
+            const tbody = el("tbody");
+            sp.relevant_parts.forEach((p) => {
+                const tone = _STOCK_STATUS_TONE[p.stock_status] || "neutral";
+                const tr = el("tr");
+                tr.innerHTML = [
+                    escOv(p.part_name || "—"),
+                    escOv(p.relationship || "—"),
+                    p.on_hand != null ? p.on_hand : "—",
+                    p.min_stock != null ? p.min_stock : "—",
+                    `${p.recent_usage_count || 0}x in ${p.recent_usage_window_days || 90}d${p.last_usage_date ? " (last " + escOv(p.last_usage_date) + ")" : ""}`,
+                    `<span class="mira-ov-risk-badge mira-ov-risk-${tone}">${escOv(p.stock_status || "Stock data unavailable")}</span>`,
+                ].map((v) => `<td>${v}</td>`).join("");
+                tbody.append(tr);
+            });
+            table.append(tbody);
+            relSec.append(table);
+            wrap.append(relSec);
+        } else if (sp.readiness_summary) {
+            const relSec = _drawerSection("Spare-Parts Readiness");
+            relSec.append(el("p", "mira-ov-muted", sp.readiness_summary.label || "No parts directly tied to this asset's usage history."));
+            wrap.append(relSec);
+        }
+
         if (sp.readiness) {
-            const readySec = _drawerSection("Spare Part Readiness");
+            const readySec = _drawerSection("Spare Part Readiness (all linked parts)");
             const r = sp.readiness;
             readySec.append(_drawerKV("Likely required for", r.likely_required_for || "Not available"));
             readySec.append(_drawerKV("Parts available", r.parts_available == null ? "Unknown" : (r.parts_available ? "Yes" : "No")));
@@ -1159,12 +1562,18 @@
         return wrap;
     }
 
-    function _buildAssetOverviewTab(card, detail) {
-        const wrap = el("div");
-
-        // A. Risk Score Breakdown
-        const scoreSec = _drawerSection(`Risk Score: ${card.risk_score || 0} / 10`);
-        const contributors = (detail && detail.risk && detail.risk.contributors) || card.main_signals || [];
+    // Section-A helper: Indicator | Result | Score table, reconciling exactly
+    // with the risk score shown on the table row (same main_signals/contributors
+    // source, just tabulated).
+    function _buildRiskScoreBreakdownTable(card, contributors) {
+        const table = el("table", "mira-pred-score-breakdown");
+        const thead = el("thead");
+        const hr = el("tr");
+        ["Indicator", "Result", "Score"].forEach((h) => hr.append(el("th", null, h)));
+        thead.append(hr);
+        table.append(thead);
+        const tbody = el("tbody");
+        let total = 0;
         contributors.forEach((s) => {
             let valueText = "";
             if (s.value && typeof s.value === "object") {
@@ -1172,8 +1581,30 @@
             } else if (s.value !== undefined && s.value !== true) {
                 valueText = String(s.value);
             }
-            scoreSec.append(_drawerKV(`${s.label} (+${s.points})`, valueText || "—"));
+            total += Number(s.points) || 0;
+            const tr = el("tr");
+            tr.append(el("td", null, s.label));
+            tr.append(el("td", null, valueText || "—"));
+            tr.append(el("td", "mira-pred-score-cell", `+${s.points}`));
+            tbody.append(tr);
         });
+        const totalRow = el("tr", "mira-pred-score-total-row");
+        totalRow.append(el("td", null, "Total"));
+        totalRow.append(el("td", null, ""));
+        totalRow.append(el("td", "mira-pred-score-cell", `${total} / 10`));
+        tbody.append(totalRow);
+        table.append(tbody);
+        return table;
+    }
+
+    function _buildAssetOverviewTab(card, detail) {
+        const wrap = el("div");
+
+        // A. Risk Score Breakdown — table reconciles exactly with the score
+        // badge shown on the management table row (same score, same source).
+        const scoreSec = _drawerSection(`Risk Score: ${card.risk_score || 0} / 10`);
+        const contributors = (detail && detail.risk && detail.risk.contributors) || card.main_signals || [];
+        scoreSec.append(_buildRiskScoreBreakdownTable(card, contributors));
         const otherIndicators = (detail && detail.risk && detail.risk.other_assessed_indicators) || [];
         if (otherIndicators.length) {
             const details = document.createElement("details");
@@ -1188,6 +1619,26 @@
         }
         wrap.append(scoreSec);
 
+        // A2. Criticality / Redundancy — separate concepts, never conflated
+        // with the risk score above.
+        const impactSec = _drawerSection("Criticality & Redundancy");
+        impactSec.append(_drawerKV("Criticality", card.criticality || "Unknown"));
+        impactSec.append(_drawerKV("Production redundancy", (card.redundancy || {}).label || "Unknown"));
+        // Some Asset IDs are reused across multiple physical units in the source
+        // system (per-row description text is used to split them into separate
+        // cards) — surface the shared ID here so management can manually
+        // reconcile, per the "keep splitting, add visibility" decision.
+        const siblingCards = ((predictiveLatestPayload && predictiveLatestPayload.cards) || [])
+            .filter((c) => c.asset_id && c.asset_id === card.asset_id && c.asset_name !== card.asset_name);
+        if (card.asset_id && siblingCards.length) {
+            impactSec.append(_drawerKV(
+                "Shared Asset ID note",
+                `Asset ID ${card.asset_id} is also used by: ${siblingCards.map((c) => c.asset_name).join(", ")}. `
+                + "These are shown as separate cards based on per-record description text — verify against Asset Master if this looks incorrect."
+            ));
+        }
+        wrap.append(impactSec);
+
         // B. Latest Maintenance Pattern
         const pattern = (detail && detail.patterns) || card.latest_recurring_issue_pattern || {};
         const patternSec = _drawerSection("Latest Maintenance Pattern");
@@ -1198,10 +1649,13 @@
         const nextOcc = pattern.next_likely_occurrence;
         patternSec.append(_drawerKV(
             "Next likely occurrence",
-            nextOcc && nextOcc.label
-                ? `${nextOcc.label} (based on ${nextOcc.based_on_cycles} past cycles, median ${nextOcc.median_gap_days}d apart)`
-                : "Not enough recurrence history to estimate"
+            nextOcc && nextOcc.label && nextOcc.median_gap_days != null
+                ? `${nextOcc.label} (based on ${nextOcc.valid_intervals_used != null ? nextOcc.valid_intervals_used : nextOcc.based_on_cycles} valid intervals, median ${nextOcc.median_gap_days}d apart)`
+                : "Insufficient history to estimate"
         ));
+        if (nextOcc && nextOcc.confidence && nextOcc.confidence !== "Insufficient history") {
+            patternSec.append(_drawerKV("Recurrence confidence", nextOcc.confidence));
+        }
         wrap.append(patternSec);
 
         // C. Current Maintenance Status
@@ -1209,30 +1663,67 @@
         const ms = (detail && detail.maintenance_status) || {};
         const openStatus = card.open_wo_status || {};
         statusSec.append(_drawerKV("Open WO count", ms.open_wo_count != null ? ms.open_wo_count : (openStatus.count != null ? openStatus.count : "Not available")));
-        statusSec.append(_drawerKV("Oldest open WO age (days)", ms.oldest_open_wo_days != null ? ms.oldest_open_wo_days : (openStatus.oldest_age_days != null ? openStatus.oldest_age_days : "Not available")));
+        statusSec.append(_drawerKV("Oldest open WO age (days)", ms.oldest_open_wo_days != null ? ms.oldest_open_wo_days : ((ms.open_wo_count === 0 || openStatus.count === 0) ? "No open WOs" : (openStatus.oldest_age_days != null ? openStatus.oldest_age_days : "Not available"))));
         statusSec.append(_drawerKV("Latest PM date", ms.latest_pm_date || "Not available"));
-        statusSec.append(_drawerKV("Next PM due date", ms.next_pm_date || "Not available"));
+        statusSec.append(_drawerKV("Next PM due date", ms.next_pm_due_date || ms.next_pm_date || "Not available"));
         statusSec.append(_drawerKV("PM overdue", ms.pm_overdue == null ? "Not available" : (ms.pm_overdue ? "Yes" : "No")));
         statusSec.append(_drawerKV("MTTR (hours)", ms.mttr_hours != null ? ms.mttr_hours : "Not available"));
         statusSec.append(_drawerKV("Current MTBF (days)", ms.mtbf_days != null ? ms.mtbf_days : "Not available"));
+        const mtbfChange = ms.mtbf_change_detail || {};
+        const mtbfState = ms.mtbf_change_state || (ms.mtbf_changed_vs_previous_period ? "declining" : "");
+        let mtbfVsText = "Not available";
+        if (mtbfChange.current_days != null && mtbfChange.previous_days != null) {
+            const stateText = mtbfState === "declining" ? "decreased" : mtbfState === "improving" ? "improved" : "stable";
+            const pctText = mtbfChange.pct_change != null ? `, ${Math.abs(mtbfChange.pct_change)}%` : "";
+            mtbfVsText = `${stateText} (${mtbfChange.current_days}d vs ${mtbfChange.previous_days}d${pctText})`;
+        } else if (ms.mtbf_days != null) {
+            mtbfVsText = "Previous period unavailable";
+        }
         statusSec.append(_drawerKV(
             "MTBF vs previous period",
-            ms.mtbf_changed_vs_previous_period && ms.mtbf_change_detail
-                ? `decreased (${ms.mtbf_change_detail.current_days}d vs ${ms.mtbf_change_detail.previous_days}d)`
-                : "Not available"
+            mtbfVsText
         ));
         wrap.append(statusSec);
 
-        // D. AI Insight — lands in a later phase; real not-yet-available state,
-        // not a fake summary.
+        // F. Failure History — latest 5-10 CORRECTIVE events only (preventive
+        // maintenance is never shown as a "failure"), from the same work-order
+        // rows the full Work Orders tab uses.
+        const allWos = (detail && detail.work_orders) || [];
+        const failureHistory = allWos
+            .filter((r) => r.type === "Corrective")
+            .slice()
+            .sort((a, b) => String(b.date || "").localeCompare(String(a.date || "")))
+            .slice(0, 10);
+        if (failureHistory.length) {
+            const histSec = _drawerSection("Failure History (latest corrective events)");
+            const table = el("table", "mira-pred-score-breakdown");
+            const thead = el("thead");
+            const hr = el("tr");
+            ["Date", "WO/MR", "Issue", "Downtime", "Status"].forEach((h) => hr.append(el("th", null, h)));
+            thead.append(hr);
+            table.append(thead);
+            const tbody = el("tbody");
+            failureHistory.forEach((r) => {
+                const tr = el("tr");
+                tr.append(el("td", null, r.date || "—"));
+                tr.append(el("td", null, r.wo_number || r.mr_number || "—"));
+                tr.append(el("td", null, r.issue_category || "Unclassified"));
+                tr.append(el("td", null, r.downtime_hours != null ? `${r.downtime_hours}h` : "—"));
+                tr.append(el("td", null, r.status || (r.is_open ? "Open" : "Closed")));
+                tbody.append(tr);
+            });
+            table.append(tbody);
+            histSec.append(table);
+            wrap.append(histSec);
+        }
+
+        // G. AI Insight — a short summary of the structured data above only.
+        // Never phrased as a recommendation/suggested action — management
+        // reviews the calculated data and decides any action itself.
         const aiSec = _drawerSection("AI Insight");
         const aiBody = el("p", detail && detail.ai_insight ? null : "mira-ov-muted");
         aiBody.dataset.aiInsightBody = "true";
-        aiBody.textContent = (detail && detail.ai_insight) || (
-            card.suggested_maintenance_action
-                ? `Suggested action: ${card.suggested_maintenance_action}`
-                : "AI-generated insight isn't available for this asset yet."
-        );
+        aiBody.textContent = (detail && detail.ai_insight) || "AI-generated summary isn't available for this asset yet.";
         aiSec.append(aiBody);
         wrap.append(aiSec);
 

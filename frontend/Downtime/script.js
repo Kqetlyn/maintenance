@@ -1292,10 +1292,18 @@ function getDataQualityFlags(row) {
     // A confirmed correction (Data Review) makes the row count as valid for KPIs.
     if (dataReviewCorrectionResolvedFor(row)) return ["Valid"];
     const rawFlags = row?.data_quality_flags;
-    if (Array.isArray(rawFlags) && rawFlags.length) return rawFlags.map((flag) => String(flag || "").trim()).filter(Boolean);
+    const flags = Array.isArray(rawFlags) && rawFlags.length
+        ? rawFlags.map((flag) => String(flag || "").trim()).filter(Boolean)
+        : [];
     const single = String(row?.data_quality_flag || "").trim();
-    if (!single) return ["Valid"];
-    return single.split(";").map((flag) => flag.trim()).filter(Boolean);
+    if (!flags.length && single) {
+        flags.push(...single.split(";").map((flag) => flag.trim()).filter(Boolean));
+    }
+    const actionableFlags = flags.filter((flag) => flag && flag !== "Valid");
+    if (rowHasMissingAssetId(row) && !actionableFlags.some((flag) => flag.toLowerCase() === "missing asset id")) {
+        actionableFlags.push("Missing Asset ID");
+    }
+    return actionableFlags.length ? actionableFlags : ["Valid"];
 }
 
 function getDataQualityFlag(row) {
@@ -1306,6 +1314,30 @@ function getDataQualityFlag(row) {
 function isDataQualityValid(row) {
     const flags = getDataQualityFlags(row);
     return flags.length === 1 && flags[0] === "Valid";
+}
+
+function rowHasMissingAssetId(row) {
+    if (!row) return true;
+    const rawAsset = String(
+        row.source_asset_id
+        || row.raw_machine_id
+        || row.asset_id
+        || row.machine_code
+        || row.equipment_id
+        || ""
+    ).trim();
+    const normalized = rawAsset.toUpperCase().replace(/[\s_-]+/g, "");
+    return !normalized || [
+        "WOASSET",
+        "WORKORDERASSET",
+        "MISSINGASSET",
+        "MISSINGASSETID",
+        "UNKNOWN",
+        "NA",
+        "N/A",
+        "NONE",
+        "NULL",
+    ].includes(normalized);
 }
 
 function getMrDefaultYear(meta = {}, rows = []) {
@@ -2684,6 +2716,7 @@ function renderTopicDataReliabilityPanel() {
         setText("topic-invalid-work-orders", "--");
         setText("topic-data-review-count", "--");
         renderDataReliabilityActionList([]);
+        renderAliasMappingReview();
         renderDataReliabilityHistoryTable([]);
         renderDataReviewHistoryPanel();
         return;
@@ -2702,6 +2735,7 @@ function renderTopicDataReliabilityPanel() {
     setText("topic-data-review-count", fmtNumber(reviewCount));
     setText("topic-data-reliability-sub", `${fmtNumber(qualityValid)} of ${fmtNumber(scoped.length)} work order records are valid.`);
     renderDataReliabilityActionList(buildWorkOrderSlaModel(scoped, getWorkOrderSlaReferenceDate()).entries);
+    renderAliasMappingReview();
     renderDataReliabilityHistoryTable(scoped);
     renderDataReviewHistoryPanel();
 }
@@ -5288,7 +5322,7 @@ function classifyMissingFieldType(entry) {
     if (entry.slaStatus === "Missing End Date") return "Missing Actual End";
     const delayText = (entry.delayLines || []).join(" ").toLowerCase();
     if (delayText.includes("invalid") || delayText.includes("before")) return "Invalid Date";
-    if (!getMachineAssetId(entry.row)) return "Missing Asset";
+    if (rowHasMissingAssetId(entry.row)) return "Missing Asset";
     if (entry.actualStart?.date && entry.actualEnd?.date && entry.repairHours === null) return "Missing Duration";
     return "Others";
 }
@@ -5315,7 +5349,7 @@ function missingEntryView(entry) {
         woId: entry.id,
         mrId: entry.requestId || "",
         equipment: entry.equipmentName,
-        assetId: getMachineAssetId(entry.row) || "--",
+        assetId: rowHasMissingAssetId(entry.row) ? "--" : (getMachineAssetId(entry.row) || "--"),
         machineGroup: getSlaMachineGroup(entry.row),
         severityLabel: entry.severity.label,
         severityRaw: entry.severityRaw || "",
@@ -5727,7 +5761,7 @@ function renderDataReliabilityActionList(entries = []) {
         const translatedDescription = cleanMrValue(row?.translated_description);
         const mrId = getMrRequestId(row, index) || entry.id || "--";
         const assetName = getMachineEquipmentName(row) || "--";
-        const assetId = row?.asset_id || row?.machine_code || "--";
+        const assetId = rowHasMissingAssetId(row) ? "Missing Asset ID" : (row?.asset_id || row?.machine_code || "--");
         const key = getDataReviewRowKey(row);
         const ov = getCorrectionOverride(key);
         dataReviewActionSnapshots[key] = {
@@ -5761,6 +5795,122 @@ function renderDataReliabilityActionList(entries = []) {
             </tr>
         `;
     }).join("");
+}
+
+function getAliasMappingReviewRows() {
+    const rows = getManagement()?.alias_mapping_review;
+    return Array.isArray(rows) ? rows : [];
+}
+
+function aliasReviewStatusKey(rowOrStatus) {
+    const status = typeof rowOrStatus === "string"
+        ? rowOrStatus
+        : String(rowOrStatus?.review_status || rowOrStatus?.mapping_status || "").trim();
+    const lower = String(status || "").toLowerCase();
+    if (lower.includes("conflict")) return "conflict";
+    if (lower.includes("inferred")) return "inferred";
+    if (lower.includes("unresolved") || lower.includes("verification")) return "unresolved";
+    if (lower.includes("confirmed")) return "confirmed";
+    return "other";
+}
+
+function aliasReviewMatchesTopicScope(row) {
+    const year = String(topicReliabilityYearFilter || "").trim();
+    const month = String(topicReliabilityMonthFilter || "").trim();
+    if (!year && !month) return true;
+    const dt = parseDateValue(row?.actual_start || row?.actual_start_time || row?.actual_end || row?.actual_end_time || row?.created_date || row?.request_created_time);
+    if (!dt) return false;
+    if (year && String(dt.getFullYear()) !== year) return false;
+    if (month) {
+        const mm = String(dt.getMonth() + 1).padStart(2, "0");
+        if (mm !== month) return false;
+    }
+    return true;
+}
+
+function getFilteredAliasMappingReviewRows() {
+    const statusFilter = document.getElementById("alias-mapping-review-filter")?.value || "all";
+    return getAliasMappingReviewRows()
+        .filter(aliasReviewMatchesTopicScope)
+        .filter((row) => statusFilter === "all" || aliasReviewStatusKey(row) === statusFilter);
+}
+
+function renderAliasMappingReview() {
+    const body = document.getElementById("alias-mapping-review-body");
+    const count = document.getElementById("alias-mapping-review-count");
+    if (!body) return;
+    const rows = getFilteredAliasMappingReviewRows();
+    const total = getAliasMappingReviewRows().filter(aliasReviewMatchesTopicScope).length;
+    if (count) {
+        const filter = document.getElementById("alias-mapping-review-filter")?.value || "all";
+        count.textContent = `${fmtNumber(rows.length)} shown | ${fmtNumber(total)} alias mapping record(s) in scope${filter !== "all" ? ` (${filter})` : ""}.`;
+    }
+    if (!rows.length) {
+        body.innerHTML = `<tr><td colspan="7" class="empty-cell">No alias mapping records match the selected review filter.</td></tr>`;
+        return;
+    }
+    body.innerHTML = rows.slice(0, 250).map((row) => {
+        const status = row.review_status || row.mapping_status || "--";
+        const badge = mixerMappingBadge({ aliasMappingStatus: status, mappingNote: row.mapping_note || row.note || "" });
+        return `
+            <tr>
+                <td>
+                    <div class="cell-title">${escapeHtml(row.mr_number || "--")}</div>
+                    <div class="cell-sub">${escapeHtml(row.wo_number || "--")}</div>
+                </td>
+                <td>
+                    <div class="cell-title">${escapeHtml(row.source_asset_name || "--")}</div>
+                    <div class="cell-sub">${escapeHtml(row.source_asset_id || "--")}</div>
+                </td>
+                <td>${escapeHtml(row.detected_alias || "--")}</td>
+                <td>
+                    <div class="cell-title">${escapeHtml(row.canonical_asset_name || "--")}</div>
+                    <div class="cell-sub">${escapeHtml(row.canonical_asset_id || "--")}</div>
+                </td>
+                <td>${badge || escapeHtml(status)}</td>
+                <td>${escapeHtml(row.confidence || row.mapping_confidence || "--")}</td>
+                <td class="description-cell">${escapeHtml(row.mapping_note || row.note || "--")}</td>
+            </tr>
+        `;
+    }).join("");
+}
+
+function exportAliasMappingReview() {
+    const rows = getFilteredAliasMappingReviewRows();
+    if (!rows.length) {
+        renderAliasMappingReview();
+        return;
+    }
+    if (typeof XLSX === "undefined") {
+        alert("SheetJS not loaded yet. Please wait and retry.");
+        return;
+    }
+    const headers = ["MR", "WO", "Source Asset ID", "Source Asset Name", "Detected Alias", "Canonical Asset ID", "Canonical Asset Name", "Mapping Status", "Review Status", "Confidence", "MTBF Included", "Multiple Machines Mentioned", "Actual Start", "Actual End", "Repair Duration Hours", "Mapping Note", "Description"];
+    const data = rows.map((row) => [
+        row.mr_number || "",
+        row.wo_number || "",
+        row.source_asset_id || "",
+        row.source_asset_name || "",
+        row.detected_alias || "",
+        row.canonical_asset_id || "",
+        row.canonical_asset_name || "",
+        row.mapping_status || "",
+        row.review_status || "",
+        row.confidence || row.mapping_confidence || "",
+        row.mtbf_included === false ? "No" : "Yes",
+        row.multiple_machines ? "Yes" : "No",
+        row.actual_start || row.actual_start_time || "",
+        row.actual_end || row.actual_end_time || "",
+        row.repair_duration_hours ?? "",
+        row.mapping_note || row.note || "",
+        row.description || "",
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([headers, ...data]);
+    ws["!cols"] = headers.map((header) => ({ wch: Math.min(Math.max(header.length + 4, 14), 42) }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Alias Mapping Review");
+    const datePart = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    XLSX.writeFile(wb, `Alias_Mapping_Review_${datePart}.xlsx`);
 }
 
 function buildDataReliabilityHistoryRows(rows = []) {
@@ -5873,6 +6023,9 @@ function formatDateInputValue(date) {
 }
 
 function getMachineEquipmentName(row) {
+    if (row?.mixer_related && row?.canonical_asset_name) {
+        return String(row.canonical_asset_name).trim();
+    }
     return String(
         row?.asset_display_name
         || row?.machine_name_display
@@ -5885,6 +6038,9 @@ function getMachineEquipmentName(row) {
 }
 
 function getMachineAssetId(row) {
+    if (row?.mixer_related && row?.canonical_asset_id) {
+        return String(row.canonical_asset_id).trim();
+    }
     return String(row?.asset_id || row?.machine_code || "").trim();
 }
 
@@ -9089,7 +9245,17 @@ function getFilteredMachineGroups() {
         if (year && (!raised || String(raised.getFullYear()) !== year)) return false;
         if (month && (!raised || formatMonthKey(raised) !== month)) return false;
         if (search) {
-            const haystack = [row.machine_group, row.location, row.asset_id, getMachineEquipmentName(row), row.description].join(" ").toLowerCase();
+            const haystack = [
+                row.machine_group,
+                row.location,
+                row.asset_id,
+                row.source_asset_id,
+                row.canonical_asset_id,
+                row.canonical_asset_name,
+                row.mixer_alias,
+                getMachineEquipmentName(row),
+                row.description,
+            ].join(" ").toLowerCase();
             if (!haystack.includes(search)) return false;
         }
         return true;
@@ -9097,9 +9263,13 @@ function getFilteredMachineGroups() {
 }
 
 function getPerformanceMachineGroup(row) {
+    if (row?.mixer_related) return "Production Equipment";
     const rawMachineGroup = String(row?.machine_group || "").trim();
     const haystack = [
         row.machine_group,
+        row.canonical_machine_group,
+        row.canonical_asset_name,
+        row.mixer_alias,
         getMachineEquipmentName(row),
         row.description,
         row.job_trade,
@@ -9716,6 +9886,8 @@ function wireFilters() {
     document.getElementById("missing-data-export-btn")?.addEventListener("click", exportDataCleansingTracker);
     document.getElementById("missing-data-followup-export-btn")?.addEventListener("click", exportDataCleansingTracker);
     document.getElementById("cleansing-tracker-export-btn")?.addEventListener("click", exportDataCleansingTracker);
+    document.getElementById("alias-mapping-review-filter")?.addEventListener("change", renderAliasMappingReview);
+    document.getElementById("alias-mapping-review-export-btn")?.addEventListener("click", exportAliasMappingReview);
     const missingDataCard = document.getElementById("missing-data-drilldown");
     if (missingDataCard) {
         missingDataCard.addEventListener("change", (e) => {
@@ -10436,7 +10608,7 @@ function wireInactiveCriticalMachineDrawer() {
 function getWorkOrdersForAsset(assetId) {
     const rows = getWorkOrderRows(getManagement());
     return rows.filter((row) => {
-        const rowId = String(row.asset_id || "").trim().toUpperCase();
+        const rowId = String(getMachineAssetId(row) || "").trim().toUpperCase();
         return rowId === String(assetId || "").trim().toUpperCase();
     }).sort((a, b) => {
         const ta = String(a.start_time || a.actual_start_time || a.maintenance_start_time || "");
@@ -12920,7 +13092,41 @@ function kdiAssetMatchesSearch(entry, searchTerm) {
     if (!normalizedSearch) return true;
     const assetName = kdiNormalizeSearchTerm(entry?.assetName);
     const assetId = kdiNormalizeSearchTerm(entry?.assetId);
-    return assetName.includes(normalizedSearch) || assetId.includes(normalizedSearch);
+    const sourceAssetId = kdiNormalizeSearchTerm(entry?.sourceAssetId);
+    const alias = kdiNormalizeSearchTerm(entry?.mixerAlias);
+    return assetName.includes(normalizedSearch) || assetId.includes(normalizedSearch)
+        || sourceAssetId.includes(normalizedSearch) || alias.includes(normalizedSearch);
+}
+
+function kdiCanonicalAssetId(wo, fallbackAssetId = "") {
+    if (wo?.mixer_related && wo?.canonical_asset_id) return String(wo.canonical_asset_id).trim();
+    return String(fallbackAssetId || wo?.asset_id || wo?.equipment_id || "").trim();
+}
+
+function kdiCanonicalAssetName(wo, meta, fallbackAssetId = "") {
+    if (wo?.mixer_related && wo?.canonical_asset_name) return String(wo.canonical_asset_name).trim();
+    return String(meta?.asset_name || meta?.machine_name || wo?.machine_name || wo?.asset_name || wo?.equipment_name || fallbackAssetId).trim();
+}
+
+function kdiCanonicalGroup(wo, meta) {
+    if (wo?.mixer_related) return "Production Equipment";
+    return String(meta?.machine_name || wo?.machine_group || wo?.equipment_name || "Unclassified").trim();
+}
+
+function kdiCanonicalMachineGroup(wo, meta) {
+    if (wo?.mixer_related) return String(wo?.canonical_machine_group || meta?.asset_machine_group || wo?.asset_machine_group || "Mixers").trim();
+    return String(meta?.asset_machine_group || wo?.asset_machine_group || "").trim();
+}
+
+function mixerMappingBadge(row) {
+    const status = String(row?.aliasMappingStatus || row?.alias_mapping_status || "").trim();
+    if (!status) return "";
+    const key = status.toLowerCase().includes("conflict") ? "conflict"
+        : status.toLowerCase().includes("inferred") ? "inferred"
+            : status.toLowerCase().includes("verification") || status.toLowerCase().includes("unresolved") ? "unresolved"
+                : "confirmed";
+    const note = row?.mappingNote || row?.mapping_note || "Gold and Silver are operational nicknames detected from maintenance descriptions. Official asset IDs remain the primary source. Unresolved or conflicting aliases are excluded from individual-machine MTBF until verified.";
+    return `<span class="mixer-map-badge mixer-map-${key}" title="${escapeHtml(note)}">${escapeHtml(status)}</span>`;
 }
 
 function kdiPopulateMachineGroupSelect(selectId, entries = [], selectedValue = "") {
@@ -12990,18 +13196,25 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
     const assetMap = new Map();
 
     wos.forEach((wo) => {
-        const assetId = String(wo.asset_id || wo.equipment_id || "").trim() || "Missing Asset";
+        const sourceAssetId = String(wo.asset_id || wo.equipment_id || "").trim() || "Missing Asset";
+        const assetId = kdiCanonicalAssetId(wo, sourceAssetId) || "Missing Asset";
         if (!assetMap.has(assetId)) {
-            const meta = getAssetMetaFromLookup(assetLookup, wo.asset_id);
+            const meta = getAssetMetaFromLookup(assetLookup, sourceAssetId);
             // Prefer the per-asset friendly name from Asset_Master.xlsx,
             // then the machine-group name, then whatever the work-order export
             // carried, and only finally the asset ID. machine_name (group) is
             // kept in `group` below for the group-by view.
             assetMap.set(assetId, {
                 assetId,
-                assetName: String(meta?.asset_name || meta?.machine_name || wo.machine_name || wo.asset_name || wo.equipment_name || assetId).trim(),
-                group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
-                assetMachineGroup: String(meta?.asset_machine_group || wo.asset_machine_group || "").trim(),
+                sourceAssetId,
+                sourceAssetName: String(wo.source_asset_name || wo.asset_name || "").trim(),
+                assetName: kdiCanonicalAssetName(wo, meta, assetId),
+                group: kdiCanonicalGroup(wo, meta),
+                assetMachineGroup: kdiCanonicalMachineGroup(wo, meta),
+                mixerAlias: String(wo.mixer_alias || "").trim(),
+                aliasMappingStatus: String(wo.alias_mapping_status || "").trim(),
+                mappingNote: String(wo.mapping_note || "").trim(),
+                mtbfIncluded: wo.alias_mtbf_include !== false,
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 hours: [],
                 totalDowntimeHours: 0,
@@ -13045,7 +13258,13 @@ function kdiBuildMttrAssetRows(assetMap, critFilter, selectedGroup = "") {
         .map((entry) => ({
             assetId: entry.assetId,
             assetName: entry.assetName,
+            sourceAssetId: entry.sourceAssetId,
+            sourceAssetName: entry.sourceAssetName,
+            mixerAlias: entry.mixerAlias,
+            aliasMappingStatus: entry.aliasMappingStatus,
+            mappingNote: entry.mappingNote,
             group: entry.group,
+            assetMachineGroup: entry.assetMachineGroup || "",
             criticality: entry.criticality,
             woCount: entry.hours.length,
             totalWoCount: entry.workOrderCount || entry.hours.length + entry.missingCount,
@@ -13305,8 +13524,14 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
             rowsById.set(key, {
                 assetId: entry?.assetId || "--",
                 assetName: entry?.assetName || entry?.assetId || "--",
+                sourceAssetId: entry?.sourceAssetId || "",
+                sourceAssetName: entry?.sourceAssetName || "",
                 group: entry?.group || "Unclassified",
                 assetMachineGroup: entry?.assetMachineGroup || "",
+                mixerAlias: entry?.mixerAlias || "",
+                aliasMappingStatus: entry?.aliasMappingStatus || "",
+                mappingNote: entry?.mappingNote || "",
+                mtbfBaseline: entry?.mtbfBaseline || "",
                 criticality: entry?.criticality || "Unclassified",
                 woCount: 0,
                 mttrWoCount: 0,
@@ -13320,8 +13545,14 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
         }
         const row = rowsById.get(key);
         if ((!row.assetName || row.assetName === row.assetId) && entry?.assetName) row.assetName = entry.assetName;
+        if (!row.sourceAssetId && entry?.sourceAssetId) row.sourceAssetId = entry.sourceAssetId;
+        if (!row.sourceAssetName && entry?.sourceAssetName) row.sourceAssetName = entry.sourceAssetName;
         if (!row.group || row.group === "Unclassified") row.group = entry?.group || row.group;
         if (!row.assetMachineGroup && entry?.assetMachineGroup) row.assetMachineGroup = entry.assetMachineGroup;
+        if (!row.mixerAlias && entry?.mixerAlias) row.mixerAlias = entry.mixerAlias;
+        if (!row.aliasMappingStatus && entry?.aliasMappingStatus) row.aliasMappingStatus = entry.aliasMappingStatus;
+        if (!row.mappingNote && entry?.mappingNote) row.mappingNote = entry.mappingNote;
+        if (!row.mtbfBaseline && entry?.mtbfBaseline) row.mtbfBaseline = entry.mtbfBaseline;
         if ((!row.criticality || row.criticality === "Unclassified") && entry?.criticality) row.criticality = entry.criticality;
         return row;
     };
@@ -13346,6 +13577,7 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
         row.mtbfWoCount = entry.woCount || 0;
         row.woCount = Math.max(row.woCount, row.mtbfWoCount);
         row.avgMtbf = entry.avgMtbf ?? null;
+        row.mtbfBaseline = entry.mtbfBaseline || row.mtbfBaseline;
         row.repeatFailureCount = entry.gapCount || 0;
         row.lastFailureDate = kdiGetLaterDate(row.lastFailureDate, entry.lastFailureDate || null);
     });
@@ -13394,18 +13626,28 @@ function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critF
         tbody.innerHTML = `<tr><td colspan="8" class="empty-cell">${drilldownSearch ? "No assets match the search." : "No data for the selected filter."}</td></tr>`;
         return;
     }
-    tbody.innerHTML = rows.map((row) => `
-        <tr>
-            <td>${escapeHtml(row.assetId || "--")}</td>
-            <td>${escapeHtml(row.assetName || "--")}</td>
-            <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
-            <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
-            <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
-            <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
-            <td>${row.lastFailureDate ? escapeHtml(fmtDateOnly(row.lastFailureDate)) : "--"}</td>
-            <td class="kdi-number-cell">${fmtNumber(row.repeatFailureCount)}</td>
-        </tr>
-    `).join("");
+    tbody.innerHTML = rows.map((row) => {
+        const sourceLine = row.sourceAssetId && row.sourceAssetId !== row.assetId
+            ? `<div class="cell-sub">Source asset: ${escapeHtml(row.sourceAssetId)}</div>`
+            : "";
+        const baselineLine = row.mtbfBaseline ? `<div class="cell-sub">${escapeHtml(row.mtbfBaseline)}</div>` : "";
+        return `
+            <tr>
+                <td>${escapeHtml(row.assetId || "--")}</td>
+                <td>
+                    <div class="cell-title">${escapeHtml(row.assetName || "--")} ${mixerMappingBadge(row)}</div>
+                    ${sourceLine}
+                    ${baselineLine}
+                </td>
+                <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
+                <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
+                <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
+                <td>${row.lastFailureDate ? escapeHtml(fmtDateOnly(row.lastFailureDate)) : "--"}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.repeatFailureCount)}</td>
+            </tr>
+        `;
+    }).join("");
 }
 
 function kdiRenderMttrAssetDrilldown(assetMap, critFilter, groupOrMgFilter = "") {
@@ -13415,11 +13657,16 @@ function kdiRenderMttrAssetDrilldown(assetMap, critFilter, groupOrMgFilter = "")
 
 // ── MTBF ─────────────────────────────────────────────────────────────────────
 
-function kdiComputeMtbfMetrics(wos, assetLookup) {
+function kdiComputeMtbfMetrics(wos, assetLookup, baselineData = null) {
     const byAsset = new Map();
+    const baselineByAsset = new Map((baselineData?.allAssets || [])
+        .map((entry) => [String(entry?.assetId || "").trim(), entry])
+        .filter(([assetId]) => assetId));
 
     wos.forEach((wo) => {
-        const assetId = String(wo.asset_id || "").trim();
+        if (wo?.mixer_related && wo?.alias_mtbf_include === false) return;
+        const sourceAssetId = String(wo.asset_id || "").trim();
+        const assetId = kdiCanonicalAssetId(wo, sourceAssetId);
         if (!assetId || assetId.toUpperCase() === "WO-ASSET") return;
         if (isMtbfGeneralAreaWo(wo)) return;   // exclude general area/location placeholders
         const start = parseDateValue(wo.actual_start_time || wo.actual_start || wo.maintenance_start_time || wo.start_time);
@@ -13427,14 +13674,19 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
         // STRICT: no fallback to start — must have an actual end for end-to-start MTBF.
         const end = parseDateValue(wo.actual_end_time || wo.actual_end || wo.maintenance_end_time || wo.end_time);
         if (!byAsset.has(assetId)) {
-            const meta = getAssetMetaFromLookup(assetLookup, assetId);
+            const meta = getAssetMetaFromLookup(assetLookup, sourceAssetId || assetId);
             // Prefer the per-asset friendly name from Asset_Master.xlsx
             // (same precedence rule as the MTTR computation above).
             byAsset.set(assetId, {
                 assetId,
-                assetName: String(meta?.asset_name || meta?.machine_name || wo.machine_name || wo.asset_name || wo.equipment_name || assetId).trim(),
-                group: String(meta?.machine_name || wo.machine_group || wo.equipment_name || "Unclassified").trim(),
-                assetMachineGroup: String(meta?.asset_machine_group || wo.asset_machine_group || "").trim(),
+                sourceAssetId,
+                sourceAssetName: String(wo.source_asset_name || wo.asset_name || "").trim(),
+                assetName: kdiCanonicalAssetName(wo, meta, assetId),
+                group: kdiCanonicalGroup(wo, meta),
+                assetMachineGroup: kdiCanonicalMachineGroup(wo, meta),
+                mixerAlias: String(wo.mixer_alias || "").trim(),
+                aliasMappingStatus: String(wo.alias_mapping_status || "").trim(),
+                mappingNote: String(wo.mapping_note || "").trim(),
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 wos: [],
                 lastFailureDate: null,
@@ -13481,8 +13733,27 @@ function kdiComputeMtbfMetrics(wos, assetLookup) {
             assetResults.push(result);
             allAssets.push(result);
         } else {
-            assetsInsufficient++;
-            allAssets.push({ ...entry, avgMtbf: null, minMtbf: null, maxMtbf: null, gapCount: 0, woCount: sorted.length, hasMtbf: false });
+            const baseline = baselineByAsset.get(String(entry.assetId || "").trim());
+            if (baseline && baseline.avgMtbf !== null && baseline.avgMtbf !== undefined) {
+                const result = {
+                    ...entry,
+                    avgMtbf: baseline.avgMtbf,
+                    minMtbf: baseline.minMtbf ?? null,
+                    maxMtbf: baseline.maxMtbf ?? null,
+                    gapCount: baseline.gapCount || 0,
+                    woCount: sorted.length,
+                    hasMtbf: true,
+                    mtbfBaseline: "Historical MTBF baseline",
+                };
+                totalMtbfHours += result.avgMtbf;
+                totalGaps += result.gapCount;
+                assetsWithMtbf++;
+                assetResults.push(result);
+                allAssets.push(result);
+            } else {
+                assetsInsufficient++;
+                allAssets.push({ ...entry, avgMtbf: null, minMtbf: null, maxMtbf: null, gapCount: 0, woCount: sorted.length, hasMtbf: false });
+            }
         }
     });
 
@@ -13502,7 +13773,14 @@ function kdiBuildMtbfAssetRows(allAssets, critFilter, selectedGroup = "") {
         .map((entry) => ({
             assetId: entry.assetId,
             assetName: entry.assetName,
+            sourceAssetId: entry.sourceAssetId || "",
+            sourceAssetName: entry.sourceAssetName || "",
             group: entry.group,
+            assetMachineGroup: entry.assetMachineGroup || "",
+            mixerAlias: entry.mixerAlias || "",
+            aliasMappingStatus: entry.aliasMappingStatus || "",
+            mappingNote: entry.mappingNote || "",
+            mtbfBaseline: entry.mtbfBaseline || "",
             criticality: entry.criticality,
             woCount: entry.woCount,
             gapCount: entry.gapCount,
@@ -13817,7 +14095,10 @@ function updateKdiSection() {
     const mttrData = kdiComputeMttrMetrics(filtered, assetLookup);
     kdiCurrentMttrData = { ...mttrData, assetLookup };
 
-    const mtbfData = kdiComputeMtbfMetrics(filtered, assetLookup);
+    const historicalMtbfData = allWos.length !== filtered.length
+        ? kdiComputeMtbfMetrics(allWos, assetLookup)
+        : null;
+    const mtbfData = kdiComputeMtbfMetrics(filtered, assetLookup, historicalMtbfData);
     kdiCurrentMtbfData = { ...mtbfData, assetLookup };
 
     const periodLabel = kdiPeriodLabel(year, month);

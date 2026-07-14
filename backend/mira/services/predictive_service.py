@@ -19,10 +19,12 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import threading
 import time
 
 from ..core import context as ctx
 from . import kpi_query_service as kpi
+from pm_schedule_service import build_pm_schedule_payload
 
 # ── Per-process memo (same pattern as kpi_query_service) ────────────────────────
 _MEMO: dict[tuple, tuple[float, object]] = {}
@@ -37,6 +39,16 @@ def _memoized(key, producer):
     value = producer()
     _MEMO[key] = (now, value)
     return value
+
+
+def _memo_peek(key):
+    """Like _memoized but never computes — returns the cached value if a
+    live (non-expired) entry exists, else None. Lets callers avoid triggering
+    an expensive producer inline while still using an already-warm result."""
+    hit = _MEMO.get(key)
+    if hit and (time.time() - hit[0]) < _MEMO_TTL:
+        return hit[1]
+    return None
 
 
 # ── Fault-family classification (broad, for Data Confidence + fault_pattern) ────
@@ -726,7 +738,8 @@ def _qwen_extract_unit(description: str, index: dict) -> Optional[str]:
     # Build allow-list from Asset_Master display names (specific, non-area units)
     allowed_machines = list(dict.fromkeys(
         display_name
-        for aid, (specific, mg, cat, display_name, is_area) in index.get("id_to_specific", {}).items()
+        for aid, entry in index.get("id_to_specific", {}).items()
+        for _specific, _mg, _cat, display_name, is_area, _stage in [_specific_entry_parts(entry)]
         if not is_area and display_name and not _is_catch_all(display_name)
     ))[:40]
 
@@ -800,7 +813,7 @@ def resolve_to_unit(row: dict) -> tuple[Optional[str], str, Optional[str]]:
     if aid:
         entry = index.get("id_to_specific", {}).get(aid)
         if entry:
-            specific, mg, cat, display_name, is_area = entry
+            _specific, _mg, cat, display_name, is_area, _stage = _specific_entry_parts(entry)
             disp_cat = index["cat_display"].get(cat, "Facility / Building")
             if not is_area and display_name and not _is_catch_all(display_name):
                 return _description_unit_override(row, display_name, index) or display_name, aid, disp_cat
@@ -838,15 +851,25 @@ def _specific_from_master_entry(entry: dict, fallback_group: str) -> str:
     return specific or str(fallback_group or "").strip() or UNKNOWN_GROUP
 
 
+def _specific_entry_parts(entry) -> tuple[str, str, str, str, bool, str]:
+    """Return the Asset Master resolver tuple with legacy-cache tolerance."""
+    if not entry:
+        return "", "", "", "", False, ""
+    specific, mg, cat, display_name, is_area = entry[:5]
+    stage = entry[5] if len(entry) > 5 else ""
+    return specific, mg, cat, display_name, bool(is_area), str(stage or "").strip()
+
+
 def _compute_group_index(mapping: dict) -> dict:
     asset_map = mapping.get("asset_map", {}) or {}
     id_to_group: dict[str, tuple[str, str]] = {}
-    id_to_specific: dict[str, tuple[str, str, str, str, bool]] = {}
+    id_to_specific: dict[str, tuple[str, str, str, str, bool, str]] = {}
     mg_to_cat_counter: dict[str, Counter] = defaultdict(Counter)
 
     for entry in asset_map.values():
         mg = str(entry.get("asset_machine_group") or "").strip()
         cat = str(entry.get("machine_group") or "").strip()  # Asset_Master[Category]
+        stage = str(entry.get("stage") or entry.get("mappedStage") or "").strip()
         if not mg:
             continue
         mg_to_cat_counter[mg][cat] += 1
@@ -856,7 +879,7 @@ def _compute_group_index(mapping: dict) -> dict:
             specific = _specific_from_master_entry(entry, mg)
             display_name = str(entry.get("display_name") or entry.get("mapped_asset_name") or "").strip()
             is_area = _is_area_level_text(display_name, mg, cat, entry.get("mappedSubAssetGroup"), entry.get("mapped_sub_asset_group"))
-            id_to_specific[aid] = (specific, mg, cat, display_name, is_area)
+            id_to_specific[aid] = (specific, mg, cat, display_name, is_area, stage)
 
     mg_to_cat = {mg: c.most_common(1)[0][0] for mg, c in mg_to_cat_counter.items()}
 
@@ -967,7 +990,7 @@ def resolve_specific_machine_group(row: dict) -> tuple[str, str, Optional[str], 
     aid = _row_asset_id(row).upper()
     direct = index.get("id_to_specific", {}).get(aid) if aid else None
     if direct:
-        specific, main_system, cat, asset_name, is_area = direct
+        specific, main_system, cat, asset_name, is_area, _stage = _specific_entry_parts(direct)
         disp_cat = index["cat_display"].get(cat, "Facility / Building")
         if is_area:
             text_specific = _specific_from_text(_row_description(row), _row_issue_text(row))
@@ -1315,6 +1338,22 @@ def _recurrence_window_label_v2(rec: dict, as_of_date: date) -> str:
     if high_w <= 60:
         return "Likely within 1–2 months"
     return "Likely in 2+ months"
+
+
+def _days_until_next_likely(rec: dict, as_of_date: date) -> Optional[int]:
+    """Numeric companion to _recurrence_window_label_v2 — days from today
+    until the high end of the expected recurrence window (<=0 means already
+    due). Derived from the same last_occurrence/high_window values so it can
+    never disagree with the displayed label. None gate matches the label's."""
+    clean_gaps = rec.get("clean_gaps") or []
+    if len(clean_gaps) < 3:
+        return None
+    last = rec.get("last_occurrence")
+    high_w = rec.get("high_window")
+    if last is None or high_w is None:
+        return None
+    days_since_last = (as_of_date - last).days
+    return high_w - days_since_last
 
 
 def _confidence_from_cycles(
@@ -3275,6 +3314,12 @@ _RISK_SCORE_RULES = [
         "points": 1,
         "description": "2 or more spare-part transactions are linked to this asset's work orders.",
     },
+    {
+        "key": "no_available_redundancy",
+        "label": "No available alternate unit",
+        "points": 2,
+        "description": "No other unit in the same machine group/stage exists as a standby, or every sibling unit is currently active on a work order (Confirm / In Progress / reWork).",
+    },
 ]
 _RISK_SCORE_RULE_BY_KEY = {rule["key"]: rule for rule in _RISK_SCORE_RULES}
 _RISK_LEVEL_THRESHOLDS = {"medium_min": 4, "high_min": 7}
@@ -3344,6 +3389,237 @@ def _risk_suggested_action(issue: str, open_old: bool, critical: bool, spare_rep
     return " ".join(actions)
 
 
+_NO_SPACE_UNIT_SUFFIX = re.compile(r"^(no)\.(\d+[\w-]*)$", re.IGNORECASE)
+
+
+def _normalize_asset_display_name(name: str) -> str:
+    """Title-case a resolved unit name for consistent grouping/display —
+    fixes "Bratt pan No.2" vs "Bratt Pan No.2" being treated as different
+    assets purely from inconsistent capitalization in source text/Asset
+    Master. Keeps the existing "No.2" (no space) convention used everywhere
+    else in the app rather than introducing a second format."""
+    if not name:
+        return name
+    words = str(name).split(" ")
+    out = []
+    for w in words:
+        if not w:
+            out.append(w)
+            continue
+        m = _NO_SPACE_UNIT_SUFFIX.match(w)
+        out.append("No." + m.group(2) if m else (w[0].upper() + w[1:]))
+    return " ".join(out)
+
+
+def _criticality_state(rows: list[dict]) -> str:
+    """"Critical" / "Non-critical" / "Unknown" — distinct from the boolean
+    _row_is_critical signal used for scoring: Unknown means no row carries
+    any criticality field at all (missing data), not a confirmed False."""
+    has_any_data = False
+    for r in rows:
+        raw = r.get("am_is_critical")
+        if raw is None:
+            raw = r.get("is_critical")
+        if raw is None:
+            raw = r.get("am_criticality") or r.get("criticality")
+        if raw not in (None, ""):
+            has_any_data = True
+        if _row_is_critical(r):
+            return "Critical"
+    return "Non-critical" if has_any_data else "Unknown"
+
+
+def _asset_master_stage_from_filter(stage_filter: str | None) -> str | None:
+    stage = str(stage_filter or "").strip().lower()
+    if stage in {"stage1", "stage 1", "s1", "1"}:
+        return "Stage 1"
+    if stage in {"stage2", "stage 2", "s2", "2"}:
+        return "Stage 2"
+    return None
+
+
+_TRAILING_UNIT_NUM_RE = re.compile(r"\s+(?:no\.?\s*)?\d+[\w-]*$", re.IGNORECASE)
+
+
+def _redundancy_base_name(display_name: str) -> str:
+    """Strips a trailing unit number (with optional "No." prefix) to get an
+    equipment's base type for redundancy grouping — "Bratt pan No.2" and
+    "Bratt Pan (steam) 3" both reduce to a shared base, but "Round bratt pan"
+    or "Cast iron bratt pan" (no trailing number) keep their own distinct
+    base, since they're different physical variants sharing the same coarse
+    Asset Master machine_group bucket, not interchangeable numbered units of
+    the same type."""
+    name = str(display_name or "").strip()
+    if not name:
+        return ""
+    stripped = _TRAILING_UNIT_NUM_RE.sub("", name).strip()
+    return (stripped if stripped and stripped != name else name).lower()
+
+
+# Request-state values meaning "actively being worked on right now" — a unit
+# in one of these states isn't a real standby alternative. This is a
+# different question from _row_status_bucket's open/finished split (which
+# drives MTTR/backlog validity, not real-time availability), so it
+# deliberately doesn't reuse that bucketing.
+_UNAVAILABLE_REQUEST_STATES = {"confirm", "inprogress", "rework"}
+
+
+def _unit_currently_unavailable(rows: list[dict]) -> bool:
+    dated = [(r, d) for r, d in ((r, _occurrence_date(r)) for r in rows) if d]
+    if not dated:
+        return False
+    latest_row, _d = max(dated, key=lambda pair: pair[1])
+    state = str(latest_row.get("request_state") or "").strip().lower().replace(" ", "").replace("-", "")
+    return state in _UNAVAILABLE_REQUEST_STATES
+
+
+def _redundancy_info(
+    asset_id: str,
+    unit_display_name: str,
+    index: dict,
+    asset_id_to_rows: dict[str, list[dict]],
+    stage_filter: str | None = None,
+) -> dict:
+    """Production-redundancy proxy from Asset Master's machine-group, narrowed
+    to units sharing the same base equipment name (excludes distinct variants
+    like "Round bratt pan" that share the coarser machine_group bucket but
+    aren't genuinely interchangeable — see _redundancy_base_name), and split
+    by whether each alternate is currently free (its latest WO/MR isn't in an
+    active Confirm/In Progress/reWork state). There is no dedicated
+    redundancy field in the source data, so this stays a proxy, never a guess."""
+    entry = index.get("id_to_specific", {}).get(asset_id) if asset_id else None
+    if not entry:
+        return {"status": "unknown", "label": "Unknown", "sibling_count": None}
+    _specific, mg, _cat, master_display_name, is_area, asset_stage = _specific_entry_parts(entry)
+    if is_area or not mg or _is_catch_all(mg):
+        return {"status": "unknown", "label": "Unknown", "sibling_count": None}
+    filter_stage = _asset_master_stage_from_filter(stage_filter)
+    selected_stage = filter_stage or (asset_stage if asset_stage in {"Stage 1", "Stage 2"} else None)
+    if not selected_stage:
+        return {"status": "unknown", "label": "Unknown", "sibling_count": None}
+    if filter_stage and asset_stage and asset_stage != filter_stage:
+        return {"status": "unknown", "label": f"Unknown for {selected_stage}", "sibling_count": None}
+
+    base_name = _redundancy_base_name(unit_display_name or master_display_name)
+    siblings = {
+        aid for aid, sibling_entry in index.get("id_to_specific", {}).items()
+        for _s2, mg2, _c2, sib_display, is_area2, stage2 in [_specific_entry_parts(sibling_entry)]
+        if (
+            mg2 == mg
+            and not is_area2
+            and aid != asset_id
+            and stage2 == selected_stage
+            and _redundancy_base_name(sib_display) == base_name
+        )
+    }
+    scope_phrase = f"in {selected_stage} machine group"
+    if not siblings:
+        return {
+            "status": "no_redundancy",
+            "label": f"No alternate unit {scope_phrase}",
+            "sibling_count": 0,
+            "stage_scope": selected_stage,
+        }
+    n = len(siblings)
+    unavailable_now = {aid for aid in siblings if _unit_currently_unavailable(asset_id_to_rows.get(aid) or [])}
+    available_n = n - len(unavailable_now)
+    unit_word = f"{n} other unit{'s' if n != 1 else ''}"
+    if available_n <= 0:
+        return {
+            "status": "no_redundancy",
+            "label": f"No available alternate unit {scope_phrase} right now ({unit_word}, all currently active)",
+            "sibling_count": n,
+            "available_sibling_count": 0,
+            "stage_scope": selected_stage,
+        }
+    label = f"Alternative unit(s) {scope_phrase} ({unit_word}"
+    label += f", {available_n} currently available)" if unavailable_now else ")"
+    return {
+        "status": "has_alternates",
+        "label": label,
+        "sibling_count": n,
+        "available_sibling_count": available_n,
+        "stage_scope": selected_stage,
+    }
+
+
+def _mtbf_trend_info(
+    current_mtbf,
+    prior_mtbf,
+    current_intervals: int,
+    prior_intervals: int,
+    basis_label: str = "previous 30 days",
+) -> dict:
+    """Label MTBF for display.
+
+    The card can show a current MTBF from a wider history even when a prior
+    comparison window is unavailable; only comparison states require both
+    current and prior clean intervals.
+    """
+    if current_mtbf is None or current_intervals <= 0:
+        return {
+            "state": "insufficient",
+            "current_days": None,
+            "previous_days": round(prior_mtbf, 1) if prior_mtbf is not None else None,
+            "pct_change": None,
+            "basis_label": basis_label,
+        }
+    if prior_mtbf is None or prior_intervals <= 0 or not prior_mtbf:
+        return {
+            "state": "current_only",
+            "current_days": round(current_mtbf, 1),
+            "previous_days": None,
+            "pct_change": None,
+            "basis_label": basis_label,
+        }
+    pct_change = round((current_mtbf - prior_mtbf) / prior_mtbf * 100, 1)
+    if pct_change <= -10:
+        state = "declining"
+    elif pct_change >= 10:
+        state = "improving"
+    else:
+        state = "stable"
+    return {
+        "state": state,
+        "current_days": round(current_mtbf, 1),
+        "previous_days": round(prior_mtbf, 1),
+        "pct_change": pct_change,
+        "basis_label": basis_label,
+    }
+
+
+def _recurrence_confidence_v3(clean_gaps: list) -> str:
+    """"High" / "Medium" / "Low" / "Insufficient history", per the exact
+    thresholds requested: <3 intervals -> Insufficient; 3-4 -> Medium; >=5
+    with relatively consistent spacing -> High; >=5 but irregular -> Low
+    (Low is explicitly "limited OR irregular" — irregular can still mean
+    >=5 raw intervals that don't form a reliable pattern)."""
+    n = len(clean_gaps)
+    if n < 3:
+        return "Insufficient history"
+    if n <= 4:
+        return "Medium"
+    fg = [float(g) for g in clean_gaps]
+    m = _med(fg)
+    if m > 0:
+        mad = _med([abs(g - m) for g in fg])
+        if (mad / m) <= 0.5:
+            return "High"
+    return "Low"
+
+
+def _last_corrective_failure(rows: list[dict], today: date) -> Optional[dict]:
+    """Latest corrective WO/MR occurrence only — preventive maintenance
+    records are never a "failure occurrence"."""
+    corrective_all = _corrective_rows(rows)
+    dated = [(r, _occurrence_date(r)) for r in corrective_all]
+    dated = [(r, d) for r, d in dated if d]
+    if not dated:
+        return None
+    _row, occ = max(dated, key=lambda pair: pair[1])
+    return {"date": occ.isoformat(), "days_ago": (today - occ).days}
+
+
 def build_predictive_risk_cards(filters: dict, top_n: int = 10) -> dict:
     """Controlled Predictive Maintenance cards.
 
@@ -3351,8 +3627,16 @@ def build_predictive_risk_cards(filters: dict, top_n: int = 10) -> dict:
     the prepared structured fields in these cards; it must not answer user text.
     """
     f = ctx.normalize_filters(filters)
-    key = ("predictive_risk_cards_v1", f["stage"], f["year"], f["month"], f.get("period_mode"), top_n)
-    return _memoized(key, lambda: _build_predictive_risk_cards_inner(f, top_n))
+    key = ("predictive_risk_cards_v4_annual_mtbf", f["stage"], f["year"], f["month"], f.get("period_mode"), top_n)
+    result = _memoized(key, lambda: _build_predictive_risk_cards_inner(f, top_n))
+    # Re-attached on every call (not baked into the 15-min cards memo above):
+    # parts_readiness depends on the separate per-asset spare-parts memo/
+    # warmup queue, which keeps filling in after the cards themselves are
+    # cached. Re-checking it here is what lets background-warmed results
+    # actually reach a later request instead of being frozen at whatever was
+    # known the moment the cards were first built.
+    _attach_parts_readiness(result["cards"])
+    return result
 
 
 def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
@@ -3362,15 +3646,30 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
     prior_start = current_start - timedelta(days=30)
     prior_end = current_start - timedelta(days=1)
 
+    group_index = _group_index()
     all_rows = kpi._filtered_work_order_rows(f)
+    mtbf_history_rows: list[dict] = []
+    for yr in range(today.year - 2, today.year + 1):
+        yf = dict(f)
+        yf["year"] = yr
+        yf["period_mode"] = "ytd" if yr == today.year else "full_year"
+        yf["month"] = None
+        yf["start"] = None
+        yf["end"] = None
+        mtbf_history_rows.extend(kpi._filtered_work_order_rows(yf))
     by_unit: dict[str, dict] = {}
     for row in all_rows:
         occ = _occurrence_date(row)
         if not occ:
             continue
-        unit_name, asset_id, category = resolve_to_unit(row)
-        if not unit_name or category == "Facility / Building":
+        raw_unit_name, asset_id, category = resolve_to_unit(row)
+        if not raw_unit_name or category == "Facility / Building":
             continue
+        # Normalize casing so "Bratt pan No.2" and "Bratt Pan No.2" (same
+        # asset, inconsistent source-text capitalization) merge into one
+        # card instead of silently splitting the same asset's history into
+        # two partial, under-scored duplicates.
+        unit_name = _normalize_asset_display_name(raw_unit_name)
         entry = by_unit.setdefault(unit_name, {
             "asset_name": unit_name,
             "asset_id": asset_id or "",
@@ -3382,7 +3681,29 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
             entry["asset_id"] = asset_id
         entry["rows"].append(row)
 
+    mtbf_history_by_unit: dict[str, list[dict]] = defaultdict(list)
+    for row in mtbf_history_rows:
+        occ = _occurrence_date(row)
+        if not occ:
+            continue
+        raw_unit_name, _asset_id, category = resolve_to_unit(row)
+        if not raw_unit_name or category == "Facility / Building":
+            continue
+        unit_name = _normalize_asset_display_name(raw_unit_name)
+        mtbf_history_by_unit[unit_name].append(row)
+
     spare_lookup = _wo_spare_usage_lookup()
+    # asset_id -> all rows across every by_unit entry sharing that ID (some
+    # Asset Master IDs are reused across multiple physical units — see
+    # _description_unit_override — so this accumulates rather than
+    # overwrites) — used only to check each sibling's most recent
+    # request_state for the redundancy-availability check below.
+    asset_id_to_rows: dict[str, list[dict]] = defaultdict(list)
+    for entry in by_unit.values():
+        aid = entry.get("asset_id")
+        if aid:
+            asset_id_to_rows[aid].extend(entry["rows"])
+
     cards: list[dict] = []
     for _unit_name, entry in by_unit.items():
         rows = entry["rows"]
@@ -3398,6 +3719,27 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
             current_mtbf is not None and prior_mtbf is not None
             and current_intervals > 0 and prior_intervals > 0
             and current_mtbf < prior_mtbf
+        )
+        mtbf_history = mtbf_history_by_unit.get(entry["asset_name"]) or rows
+        mtbf_current_start = today - timedelta(days=365)
+        mtbf_prior_start = today - timedelta(days=730)
+        mtbf_prior_end = mtbf_current_start - timedelta(days=1)
+        mtbf_current_rows = [
+            r for r in mtbf_history
+            if mtbf_current_start <= (_occurrence_date(r) or date.min) <= today
+        ]
+        mtbf_prior_rows = [
+            r for r in mtbf_history
+            if mtbf_prior_start <= (_occurrence_date(r) or date.min) <= mtbf_prior_end
+        ]
+        display_mtbf, display_intervals, _display_cov = _compute_mtbf_detail(mtbf_current_rows)
+        display_prior_mtbf, display_prior_intervals, _display_prior_cov = _compute_mtbf_detail(mtbf_prior_rows)
+        display_mtbf_info = _mtbf_trend_info(
+            display_mtbf,
+            display_prior_mtbf,
+            display_intervals,
+            display_prior_intervals,
+            "previous 12 months",
         )
 
         issue_pairs = [
@@ -3428,6 +3770,11 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
         spare_tx_count = sum(len(spare_lookup.get(wo_id, [])) for wo_id in linked_wo_ids)
         spare_repeated = len(linked_wo_ids) >= 2 or spare_tx_count >= 2
 
+        # Computed before scoring (not just at card-build time) so a missing
+        # standby unit can factor into the risk score itself, not just be
+        # displayed alongside it.
+        redundancy = _redundancy_info(entry.get("asset_id") or "", entry["asset_name"], group_index, asset_id_to_rows, f.get("stage"))
+
         score = 0
         signals = []
         rule = _RISK_SCORE_RULE_BY_KEY["corrective_wo_frequency"]
@@ -3454,6 +3801,13 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
         if spare_repeated:
             score += rule["points"]
             signals.append({"label": rule["label"], "points": rule["points"], "value": spare_tx_count})
+        rule = _RISK_SCORE_RULE_BY_KEY["no_available_redundancy"]
+        # Only scores when redundancy is a known, confirmed absence — "unknown"
+        # (e.g. no machine_group data) never adds points, since that would be
+        # guessing risk from missing data rather than a verified signal.
+        if redundancy.get("status") == "no_redundancy":
+            score += rule["points"]
+            signals.append({"label": rule["label"], "points": rule["points"], "value": redundancy.get("label")})
         if score <= 0:
             continue
 
@@ -3470,12 +3824,27 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
                 if classify_specific_issue(_row_issue_text(r) or _row_description(r)) == latest_issue
             ]
             recurrence = _compute_recurrence_v2(full_issue_rows)
-            if len(recurrence.get("clean_gaps") or []) >= 3:
+            clean_gaps = recurrence.get("clean_gaps") or []
+            confidence = _recurrence_confidence_v3(clean_gaps)
+            if confidence != "Insufficient history":
+                days_until = _days_until_next_likely(recurrence, today)
                 next_occurrence = {
                     "label": _recurrence_window_label_v2(recurrence, today),
+                    "confidence": confidence,
                     "median_gap_days": recurrence.get("median_gap"),
                     "based_on_cycles": recurrence.get("cycles"),
+                    "valid_intervals_used": len(clean_gaps),
+                    # <=7 means the high end of the expected window (or an
+                    # already-overdue occurrence) falls within 7 days —
+                    # drives the "Expected Within 7 Days" summary KPI.
+                    "days_until_next_likely": days_until,
+                    "expected_within_7_days": days_until is not None and days_until <= 7,
                 }
+            else:
+                next_occurrence = {"label": "Insufficient history", "confidence": "Insufficient history",
+                                    "median_gap_days": None, "based_on_cycles": recurrence.get("cycles"),
+                                    "valid_intervals_used": len(clean_gaps),
+                                    "days_until_next_likely": None, "expected_within_7_days": False}
 
         latest_pattern = {
             "issue": latest_issue or "Unclassified",
@@ -3492,6 +3861,10 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
             "category": entry.get("category") or "Unknown",
             "risk_level": _risk_level_from_score(score),
             "risk_score": score,
+            "criticality": _criticality_state(rows),
+            "redundancy": redundancy,
+            "mtbf_trend": display_mtbf_info,
+            "last_failure": _last_corrective_failure(rows, today),
             "main_signals": signals,
             "latest_recurring_issue_pattern": latest_pattern,
             "suggested_maintenance_action": _risk_suggested_action(latest_issue or "", open_old, critical, spare_repeated),
@@ -3541,6 +3914,11 @@ def _build_predictive_risk_cards_inner(f: dict, top_n: int) -> dict:
         "scored_assets": len(cards),
         "source": "Rule-based score from WO/MR history, MTBF gaps, critical flag, open WO status, and linked spare-part consumption.",
         "llm_policy": "No open-ended user questions. AI wording may only summarize each card's structured_llm_context.",
+        # Actual dataset refresh time (latest DB import), not browser/request
+        # time — the management-table redesign's "Data updated" line must
+        # reflect when the underlying data last changed, not when the page
+        # happened to be viewed.
+        "data_last_updated": (kpi._overview_freshness() or {}).get("last_updated"),
     }
 
 
@@ -3680,7 +4058,15 @@ def _stock_status_for(on_hand: Optional[float], minimum: Optional[float]) -> str
 def _build_asset_spare_parts(card: dict) -> dict:
     """Spare Parts tab. Reuses spare_parts_service's existing asset-matching
     (transactions/POs/suppliers) and inventory lookup — no new asset-to-part
-    matching logic invented here, per the "never guess a relationship" rule."""
+    matching logic invented here, per the "never guess a relationship" rule.
+    The underlying match engine scans the full WO/PO/store datasets per call
+    (~25-40s even warm), so results are memoised per asset — repeat drawer
+    opens for the same asset are instant instead of re-paying that cost."""
+    asset_key = card.get("asset_id") or card.get("asset_name") or ""
+    return _memoized(("asset_spare_parts", asset_key), lambda: _build_asset_spare_parts_inner(card))
+
+
+def _build_asset_spare_parts_inner(card: dict) -> dict:
     import spare_parts_service as sps  # local import: avoid a module-load-order
 
     asset_id = card.get("asset_id") or ""
@@ -3757,6 +4143,8 @@ def _build_asset_spare_parts(card: dict) -> dict:
             "low_stock_parts": [r["part_name"] for r in low_stock if r.get("part_name")],
         }
 
+    relevant_parts, readiness_summary = _build_relevant_spare_parts(transactions, on_hand_rows)
+
     return {
         "status": "ok" if has_mapping else "no_mapping",
         "has_mapping": has_mapping,
@@ -3771,8 +4159,231 @@ def _build_asset_spare_parts(card: dict) -> dict:
         # purchase-derived usage figures distinctly from confirmed consumption.
         "usage_source": usage_source,
         "readiness": readiness,
+        # Parts specifically tied to this asset's usage/repair history, with
+        # a relationship classification (Direct WO usage / Repeated repair
+        # use / Inferred from machine group / Manually mapped) and a compact
+        # readiness summary — see _build_relevant_spare_parts.
+        "relevant_parts": relevant_parts,
+        "readiness_summary": readiness_summary,
         "data_gaps": context.get("dataGaps") or [],
     }
+
+
+_GROUP_LEVEL_MATCH_SOURCES = {"Asset family match", "Machine group match"}
+_DIRECT_MATCH_SOURCES = {"Asset ID match", "Asset name match"}
+
+
+def _spare_part_relationship(match_source: str, is_direct_match: bool, occurrence_count: int) -> str:
+    """Classifies a part's relationship to this asset from the match
+    metadata spare_parts_service already computes — no new asset-to-part
+    matching logic here, per the "never guess a relationship" rule. Priority
+    matches the spec: direct/repeated use outranks a group-level inference,
+    since not every part belonging to the general machine group is a
+    confirmed failure-related part for this specific asset."""
+    if is_direct_match and occurrence_count >= 2:
+        return "Repeatedly used for similar repairs"
+    if is_direct_match:
+        return "Directly linked through WO usage"
+    if occurrence_count >= 2:
+        return "Repeatedly used for similar repairs"
+    if match_source in _GROUP_LEVEL_MATCH_SOURCES:
+        return "Inferred from machine group"
+    return "Manually mapped"
+
+
+def _build_relevant_spare_parts(transactions: list[dict], on_hand_rows: list[dict]) -> tuple[list[dict], dict]:
+    """Groups this asset's store-issue transactions by part, classifies each
+    part's relationship, and cross-references on-hand stock. Only parts
+    actually tied to this asset's own usage history are included — this is
+    not "every part in the machine group's catalogue"."""
+    on_hand_by_code: dict[str, dict] = {}
+    on_hand_by_name: dict[str, dict] = {}
+    for rec in on_hand_rows:
+        if rec.get("item_code"):
+            on_hand_by_code[str(rec["item_code"]).strip().upper()] = rec
+        if rec.get("part_name"):
+            on_hand_by_name[str(rec["part_name"]).strip().lower()] = rec
+
+    grouped: dict[str, dict] = {}
+    for t in transactions:
+        key = str(t.get("item_code") or t.get("part_name") or "").strip().lower()
+        if not key:
+            continue
+        g = grouped.setdefault(key, {
+            "part_name": t.get("part_name") or t.get("item_code") or "Unknown part",
+            "item_code": t.get("item_code"),
+            "occurrences": [],
+            "is_direct_match": False,
+            "best_match_source": None,
+        })
+        g["occurrences"].append(t)
+        if t.get("is_direct_match"):
+            g["is_direct_match"] = True
+        if not g["best_match_source"] or t.get("match_source") == "Asset ID match":
+            g["best_match_source"] = t.get("match_source")
+
+    parts: list[dict] = []
+    for g in grouped.values():
+        occ = g["occurrences"]
+        relationship = _spare_part_relationship(g["best_match_source"] or "", g["is_direct_match"], len(occ))
+        stock = None
+        if g.get("item_code"):
+            stock = on_hand_by_code.get(str(g["item_code"]).strip().upper())
+        if not stock and g.get("part_name"):
+            stock = on_hand_by_name.get(str(g["part_name"]).strip().lower())
+        recent_dates = sorted((o.get("date") for o in occ if o.get("date")), reverse=True)
+        parts.append({
+            "part_name": g["part_name"],
+            "item_code": g.get("item_code"),
+            "relationship": relationship,
+            "on_hand": stock.get("on_hand") if stock else None,
+            "min_stock": stock.get("min_stock") if stock else None,
+            "stock_status": stock.get("stock_status") if stock else "Stock data unavailable",
+            "recent_usage_count": len(occ),
+            "recent_usage_window_days": 90,
+            "last_usage_date": recent_dates[0] if recent_dates else None,
+        })
+
+    # Direct/repeated-use parts first (most likely actually relevant to the
+    # current failure pattern), then group-inferred, then manually-mapped.
+    _priority = {"Directly linked through WO usage": 0, "Repeatedly used for similar repairs": 0,
+                 "Inferred from machine group": 1, "Manually mapped": 2}
+    parts.sort(key=lambda p: (_priority.get(p["relationship"], 3), -(p["recent_usage_count"] or 0)))
+
+    priority_parts = [p for p in parts if _priority.get(p["relationship"], 3) == 0]
+    unavailable = sum(1 for p in priority_parts if p["stock_status"] in ("Out of Stock", "Below Minimum"))
+    available = sum(1 for p in priority_parts if p["stock_status"] not in ("Out of Stock", "Below Minimum", "Stock data unavailable"))
+    summary = {
+        "unavailable_count": unavailable,
+        "available_count": available,
+        "total_relevant_parts": len(priority_parts),
+        "label": (
+            f"{unavailable} unavailable, {available} available" if priority_parts
+            else "No parts directly tied to this asset's usage history"
+        ),
+    }
+    return parts, summary
+
+
+def _parts_readiness_status(spare_parts_detail: dict) -> dict:
+    """Compact Available/Low stock/Out of stock/Not linked/Stock data
+    unavailable status for the management table + KPI strip, derived from the
+    same relevant_parts/readiness_summary already computed for the drawer —
+    no separate matching pass. Only the priority-tier (direct/repeated-use)
+    parts count toward the verdict, matching _build_relevant_spare_parts'
+    own priority filter."""
+    summary = spare_parts_detail.get("readiness_summary") or {}
+    if not (summary.get("total_relevant_parts") or 0):
+        return {"status": "not_linked", "label": "Not linked"}
+    if summary.get("unavailable_count"):
+        return {"status": "out_of_stock", "label": summary.get("label") or "Out of stock"}
+    priority_relationships = ("Directly linked through WO usage", "Repeatedly used for similar repairs")
+    priority_parts = [p for p in (spare_parts_detail.get("relevant_parts") or []) if p.get("relationship") in priority_relationships]
+    if any(p.get("stock_status") == "Below Minimum" for p in priority_parts):
+        return {"status": "low_stock", "label": "Low stock"}
+    if priority_parts and all(p.get("stock_status") in (None, "Stock data unavailable", "Unknown") for p in priority_parts):
+        return {"status": "unknown", "label": "Stock data unavailable"}
+    return {"status": "available", "label": summary.get("label") or "Available"}
+
+
+# Full spare-parts intelligence (_build_asset_spare_parts) scans the entire
+# WO/PO/store datasets per asset (~25-40s even with warm sub-caches, per
+# profiling) — computing it for every scored asset on every page load isn't
+# viable. It's eagerly computed only for the top-priority slice shown by
+# default (matches the spec's own "top 5-8 Priority Assets" default view);
+# the remaining Watchlist assets get an honest "Stock data unavailable"
+# placeholder and are resolved lazily when their drawer is opened (which
+# always calls _build_asset_spare_parts directly, memoised per asset).
+_EAGER_PARTS_READINESS_LIMIT = 8
+
+
+def _priority_sort_key_provisional(card: dict) -> tuple:
+    """Approximates the spec's 6-key Priority ordering (risk, criticality,
+    parts availability, recurrence proximity, MTBF decline, oldest open WO)
+    to pick which assets get spare-parts data computed eagerly. Parts
+    availability itself is excluded here (it's the thing being computed) —
+    the frontend applies the full 6-key order for display once this field
+    is populated for the eager slice."""
+    risk_rank = {"High": 0, "Medium": 1, "Low": 2}.get(card.get("risk_level"), 3)
+    crit_rank = {"Critical": 0, "Non-critical": 1, "Unknown": 2}.get(card.get("criticality"), 2)
+    next_occ = (card.get("latest_recurring_issue_pattern") or {}).get("next_likely_occurrence") or {}
+    days_until = next_occ.get("days_until_next_likely")
+    recurrence_rank = days_until if days_until is not None else 10_000
+    mtbf_rank = 0 if (card.get("mtbf_trend") or {}).get("state") == "declining" else 1
+    oldest_open = (card.get("open_wo_status") or {}).get("oldest_age_days")
+    open_wo_rank = -(oldest_open or 0)
+    return (risk_rank, crit_rank, recurrence_rank, mtbf_rank, open_wo_rank)
+
+
+_PARTS_READINESS_WARMING: set[str] = set()
+_PARTS_READINESS_QUEUE: list[dict] = []
+_PARTS_READINESS_WORKER_RUNNING = False
+_PARTS_READINESS_LOCK = threading.Lock()
+
+
+def _parts_readiness_worker() -> None:
+    global _PARTS_READINESS_WORKER_RUNNING
+    while True:
+        with _PARTS_READINESS_LOCK:
+            if not _PARTS_READINESS_QUEUE:
+                _PARTS_READINESS_WORKER_RUNNING = False
+                return
+            card = _PARTS_READINESS_QUEUE.pop(0)
+        asset_key = card.get("asset_id") or card.get("asset_name") or ""
+        try:
+            _build_asset_spare_parts(card)
+        except Exception:
+            pass
+        finally:
+            _PARTS_READINESS_WARMING.discard(asset_key)
+
+
+def _start_parts_readiness_warmup(card: dict) -> None:
+    """Queues an asset for background spare-parts computation, without
+    blocking the request that triggered it. A single serial worker thread
+    processes the queue — concurrent threads were tried first, but the
+    match engine is CPU-bound pure Python (regex/dict work, profiled
+    separately), so GIL contention meant N concurrent threads all crawled
+    together instead of finishing individually; serial processing instead
+    finishes each asset in its normal ~25-40s, so earlier-queued (higher
+    priority) assets become available progressively rather than all arriving
+    at once at the end. Once computed, the result lands in the same 15-min
+    _MEMO the drawer reads, so the next page load/refresh or drawer-open
+    picks it up instantly via _memo_peek/_memoized."""
+    global _PARTS_READINESS_WORKER_RUNNING
+    asset_key = card.get("asset_id") or card.get("asset_name") or ""
+    if not asset_key or asset_key in _PARTS_READINESS_WARMING:
+        return
+    with _PARTS_READINESS_LOCK:
+        _PARTS_READINESS_WARMING.add(asset_key)
+        _PARTS_READINESS_QUEUE.append(card)
+        if not _PARTS_READINESS_WORKER_RUNNING:
+            _PARTS_READINESS_WORKER_RUNNING = True
+            t = threading.Thread(target=_parts_readiness_worker, name="predictive-parts-warmup", daemon=True)
+            t.start()
+
+
+def _attach_parts_readiness(cards: list[dict]) -> None:
+    """Sets parts_readiness on every card from whatever's already memoised
+    (instant), and kicks off background warmup for the top
+    _EAGER_PARTS_READINESS_LIMIT cards (by provisional priority) that aren't
+    cached yet — never blocks this request on the ~25-40s-per-asset spare-
+    parts match engine. See _start_parts_readiness_warmup."""
+    for card in cards:
+        card["parts_readiness"] = {"status": "unknown", "label": "Stock data unavailable"}
+        card["parts_readiness_computed"] = False
+
+    provisional_order = sorted(cards, key=_priority_sort_key_provisional)
+    eager = provisional_order[:_EAGER_PARTS_READINESS_LIMIT]
+
+    for card in eager:
+        asset_key = card.get("asset_id") or card.get("asset_name") or ""
+        cached = _memo_peek(("asset_spare_parts", asset_key))
+        if cached is not None:
+            card["parts_readiness"] = _parts_readiness_status(cached)
+            card["parts_readiness_computed"] = True
+        else:
+            _start_parts_readiness_warmup(card)
 
 
 def _within_days(iso_date: str, days: int) -> bool:
@@ -3781,6 +4392,214 @@ def _within_days(iso_date: str, days: int) -> bool:
     except (TypeError, ValueError):
         return False
     return (date.today() - d).days <= days
+
+
+def _pm_schedule_date(value) -> Optional[date]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except (TypeError, ValueError):
+        return None
+
+
+def _pm_schedule_name_keys(value: str | None) -> set[str]:
+    key = _norm_key(value)
+    if not key:
+        return set()
+    keys = {key}
+    keys.add(re.sub(r"\bno\s+(\d+)\b", r"\1", key))
+    return {k for k in keys if k}
+
+
+_PM_TERM_STOPWORDS = {
+    "asset", "equipment", "machine", "machines", "system", "systems", "unit",
+    "units", "production", "utility", "utilities", "plant", "line", "stage",
+    "type", "no", "number", "main", "scheduled", "preventive", "maintenance",
+}
+
+
+def _pm_schedule_terms(*values: str | None) -> set[str]:
+    text = _norm_key(" ".join(str(v or "") for v in values))
+    if not text:
+        return set()
+    text = re.sub(r"\bno\s*\d+\w*\b", " ", text)
+    text = re.sub(r"\b\d+\w*\b", " ", text)
+    text = text.replace("-", " ").replace("/", " ")
+    tokens = {
+        t for t in re.split(r"\s+", text)
+        if t and (len(t) >= 4 or t in {"pan", "xray"}) and t not in _PM_TERM_STOPWORDS
+    }
+    if "x" in text.split() and "ray" in text.split():
+        tokens.add("xray")
+    singulars = {t[:-1] for t in tokens if len(t) > 4 and t.endswith("s")}
+    return tokens | singulars
+
+
+def _pm_schedule_task_is_done(task: dict) -> bool:
+    status = f"{task.get('completionStatus') or ''} {task.get('scheduleStatus') or ''}".lower()
+    return "completed" in status or "done" in status
+
+
+def _pm_schedule_task_is_overdue(task: dict) -> bool:
+    status = str(task.get("scheduleStatus") or "").lower()
+    try:
+        days_overdue = int(task.get("daysOverdue") or 0)
+    except (TypeError, ValueError):
+        days_overdue = 0
+    return "overdue" in status or days_overdue > 0
+
+
+def _pm_schedule_task_matches_card(task: dict, card: dict) -> bool:
+    card_asset_id = str(card.get("asset_id") or "").strip().upper()
+    task_asset_id = str(task.get("assetId") or "").strip().upper()
+    if card_asset_id and task_asset_id and card_asset_id == task_asset_id:
+        return True
+
+    card_names: set[str] = set()
+    for value in (card.get("asset_name"), card.get("machine_group")):
+        card_names.update(_pm_schedule_name_keys(value))
+    task_names = _pm_schedule_name_keys(task.get("assetName"))
+    return bool(card_names and task_names and card_names.intersection(task_names))
+
+
+def _pm_schedule_card_context(card: dict) -> dict:
+    names = [card.get("asset_name"), card.get("machine_group")]
+    stage = None
+    category = str(card.get("category") or "").strip()
+
+    asset_id = str(card.get("asset_id") or "").strip().upper()
+    entry = (_group_index().get("id_to_specific") or {}).get(asset_id) if asset_id else None
+    if entry:
+        specific, master_group, master_category, display_name, _is_area, master_stage = _specific_entry_parts(entry)
+        names.extend([specific, master_group, master_category, display_name])
+        stage = master_stage or None
+        category = master_category or category
+
+    return {
+        "stage": stage,
+        "category": category,
+        "terms": _pm_schedule_terms(*names),
+    }
+
+
+def _pm_task_same_stage_and_category(task: dict, context: dict) -> bool:
+    stage = context.get("stage")
+    category = str(context.get("category") or "").strip().lower()
+    if stage and str(task.get("stage") or "").strip() != stage:
+        return False
+    if category and str(task.get("mainAssetGroup") or "").strip().lower() != category:
+        return False
+    return True
+
+
+def _pm_schedule_task_matches_context(task: dict, context: dict) -> bool:
+    if not _pm_task_same_stage_and_category(task, context):
+        return False
+    card_terms = context.get("terms") or set()
+    task_terms = _pm_schedule_terms(task.get("assetName"), task.get("mainAssetGroup"), task.get("subAssetGroup"))
+    if not card_terms or not task_terms:
+        return False
+    overlap = card_terms.intersection(task_terms)
+    return len(overlap) >= (2 if len(card_terms) > 1 else 1)
+
+
+def _asset_pm_schedule_status(card: dict, f: dict) -> dict:
+    empty = {
+        "latest_pm_date": None,
+        "next_pm_date": None,
+        "next_pm_due_date": None,
+        "pm_overdue": None,
+        "pm_task_count": 0,
+        "pm_match_scope": None,
+    }
+    try:
+        payload = build_pm_schedule_payload(
+            stage=f["stage"],
+            year=f["year"],
+            month=f["month"],
+            period_mode=f.get("period_mode"),
+            start=f.get("start"),
+            end=f.get("end"),
+        )
+    except Exception:
+        return empty
+
+    tasks = (((payload.get("schedule") or {}).get("tasks")) or [])
+    context = _pm_schedule_card_context(card)
+    matched = [task for task in tasks if _pm_schedule_task_matches_card(task, card)]
+    match_scope = "asset"
+    if not matched:
+        matched = [task for task in tasks if _pm_schedule_task_matches_context(task, context)]
+        match_scope = "machine_group"
+    if not matched:
+        matched = [task for task in tasks if _pm_task_same_stage_and_category(task, context)]
+        match_scope = "asset_category"
+    if not matched:
+        return empty
+
+    pm_today = _pm_schedule_date((payload.get("meta") or {}).get("today")) or date.today()
+    dated_tasks = [(task, d) for task in matched if (d := _pm_schedule_date(task.get("plannedDate")))]
+
+    latest_candidates = [d for _task, d in dated_tasks if d <= pm_today]
+    latest_pm = max(latest_candidates) if latest_candidates else None
+    open_due_dates = [d for task, d in dated_tasks if not _pm_schedule_task_is_done(task)]
+    next_pm = min(open_due_dates) if open_due_dates else None
+
+    return {
+        "latest_pm_date": latest_pm.isoformat() if latest_pm else None,
+        "next_pm_date": next_pm.isoformat() if next_pm else None,
+        "next_pm_due_date": next_pm.isoformat() if next_pm else None,
+        "pm_overdue": any(_pm_schedule_task_is_overdue(task) for task in matched),
+        "pm_task_count": len(matched),
+        "pm_match_scope": match_scope,
+    }
+
+
+def _row_is_open_for_detail(row: dict) -> bool:
+    is_open = row.get("is_open")
+    if is_open is True:
+        return True
+    if is_open is False:
+        return False
+    status = " ".join(str(row.get(k) or "") for k in (
+        "request_state", "status_category", "status", "mr_status", "wo_status", "lifecycle_state"
+    )).lower()
+    if any(token in status for token in ("finish", "finished", "confirm", "confirmed", "complete", "completed", "closed", "ended", "cancel")):
+        return False
+    return any(token in status for token in ("open", "progress", "started", "pending", "created", "active", "scheduled", "rework"))
+
+
+def _asset_work_order_status_for_detail(rows: list[dict], today: date) -> dict:
+    open_by_key: dict[str, dict] = {}
+    for idx, row in enumerate(rows):
+        if not _row_is_open_for_detail(row):
+            continue
+        key = _row_wo_id(row) or _row_mr_id(row) or f"row-{idx}"
+        existing = open_by_key.get(key)
+        row_date = _occurrence_date(row) or date.max
+        if existing is None or row_date < (existing.get("_date") or date.max):
+            item = dict(row)
+            item["_date"] = row_date
+            open_by_key[key] = item
+    open_rows = list(open_by_key.values())
+    oldest = min((r.get("_date") for r in open_rows if r.get("_date") and r.get("_date") != date.max), default=None)
+    return {
+        "count": len(open_rows),
+        "oldest_age_days": (today - oldest).days if oldest else None,
+        "work_order_ids": [_row_wo_id(r) for r in open_rows if _row_wo_id(r)][:5],
+    }
+
+
+def _asset_reliability_from_rows_for_detail(rows: list[dict]) -> dict:
+    durations = [v for row in rows if (v := _row_ttr_hours(row)) is not None and v >= 0]
+    mtbf_days, n_intervals, coverage = _compute_mtbf_detail(rows)
+    mtbf_reliable = mtbf_days is not None and _mtbf_is_reliable(n_intervals, coverage)
+    return {
+        "mttr_hours": round(sum(durations) / len(durations), 2) if durations else None,
+        "mtbf_days": round(mtbf_days, 1) if mtbf_reliable else None,
+        "mtbf_reliable": mtbf_reliable,
+    }
 
 
 def build_asset_predictive_detail(asset_id: str, filters: dict) -> Optional[dict]:
@@ -3792,17 +4611,20 @@ def build_asset_predictive_detail(asset_id: str, filters: dict) -> Optional[dict
     (staying a consumer, per this module's governing rule; no new source reads).
     """
     f = ctx.normalize_filters(filters)
-    key = ("predictive_asset_detail_v1", f["stage"], f["year"], f["month"], f.get("period_mode"), asset_id)
+    key = ("predictive_asset_detail_v2_pm_schedule", f["stage"], f["year"], f["month"], f.get("period_mode"), asset_id)
     return _memoized(key, lambda: _build_asset_predictive_detail_inner(asset_id, f))
 
 
 def _build_asset_predictive_detail_inner(asset_id: str, f: dict) -> Optional[dict]:
     # top_n only slices the already-fully-scored list (every asset is scored
     # regardless of top_n — see _build_predictive_risk_cards_inner), so this MUST
-    # match the main page's call (api.py's default, top_n=10) to reuse the same
-    # memoized computation instead of paying a second ~20s+ cold build for an
-    # identical result under a different cache key.
-    risk_payload = build_predictive_risk_cards(f, top_n=10)
+    # match the main page's call (api.py's /predictive route, top_n=200) to
+    # reuse the same memoized computation instead of paying a second cold
+    # build under a different cache key — and, since the management-table
+    # redesign shows every scored asset (Priority + collapsed Watchlist, not
+    # just a top-10 slice), a low top_n here would also make Watchlist
+    # assets' "View Details" silently return nothing.
+    risk_payload = build_predictive_risk_cards(f, top_n=200)
     needle = str(asset_id or "").strip().lower()
     card = next(
         (c for c in risk_payload["cards"] if str(c.get("asset_id") or "").strip().lower() == needle
@@ -3865,17 +4687,40 @@ def _build_asset_predictive_detail_inner(asset_id: str, f: dict) -> Optional[dic
         )
 
     historical_row = _asset_reliability_row("historical")
+    row_reliability = _asset_reliability_from_rows_for_detail(asset_rows_full)
     mttr_hours = (
         round(historical_row["average_mttr_hours"], 2)
         if historical_row and historical_row.get("average_mttr_hours") is not None
-        else None
+        else row_reliability["mttr_hours"]
     )
     mtbf_hours_val = historical_row.get("average_mtbf_hours") if historical_row else None
-    mtbf_days = round(mtbf_hours_val / 24, 1) if mtbf_hours_val is not None else None
-    mtbf_reliable = bool(historical_row) and historical_row.get("reliability_status") != "insufficient"
+    historical_mtbf_days = round(mtbf_hours_val / 24, 1) if mtbf_hours_val is not None else None
+    historical_mtbf_reliable = bool(historical_row) and historical_row.get("reliability_status") != "insufficient"
+    card_mtbf = card.get("mtbf_trend") or {}
+    mtbf_days = (
+        historical_mtbf_days
+        if (historical_mtbf_days is not None and historical_mtbf_reliable)
+        else (
+            row_reliability["mtbf_days"]
+            if row_reliability["mtbf_days"] is not None
+            else card_mtbf.get("current_days")
+        )
+    )
+    mtbf_reliable = historical_mtbf_reliable or row_reliability["mtbf_reliable"] or card_mtbf.get("current_days") is not None
     mtbf_change_signal = next((s for s in card["main_signals"] if s["label"] == "MTBF decreased vs previous 30 days"), None)
+    mtbf_change_detail = mtbf_change_signal["value"] if mtbf_change_signal else None
+    mtbf_change_state = "declining" if mtbf_change_signal else card_mtbf.get("state")
+    if mtbf_change_detail is None and card_mtbf.get("current_days") is not None and card_mtbf.get("previous_days") is not None:
+        mtbf_change_detail = {
+            "current_days": card_mtbf.get("current_days"),
+            "previous_days": card_mtbf.get("previous_days"),
+            "pct_change": card_mtbf.get("pct_change"),
+        }
 
-    open_status = card["open_wo_status"]
+    open_status = _asset_work_order_status_for_detail(asset_rows_full, today)
+    if not open_status["count"] and (card.get("open_wo_status") or {}).get("count"):
+        open_status = card["open_wo_status"]
+    pm_status = _asset_pm_schedule_status(card, f)
 
     covered_keys = {s["label"] for s in card["main_signals"]}
     other_indicators = [
@@ -3904,17 +4749,18 @@ def _build_asset_predictive_detail_inner(asset_id: str, f: dict) -> Optional[dic
             "open_wo_count": open_status["count"],
             "oldest_open_wo_days": open_status["oldest_age_days"],
             "open_work_order_ids": open_status["work_order_ids"],
-            # PM linkage (latest/next PM date, overdue flag) lives in the separate
-            # PM Schedule subsystem and isn't wired into this Overview tab yet —
-            # "Not available" rather than a fabricated date, per spec.
-            "latest_pm_date": None,
-            "next_pm_date": None,
-            "pm_overdue": None,
+            "latest_pm_date": pm_status["latest_pm_date"],
+            "next_pm_date": pm_status["next_pm_date"],
+            "next_pm_due_date": pm_status["next_pm_due_date"],
+            "pm_overdue": pm_status["pm_overdue"],
+            "pm_task_count": pm_status["pm_task_count"],
+            "pm_match_scope": pm_status["pm_match_scope"],
             "mttr_hours": mttr_hours,
             "mtbf_days": round(mtbf_days, 1) if (mtbf_days is not None and mtbf_reliable) else None,
             "mtbf_reliable": mtbf_reliable,
-            "mtbf_changed_vs_previous_period": bool(mtbf_change_signal),
-            "mtbf_change_detail": mtbf_change_signal["value"] if mtbf_change_signal else None,
+            "mtbf_changed_vs_previous_period": mtbf_change_state == "declining",
+            "mtbf_change_state": mtbf_change_state,
+            "mtbf_change_detail": mtbf_change_detail,
         },
         "suggested_maintenance_action": card["suggested_maintenance_action"],
         "work_orders": sorted(

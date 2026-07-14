@@ -3120,6 +3120,53 @@ tr:hover td {
 .status-pill.stable { background: #dcfce7; color: #166534; }
 .status-pill.requires_attention { background: #ffedd5; color: #9a3412; }
 
+.alias-review-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 14px;
+    flex-wrap: wrap;
+}
+
+.alias-review-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.mixer-map-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 0.64rem;
+    font-weight: 800;
+    text-transform: uppercase;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+.mixer-map-confirmed {
+    background: #dcfce7;
+    color: #166534;
+}
+
+.mixer-map-inferred {
+    background: #e0f2fe;
+    color: #075985;
+}
+
+.mixer-map-conflict {
+    background: #ffedd5;
+    color: #9a3412;
+}
+
+.mixer-map-unresolved {
+    background: #fee2e2;
+    color: #991b1b;
+}
+
 .calc-flag-list {
     display: flex;
     flex-direction: column;
