@@ -53,6 +53,7 @@ from downtime_service import (
     get_work_order_import_status,
     import_work_order_file,
     get_last_import_stats,
+    register_work_order_import_completion_callback,
 )
 try:
     from mira.api import mira_bp
@@ -598,6 +599,7 @@ def _invalidate_route_cache():
                 pass
     except Exception:
         pass
+
     # kpi_query_service/predictive_service memoize on top of downtime_service's
     # own caches (up to 15 min TTL) — without clearing these too, the MIRA
     # Overview / Predictive Insights pages keep serving pre-import data for
@@ -607,6 +609,9 @@ def _invalidate_route_cache():
         ("downtime_service", "_DOWNTIME_CACHE"),
         ("mira.services.kpi_query_service", "_MEMO"),
         ("mira.services.predictive_service", "_MEMO"),
+        ("mira.api", "_SUMMARY_CACHE"),
+        ("mira.api", "_PREDICTIVE_WORDING_CACHE"),
+        ("mira.api", "_ASSET_AI_INSIGHT_CACHE"),
     ):
         try:
             import importlib
@@ -617,6 +622,12 @@ def _invalidate_route_cache():
         clear_work_order_runtime_caches()
     except Exception:
         pass
+
+
+# An asynchronous work-order upload returns before its database write finishes.
+# Clear all route/MIRA caches again after that commit so no request made during
+# the import can leave Predictive Insights pinned to the previous dataset.
+register_work_order_import_completion_callback(_invalidate_route_cache)
 
 
 # A successful POST to any of these (edit/upload) invalidates the cache so the
@@ -1192,7 +1203,8 @@ def downtime_import_work_orders():
         return jsonify({"ok": False, "message": "No work order file uploaded."}), 400
     replace = str(request.form.get("replace", "true")).strip().lower() not in {"0", "false", "no"}
     result = import_work_order_file(upload, replace=replace)
-    return jsonify(result), (200 if result.get("ok") else 400)
+    status = 202 if result.get("ok") and result.get("pending") else (200 if result.get("ok") else 400)
+    return jsonify(result), status
 
 
 @app.route("/api/import/validate", methods=["POST"])

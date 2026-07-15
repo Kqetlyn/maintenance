@@ -36,7 +36,7 @@ from .services import predictive_service
 
 mira_bp = Blueprint("mira", __name__, url_prefix="/api/mira")
 
-MIRA_BACKEND_VERSION = "2026.06.08-overview-direct-2"
+MIRA_BACKEND_VERSION = "2026.07.15-async-import-refresh-1"
 MIRA_BACKEND_STARTED_AT = datetime.now(timezone.utc).isoformat()
 MIRA_SUMMARY_CACHE_TTL_SECONDS = 120
 MIRA_OVERVIEW_SUMMARY_TIMEOUT_SECONDS = 10

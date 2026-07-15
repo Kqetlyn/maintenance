@@ -4878,11 +4878,14 @@
     // loaded at least once this session (lastOverview set), so a user who has
     // never opened it doesn't get a surprise download. Deliberately silent
     // (console only, no alerts) since this runs in the background regardless
-    // of which tab is currently visible.
+    // of which tab is currently visible. Refreshing is unconditional once the
+    // view has mounted; only the optional export depends on lastOverview/PPT.
     window.miraOverviewAutoExportPptAfterImport = async function miraOverviewAutoExportPptAfterImport() {
-        if (!lastOverview || !window.PptxGenJS) return;
+        if (!mounted) return;
+        const shouldExport = !!(lastOverview && window.PptxGenJS);
         try {
             await _waitForFreshOverviewLoad(45000);
+            if (!shouldExport) return;
             const R = await buildPptReportData();
             await generateOvPpt(R);
             debugLog("ppt:auto-export-after-import", { ok: true });

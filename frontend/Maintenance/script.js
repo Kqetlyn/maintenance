@@ -1051,6 +1051,41 @@ document.addEventListener("DOMContentLoaded", () => {
         return "status-done";
     }
 
+    async function waitForWorkOrderImportCompletion(initialResult, onProgress) {
+        if (!initialResult?.pending) return initialResult;
+
+        const jobId = initialResult.job_id || "";
+        const deadline = Date.now() + 5 * 60 * 1000;
+        if (typeof onProgress === "function") onProgress(initialResult);
+
+        while (Date.now() < deadline) {
+            await new Promise((resolve) => window.setTimeout(resolve, 750));
+            let response;
+            try {
+                response = await fetch(
+                    `/api/import/last-result${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ""}`,
+                    { cache: "no-store" }
+                );
+            } catch (_) {
+                continue;
+            }
+            if (!response.ok) continue;
+
+            const status = await response.json().catch(() => ({}));
+            if (jobId && status.job_id && status.job_id !== jobId) continue;
+            if (status.pending || status.complete === false) {
+                if (typeof onProgress === "function") onProgress(status);
+                continue;
+            }
+            if (status.ok === false) {
+                throw new Error(status.message || "Work-order database import failed.");
+            }
+            return { ...initialResult, ...status };
+        }
+
+        throw new Error("The file was uploaded, but database processing did not finish within 5 minutes.");
+    }
+
     async function handleDowntimeImport(event) {
         event.preventDefault();
         const input = document.getElementById("downtime-import-file");
@@ -1065,10 +1100,17 @@ document.addEventListener("DOMContentLoaded", () => {
         setSpareImportStatus("downtime-import-status", "Importing work-order file...", "");
         try {
             const response = await fetch("/api/downtime/import-work-orders", { method: "POST", body: formData });
-            const result = await response.json().catch(() => ({}));
-            if (!response.ok || !result.ok) {
-                throw new Error(result.message || `HTTP ${response.status}`);
+            const accepted = await response.json().catch(() => ({}));
+            if (!response.ok || !accepted.ok) {
+                throw new Error(accepted.message || `HTTP ${response.status}`);
             }
+            const result = await waitForWorkOrderImportCompletion(accepted, (status) => {
+                setSpareImportStatus(
+                    "downtime-import-status",
+                    status.message || "File uploaded. Updating the work-order database...",
+                    ""
+                );
+            });
             if (input) input.value = "";
             setSpareImportStatus(
                 "downtime-import-status",
@@ -1082,6 +1124,7 @@ document.addEventListener("DOMContentLoaded", () => {
             state.analysisFilteredRows = [];
             state.analysisFilteredIntervals = [];
             await loadDowntimeView(true);
+            window.miraOverviewAutoExportPptAfterImport?.();
         } catch (error) {
             setSpareImportStatus("downtime-import-status", `Import failed: ${error.message}`, "error");
         }

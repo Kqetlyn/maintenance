@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import threading
+import uuid
 from glob import glob
 from datetime import datetime, timedelta
 
@@ -54,6 +55,7 @@ _SQL_WO_CACHE: dict = {}
 DOWNTIME_CACHE_VERSION = "2026-06-18-stage-text-detection"
 # Stores the most recent import result so the frontend can poll it after upload.
 _LAST_IMPORT_STATS: dict = {}
+_WORK_ORDER_IMPORT_COMPLETION_CALLBACKS: list = []
 
 
 def _normalize_request_state(raw: str) -> str:
@@ -73,6 +75,26 @@ def _normalize_request_state(raw: str) -> str:
 def get_last_import_stats() -> dict:
     """Return the stats dict from the most recent DB import (background thread)."""
     return dict(_LAST_IMPORT_STATS)
+
+
+def register_work_order_import_completion_callback(callback) -> None:
+    """Register a best-effort callback that runs after a DB import commits.
+
+    The Flask app uses this to clear route and MIRA caches at the *end* of an
+    asynchronous import. Clearing only when the upload response is returned is
+    too early: another request can repopulate those caches with the old DB rows
+    while the background write is still running.
+    """
+    if callable(callback) and callback not in _WORK_ORDER_IMPORT_COMPLETION_CALLBACKS:
+        _WORK_ORDER_IMPORT_COMPLETION_CALLBACKS.append(callback)
+
+
+def _notify_work_order_import_complete() -> None:
+    for callback in list(_WORK_ORDER_IMPORT_COMPLETION_CALLBACKS):
+        try:
+            callback()
+        except Exception as exc:
+            _log.warning("Work-order import completion callback failed: %s", exc)
 
 
 def clear_work_order_runtime_caches() -> None:
@@ -1643,7 +1665,10 @@ def build_work_order_quality_flags(
     return flags or ["Valid"]
 
 
-def write_work_orders_to_db(replace_existing: bool = False) -> dict:
+def write_work_orders_to_db(
+    replace_existing: bool = False,
+    import_job_id: str = "",
+) -> dict:
     """
     Load all enriched work-order records (via the in-process cache) and upsert
     them into the SQLite work_orders table.  Also writes one row to import_log.
@@ -1656,7 +1681,14 @@ def write_work_orders_to_db(replace_existing: bool = False) -> dict:
 
     payload = load_work_order_downtime()
     if not payload.get("available"):
-        out = {"ok": False, "message": payload.get("message", "No data available.")}
+        out = {
+            "ok": False,
+            "pending": False,
+            "complete": True,
+            "job_id": import_job_id or None,
+            "message": payload.get("message", "No data available."),
+        }
+        _LAST_IMPORT_STATS.clear()
         _LAST_IMPORT_STATS.update(out)
         return out
 
@@ -1701,6 +1733,9 @@ def write_work_orders_to_db(replace_existing: bool = False) -> dict:
     imported_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     out = {
         "ok": True,
+        "pending": False,
+        "complete": True,
+        "job_id": import_job_id or None,
         "import_type": import_format,
         "source_type": source_type,
         "source_file": source_file,
@@ -1724,14 +1759,31 @@ def write_work_orders_to_db(replace_existing: bool = False) -> dict:
     _LAST_IMPORT_STATS.clear()
     _LAST_IMPORT_STATS.update(out)
     clear_work_order_runtime_caches()
+    _notify_work_order_import_complete()
     return out
 
 
-def _write_wo_to_db_background(replace_existing: bool = False):
+def _write_wo_to_db_background(
+    replace_existing: bool = False,
+    import_job_id: str = "",
+):
     try:
-        result = write_work_orders_to_db(replace_existing=replace_existing)
+        result = write_work_orders_to_db(
+            replace_existing=replace_existing,
+            import_job_id=import_job_id,
+        )
         print(f"[db] {result['message']}")
     except Exception as exc:
+        result = {
+            "ok": False,
+            "pending": False,
+            "complete": True,
+            "job_id": import_job_id or None,
+            "message": f"Work-order database import failed: {exc}",
+        }
+        _LAST_IMPORT_STATS.clear()
+        _LAST_IMPORT_STATS.update(result)
+        _notify_work_order_import_complete()
         print(f"[db] work_orders sync error: {exc}")
 
 
@@ -1797,9 +1849,11 @@ def import_work_order_file(file_storage, replace=True):
 
             import powerbi_full_import as _pfi
             result = _pfi.import_powerbi_full_export(df, source_file=target_name)
+            result.update({"pending": False, "complete": True, "job_id": None})
             _LAST_IMPORT_STATS.clear()
             _LAST_IMPORT_STATS.update(result)
             clear_work_order_runtime_caches()
+            _notify_work_order_import_complete()
             return result
     except Exception as exc:
         return {"ok": False, "message": f"D365 Full MR/WO import error: {exc}"}
@@ -1816,15 +1870,18 @@ def import_work_order_file(file_storage, replace=True):
     except Exception:
         pass
 
-    if _env_truthy("ASYNC_WORK_ORDER_DB_IMPORT", "0"):
-        threading.Thread(
-            target=_write_wo_to_db_background,
-            args=(replace,),
-            name="db-wo-sync",
-            daemon=True,
-        ).start()
-        return {
+    # Do the expensive enrichment + SQLite write outside the upload request by
+    # default. Deployed reverse proxies can terminate a long request even though
+    # the server-side import later finishes, which made the UI report HTTP 500
+    # for a successful import. Set ASYNC_WORK_ORDER_DB_IMPORT=0 only for local
+    # debugging that explicitly needs the old synchronous behaviour.
+    if _env_truthy("ASYNC_WORK_ORDER_DB_IMPORT", "1"):
+        import_job_id = f"wo_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+        accepted = {
             "ok": True,
+            "pending": True,
+            "complete": False,
+            "job_id": import_job_id,
             "import_type": import_format,
             "is_powerbi": is_powerbi,
             "message": f"File accepted ({len(df)} row(s)). Writing to database in background.",
@@ -1836,9 +1893,18 @@ def import_work_order_file(file_storage, replace=True):
             "rows_with_missing_wo": file_stats.get("rows_with_missing_wo", 0),
             "rows_with_missing_dates": file_stats.get("rows_with_missing_start", 0) + file_stats.get("rows_with_missing_end", 0),
             "rows_with_bad_sequence": file_stats.get("rows_with_bad_sequence", 0),
-            "imported_at": datetime.now().isoformat(timespec="seconds"),
-            "note": "Poll /api/import/last-result for full DB import stats once the background write completes.",
+            "accepted_at": datetime.now().isoformat(timespec="seconds"),
+            "status_endpoint": "/api/import/last-result",
         }
+        _LAST_IMPORT_STATS.clear()
+        _LAST_IMPORT_STATS.update(accepted)
+        threading.Thread(
+            target=_write_wo_to_db_background,
+            args=(replace, import_job_id),
+            name="db-wo-sync",
+            daemon=True,
+        ).start()
+        return accepted
 
     result = write_work_orders_to_db(replace_existing=replace)
     result.update({
