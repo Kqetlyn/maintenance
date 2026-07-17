@@ -13,25 +13,21 @@ import openpyxl
 import pandas as pd
 from openpyxl.styles.colors import COLOR_INDEX
 
-
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+from runtime_config import DATA_DIR
 
 
 MAINTENANCE_WORKBOOK_PATH = Path(
     os.environ.get(
         "MAINTENANCE_WORKBOOK_PATH",
-        r"C:\Users\merri\Downloads\utility maintenance\FO-FC11-011 Preventive Maintenance Schedule 2025J.xlsx",
+        str(DATA_DIR / "utility_maintenance_stage1_source.xlsx"),
     )
-)
-LEGACY_UTILITY_WORKBOOK_FALLBACK_PATH = Path(
-    r"C:\Users\merri\Downloads\utility maintenance\FO-FC11-011 Preventive Maintenance Schedule 2025J 2025.xlsx"
 )
 UTILITY_MAINTENANCE_SOURCE_PATH = DATA_DIR / "utility_maintenance_stage1_source.xlsx"
 
 EQUIPMENT_MAINTENANCE_WORKBOOK_PATH = Path(
     os.environ.get(
         "EQUIPMENT_MAINTENANCE_WORKBOOK_PATH",
-        r"C:\Users\merri\Downloads\FO-FC11-011 Preventive Maintenance Schedule 2025 stage 2.xlsx",
+        str(DATA_DIR / "equipment_maintenance_schedule_source.xlsx"),
     )
 )
 EQUIPMENT_MAINTENANCE_SOURCE_PATH = DATA_DIR / "equipment_maintenance_schedule_source.xlsx"
@@ -285,7 +281,7 @@ def clear_maintenance_caches():
 def resolve_utility_workbook_path() -> Path:
     if UTILITY_MAINTENANCE_SOURCE_PATH.exists():
         return UTILITY_MAINTENANCE_SOURCE_PATH
-    for candidate in (MAINTENANCE_WORKBOOK_PATH, LEGACY_UTILITY_WORKBOOK_FALLBACK_PATH):
+    for candidate in (MAINTENANCE_WORKBOOK_PATH,):
         candidate_path = Path(candidate)
         if candidate_path.exists():
             return candidate_path

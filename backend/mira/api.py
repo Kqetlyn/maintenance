@@ -18,7 +18,6 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from datetime import date, datetime, timedelta, timezone
 import json
-from pathlib import Path
 import threading
 import time
 
@@ -33,6 +32,7 @@ from .services import kpi_query_service as kpi
 from .services import presentation_service as presentation
 from .services import asset_report_service as asset_report
 from .services import predictive_service
+from runtime_config import DATA_DIR
 
 mira_bp = Blueprint("mira", __name__, url_prefix="/api/mira")
 
@@ -44,7 +44,7 @@ MIRA_AI_SUMMARY_TIMEOUT_SECONDS = 8
 _SUMMARY_CACHE: dict[str, dict] = {}
 _SUMMARY_WARMING: set[str] = set()
 _PREDICTIVE_WORDING_CACHE: dict[str, dict] = {}
-_MIRA_DESCRIPTION_TAGS_PATH = Path(__file__).resolve().parents[2] / "data" / "mira_description_tags.json"
+_MIRA_DESCRIPTION_TAGS_PATH = DATA_DIR / "mira_description_tags.json"
 
 print(f"[MIRA] Backend build {MIRA_BACKEND_VERSION} loaded at {MIRA_BACKEND_STARTED_AT}. Restart Flask after Python API/schema changes.")
 

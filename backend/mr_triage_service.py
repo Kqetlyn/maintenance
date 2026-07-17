@@ -37,11 +37,11 @@ except Exception:  # pragma: no cover
     ZoneInfo = None
 
 import downtime_service as _dt
+from runtime_config import DATA_DIR
 
 # ── Config (env / App Settings; sensible local defaults) ──────────────────────
 _BASE_DIR = Path(__file__).resolve().parent
-_DATA_DIR = _BASE_DIR.parent / "data"
-VERDICT_DIR = _DATA_DIR / "mr_triage_verdicts"          # gitignored (data/*)
+VERDICT_DIR = DATA_DIR / "mr_triage_verdicts"          # gitignored (data/*)
 PROMPT_PATH = _BASE_DIR / "mr_triage_prompt.md"
 
 # Scopes the morning job precomputes. Single scopes only — "All" is merged on read.

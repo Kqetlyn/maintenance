@@ -16,7 +16,6 @@ import json
 import re
 from collections import Counter, defaultdict
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Optional
 
 import threading
@@ -25,6 +24,7 @@ import time
 from ..core import context as ctx
 from . import kpi_query_service as kpi
 from pm_schedule_service import build_pm_schedule_payload
+from runtime_config import DATA_DIR
 
 # ── Per-process memo (same pattern as kpi_query_service) ────────────────────────
 _MEMO: dict[tuple, tuple[float, object]] = {}
@@ -52,14 +52,12 @@ def _memo_peek(key):
 
 
 # ── Fault-family classification (broad, for Data Confidence + fault_pattern) ────
-_FAULT_CACHE_PATH = (
-    Path(__file__).resolve().parents[3] / "data" / "mira_fault_classifications.json"
-)
+_FAULT_CACHE_PATH = DATA_DIR / "mira_fault_classifications.json"
 _fault_cache: dict[str, str] = {}
 _fault_cache_loaded = False
 
 # ── Machine-group manual override store (confirmed by operators) ─────────────────
-_MG_OVERRIDE_PATH = Path(__file__).resolve().parents[3] / "data" / "machine_group_overrides.json"
+_MG_OVERRIDE_PATH = DATA_DIR / "machine_group_overrides.json"
 _mg_overrides: dict[str, dict] = {}
 _mg_overrides_loaded = False
 _mg_inference_cache: dict[str, dict] = {}  # desc_hash → ollama result, process-lifetime
@@ -162,7 +160,7 @@ SPECIFIC_ISSUES: list[tuple[str, str, list[str]]] = [
 _SPECIFIC_ISSUE_LABELS = [s[0] for s in SPECIFIC_ISSUES]
 
 _SPECIFIC_CACHE_PATH = (
-    Path(__file__).resolve().parents[3] / "data" / "mira_specific_issue_classifications.json"
+    DATA_DIR / "mira_specific_issue_classifications.json"
 )
 _specific_cache: dict[str, str] = {}
 _specific_cache_loaded = False
@@ -926,9 +924,8 @@ def _group_index() -> dict:
     ):
         return _GROUP_INDEX_CACHE["index"]
     try:
-        from pathlib import Path as _P
         import asset_mapping as _am
-        data_dir = str(_P(__file__).resolve().parents[3] / "data")
+        data_dir = str(DATA_DIR)
         mapping = _am.load_asset_mapping(data_dir)
     except Exception:
         if _GROUP_INDEX_CACHE["index"] is not None:
@@ -1767,7 +1764,7 @@ def _find_inventory_match(item_code: str | None, label: str | None, inventory_lo
     return None
 
 
-_STAGE1_SPARES_CATALOGUE_PATH = Path(__file__).resolve().parents[3] / "data" / "Spare Parts- Assets_Stage 1.xlsx"
+_STAGE1_SPARES_CATALOGUE_PATH = DATA_DIR / "Spare Parts- Assets_Stage 1.xlsx"
 _STAGE1_SPARES_CATALOGUE_CACHE: dict[str, object] = {"sig": None, "rows": []}
 _SPARE_PREP_CACHE: dict[tuple, dict] = {}
 _OTHER_COMMON_FAULTS_CACHE: dict[tuple, list[dict]] = {}

@@ -19,6 +19,8 @@ from pathlib import Path
 
 import openpyxl
 
+from runtime_config import DATA_DIR
+
 ASSET_MASTER_FILENAME = "Asset_Master.xlsx"
 ASSET_MASTER_RELATIVE_PATH = Path("master") / ASSET_MASTER_FILENAME
 ASSET_MAPPING_SHEET = "Asset_Master"
@@ -51,10 +53,9 @@ REFRIGERATION_SUBGROUPS = [
 _MACHINE_GROUP_SET = set(MACHINE_GROUPS)
 
 _CANDIDATES = [
-    Path(__file__).resolve().parents[1] / "data" / ASSET_MASTER_RELATIVE_PATH,
-    Path(__file__).resolve().parents[1] / "data" / ASSET_MASTER_FILENAME,
+    DATA_DIR / ASSET_MASTER_RELATIVE_PATH,
+    DATA_DIR / ASSET_MASTER_FILENAME,
     Path(__file__).resolve().parent / ASSET_MASTER_FILENAME,
-    Path.home() / "Downloads" / ASSET_MASTER_FILENAME,
 ]
 
 _CACHE = {"sig": None, "payload": None}
@@ -583,7 +584,7 @@ def classify_asset_category(asset_id=None, asset_name=None, functional_location=
     Returns "Unclassified" for anything that can't be mapped to a real category."""
     if mapping is None:
         try:
-            mapping = load_asset_mapping(str(Path(__file__).resolve().parents[1] / "data"))
+            mapping = load_asset_mapping(str(DATA_DIR))
         except Exception:
             return "Unclassified"
     record = {

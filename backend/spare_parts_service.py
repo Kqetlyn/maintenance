@@ -21,9 +21,10 @@ from asset_resolver import (
 )
 from downtime_management import load_grouped_machine_mapping
 from maintenance_service import MONTH_LABELS, build_equipment_dataset, clean_text
+from runtime_config import DATA_DIR
 
 
-DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DEFAULT_DATA_DIR = DATA_DIR
 ASSET_MASTER_PATH = DEFAULT_DATA_DIR / "master" / "Asset_Master.xlsx"
 D365_SPARE_PARTS_PATH = Path(
     os.environ.get(
@@ -2846,7 +2847,7 @@ def write_spare_parts_to_db() -> dict:
     except Exception as exc:
         return {"ok": False, "rows": 0, "message": f"db module unavailable: {exc}"}
     try:
-        data_dir_path = Path(__file__).resolve().parent.parent / "data"
+        data_dir_path = DEFAULT_DATA_DIR
         paths, source_status = _resolve_future_sources(data_dir_path)
         asset_lookup = _build_spare_sql_asset_lookup()
 
@@ -3147,7 +3148,7 @@ def _trim_spare_parts_payload_for_browser(payload: dict) -> None:
 
 
 def build_spare_parts_payload():
-    data_dir_path = Path(__file__).resolve().parent.parent / "data"
+    data_dir_path = DEFAULT_DATA_DIR
     future_paths, future_source_status = _resolve_future_sources(data_dir_path)
     source_paths = [p for p in future_paths.values() if p]
     cache_signature = (
@@ -4981,7 +4982,7 @@ def _epo_parse_int_days(raw) -> int | None:
 
 
 def build_external_po_payload() -> dict:
-    data_dir_path = Path(__file__).resolve().parent.parent / "data"
+    data_dir_path = DEFAULT_DATA_DIR
     future_paths, future_source_status = _resolve_future_sources(data_dir_path)
     _EPO_CACHE_V = 2
     try:

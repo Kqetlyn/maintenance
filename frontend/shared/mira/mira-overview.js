@@ -4872,6 +4872,22 @@
         });
     }
 
+    // Refresh-only hook for any successful data import. It is intentionally a
+    // no-op until Predictive Insights has mounted; opening the tab later will
+    // perform its normal fresh load against the server-invalidated caches.
+    window.miraOverviewRefreshAfterImport = async function miraOverviewRefreshAfterImport() {
+        if (!mounted) return false;
+        try {
+            await _waitForFreshOverviewLoad(45000);
+            debugLog("overview:refresh-after-import", { ok: true });
+            return true;
+        } catch (e) {
+            console.warn("[MIRA] Refresh after import failed:", e && e.message);
+            debugLog("overview:refresh-after-import", { ok: false, error: e && e.message });
+            return false;
+        }
+    };
+
     // Auto-triggered after a successful work-order import elsewhere in the app
     // (see the "maintenance-work-order-imported" postMessage listener in
     // Maintenance/script.js) — only runs if the Overview tab has actually been
@@ -4884,7 +4900,8 @@
         if (!mounted) return;
         const shouldExport = !!(lastOverview && window.PptxGenJS);
         try {
-            await _waitForFreshOverviewLoad(45000);
+            const refreshed = await window.miraOverviewRefreshAfterImport();
+            if (!refreshed) return;
             if (!shouldExport) return;
             const R = await buildPptReportData();
             await generateOvPpt(R);

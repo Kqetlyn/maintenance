@@ -10,20 +10,19 @@ Phase 5: spare_parts table + upsert/load helpers for the Spare Parts page.
 
 from __future__ import annotations
 
-import os
 import re
 import sqlite3
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
+
+from runtime_config import DATA_DIR
 
 # ── Database path ──────────────────────────────────────────────────────────────
 # Resolves DATA_DIR from environment variable or defaults to local data directory
 # for compatibility with different deployment environments.
-_BASE_DIR = Path(__file__).resolve().parent
-_DEFAULT_DATA_DIR = _BASE_DIR.parent / "data"
-DB_PATH = Path(os.environ.get("DATA_DIR") or str(_DEFAULT_DATA_DIR)) / "dashboard.db"
+DB_PATH = DATA_DIR / "dashboard.db"
 
 # Coarse lock so concurrent startup threads don't race on schema creation.
 _INIT_LOCK = threading.Lock()
@@ -739,6 +738,8 @@ def upsert_work_orders(
     records: list[dict],
     source_file: str = "",
     source_type: str = "work_orders",
+    *,
+    connection=None,
 ) -> dict:
     """
     Bulk-upsert enriched work-order records (as produced by
@@ -866,7 +867,8 @@ def upsert_work_orders(
             updated_at             = excluded.updated_at
     """
 
-    with get_connection() as conn:
+    connection_scope = nullcontext(connection) if connection is not None else get_connection()
+    with connection_scope as conn:
         count_before = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
         conn.executemany(upsert_sql, rows)
         count_after = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
@@ -886,14 +888,19 @@ def upsert_work_orders(
     }
 
 
-def clear_work_orders(source_types: list[str] | tuple[str, ...] | None = None) -> dict:
+def clear_work_orders(
+    source_types: list[str] | tuple[str, ...] | None = None,
+    *,
+    connection=None,
+) -> dict:
     """Delete rows from the legacy work_orders table.
 
     Used when an uploaded MR/WO file is explicitly imported in replace mode.
     POWERBI_FULL_MR_WO_EXPORT imports use raw_powerbi_mr_wo_export batches and
     are intentionally not touched here.
     """
-    with get_connection() as conn:
+    connection_scope = nullcontext(connection) if connection is not None else get_connection()
+    with connection_scope as conn:
         before = conn.execute("SELECT COUNT(*) FROM work_orders").fetchone()[0]
         if source_types:
             values = [str(item or "").strip() for item in source_types if str(item or "").strip()]
@@ -915,6 +922,8 @@ def log_import(
     valid_count: int,
     invalid_count: int,
     notes: str = "",
+    *,
+    connection=None,
 ) -> int:
     """Insert one row into import_log and return its new id."""
     now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -923,7 +932,8 @@ def log_import(
             (source_type, source_file, imported_at, row_count, valid_count, invalid_count, notes)
         VALUES (?, ?, ?, ?, ?, ?, ?)
     """
-    with get_connection() as conn:
+    connection_scope = nullcontext(connection) if connection is not None else get_connection()
+    with connection_scope as conn:
         cursor = conn.execute(sql, (source_type, source_file, now, row_count, valid_count, invalid_count, notes))
         return cursor.lastrowid
 
@@ -1077,13 +1087,14 @@ def create_import_batch(
     }
 
 
-def deactivate_old_batches(source_type: str) -> int:
+def deactivate_old_batches(source_type: str, *, connection=None) -> int:
     """
     Mark all currently active batches of the given source_type as inactive.
     Called before inserting a new batch so the new one is the only active one.
     Returns the count of deactivated rows.
     """
-    with get_connection() as conn:
+    connection_scope = nullcontext(connection) if connection is not None else get_connection()
+    with connection_scope as conn:
         conn.execute(
             "UPDATE import_batches SET is_active = 0"
             " WHERE source_type = ? AND is_active = 1",
@@ -1147,6 +1158,73 @@ def insert_powerbi_full_records(batch_id: str, records: list[dict]) -> dict:
     with get_connection() as conn:
         conn.executemany(sql, rows)
     return {"inserted": len(rows)}
+
+
+def replace_powerbi_full_batch(
+    *,
+    batch_id: str,
+    source_type: str,
+    source_file: str,
+    imported_at: str,
+    records: list[dict],
+    valid_rows: int = 0,
+    review_rows: int = 0,
+    notes: str = "",
+) -> dict:
+    """Activate a fully written Power BI batch in one transaction.
+
+    If batch creation or row insertion fails, SQLite rolls back the active-batch
+    change and the dashboard continues using its previous valid dataset.
+    """
+    cols = (
+        "import_batch_id", "source_file", "imported_at",
+        "request_id", "work_order_id", "asset_id", "asset_name",
+        "request_state", "requester", "description", "location",
+        "job_trade", "job_type_id", "request_type_id", "responsible", "worker_group",
+        "priority", "actual_start", "actual_end",
+        "normalized_status", "ttr_hours", "data_quality_flag", "review_reason",
+    )
+    placeholders = ", ".join("?" * len(cols))
+    insert_records_sql = (
+        f"INSERT INTO raw_powerbi_mr_wo_export ({', '.join(cols)}) "
+        f"VALUES ({placeholders})"
+    )
+    rows = [tuple(record.get(column) for column in cols) for record in records]
+
+    with get_connection() as conn:
+        previous = conn.execute(
+            """
+            SELECT batch_id FROM import_batches
+            WHERE source_type = ? AND is_active = 1
+            ORDER BY imported_at DESC LIMIT 1
+            """,
+            (source_type,),
+        ).fetchone()
+        conn.execute(
+            "UPDATE import_batches SET is_active = 0 WHERE source_type = ? AND is_active = 1",
+            (source_type,),
+        )
+        deactivated = int(conn.execute("SELECT changes()").fetchone()[0] or 0)
+        conn.execute(
+            """
+            INSERT INTO import_batches
+                (batch_id, source_type, source_file, imported_at,
+                 is_active, total_rows, valid_rows, review_rows, notes)
+            VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?)
+            """,
+            (
+                batch_id, source_type, source_file, imported_at, len(rows),
+                valid_rows, review_rows, notes or "",
+            ),
+        )
+        if rows:
+            conn.executemany(insert_records_sql, rows)
+
+    return {
+        "inserted": len(rows),
+        "previous_batch_id": previous["batch_id"] if previous else None,
+        "deactivated": deactivated,
+    }
 
 
 def load_powerbi_full_records(batch_id: str, stage: str | None = None) -> list[dict]:

@@ -22,10 +22,11 @@ from pathlib import Path
 import openpyxl
 
 import db as _db
+from runtime_config import DATA_DIR, SPARE_PARTS_IMPORT_DIR
 
 # ── Canonical file paths ───────────────────────────────────────────────────────
-_DEFAULT_DATA_DIR   = Path(__file__).resolve().parent.parent / "data"
-_SPARE_IMPORT_DIR   = _DEFAULT_DATA_DIR / "spare_parts_imports"
+_DEFAULT_DATA_DIR   = DATA_DIR
+_SPARE_IMPORT_DIR   = SPARE_PARTS_IMPORT_DIR
 PO_SPARE_CANONICAL      = _SPARE_IMPORT_DIR / "po_spare_24_26.csv"
 INV_MAPPING_CANONICAL   = _SPARE_IMPORT_DIR / "inventory_item_mapping.xlsx"
 

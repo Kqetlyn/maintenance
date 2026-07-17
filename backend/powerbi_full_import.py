@@ -311,18 +311,17 @@ def import_powerbi_full_export(df: Any, source_file: str = "") -> dict:
 
     # ── DB write (atomic: deactivate old → create batch → insert rows) ────────
     _db._backup_db_once()
-    prev_batch_id = _db.get_active_powerbi_full_batch_id()
-    deactivated   = _db.deactivate_old_batches(POWERBI_FULL_MR_WO_FORMAT)
-    _db.create_import_batch(
-        batch_id    = batch_id,
-        source_type = POWERBI_FULL_MR_WO_FORMAT,
-        source_file = source_file,
-        imported_at = imported_at,
-        total_rows  = len(records),
-        valid_rows  = valid_rows,
-        review_rows = review_rows,
+    insert_result = _db.replace_powerbi_full_batch(
+        batch_id=batch_id,
+        source_type=POWERBI_FULL_MR_WO_FORMAT,
+        source_file=source_file,
+        imported_at=imported_at,
+        records=records,
+        valid_rows=valid_rows,
+        review_rows=review_rows,
     )
-    insert_result = _db.insert_powerbi_full_records(batch_id, records)
+    prev_batch_id = insert_result.get("previous_batch_id")
+    deactivated = insert_result.get("deactivated", 0)
 
     return {
         "ok":                              True,

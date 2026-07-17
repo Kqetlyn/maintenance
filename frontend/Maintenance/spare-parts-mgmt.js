@@ -413,6 +413,7 @@
                 await refreshImportStatusOnly();
                 invalidateDataCaches();
                 void load({ background: true });
+                void window.miraOverviewRefreshAfterImport?.();
             }
         } catch (error) {
             setWarn(warn, "Import error: " + error.message, "err");

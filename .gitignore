@@ -1,12 +1,17 @@
 __pycache__/
 *.py[cod]
 *.pyc
+.venv/
+.venv*/
+.clean-venv/
 .env
 *.log
 logs/
 *.db
 *.db-shm
 *.db-wal
+*.db.bak
+*.db.pre-*
 
 # Data files — kept locally, uploaded via the app on the deployed version
 data/argos_translate/
@@ -14,6 +19,11 @@ data/*.xlsx
 data/*.csv
 data/*.json
 data/*.zip
+data/**/*.xlsx
+data/**/*.xls
+data/**/*.csv
+data/**/*.json
+data/**/*.zip
 data/work_order_imports/
 data/project_transactions_imports/
 data/_upload_tmp/

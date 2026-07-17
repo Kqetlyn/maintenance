@@ -32,9 +32,9 @@ from pathlib import Path
 import pandas as pd
 
 from asset_mapping import group_to_category
+from runtime_config import DATA_DIR, SPARE_PARTS_IMPORT_DIR
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-IMPORT_DIR = DATA_DIR / "spare_parts_imports"
+IMPORT_DIR = SPARE_PARTS_IMPORT_DIR
 # Records which imported file belongs to which stage. This makes stage tagging
 # AUTHORITATIVE (the user imports via a Stage 1 / Stage 2 slot) rather than
 # guessing from the filename.

@@ -8,6 +8,8 @@ from glob import glob
 from datetime import datetime, timedelta
 
 import pandas as pd
+
+from runtime_config import DATA_DIR as RUNTIME_DATA_DIR, WORK_ORDER_IMPORT_DIR as RUNTIME_WORK_ORDER_IMPORT_DIR
 import openpyxl
 
 try:
@@ -36,11 +38,9 @@ from mixer_alias_mapping import FOOD_MIXER_GROUP, apply_mixer_alias_mapping
 _log = logging.getLogger(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
+DATA_DIR = str(RUNTIME_DATA_DIR)
 # Standalone: cache written to data/ since there is no Downtime frontend folder here
-DOWNTIME_CACHE_OUTPUT_FILE = os.path.abspath(
-    os.path.join(BASE_DIR, "..", "data", "downtime-cache.json")
-)
+DOWNTIME_CACHE_OUTPUT_FILE = os.path.join(DATA_DIR, "downtime-cache.json")
 ARGOS_TRANSLATE_DIR = os.path.join(DATA_DIR, "argos_translate")
 os.environ.setdefault("XDG_CONFIG_HOME", os.path.join(ARGOS_TRANSLATE_DIR, "config"))
 os.environ.setdefault("XDG_DATA_HOME", os.path.join(ARGOS_TRANSLATE_DIR, "data"))
@@ -129,8 +129,7 @@ def _sql_work_order_signature():
 DOWNTIME_EXPORT_YEAR = 2026
 
 PRIMARY_WORK_ORDER_DOWNTIME_FILE = os.path.join(DATA_DIR, "data downtime.csv")
-FALLBACK_WORK_ORDER_DOWNTIME_FILE = os.path.abspath(os.path.join(os.path.expanduser("~"), "Downloads", "data downtime.csv"))
-WORK_ORDER_IMPORT_DIR = os.path.join(DATA_DIR, "work_order_imports")
+WORK_ORDER_IMPORT_DIR = str(RUNTIME_WORK_ORDER_IMPORT_DIR)
 WORK_ORDER_IMPORT_EXTENSIONS = {".csv", ".xlsx", ".xls"}
 ASSET_MASTER_FILENAME = "Asset_Master.xlsx"
 ASSET_MASTER_RELATIVE_PATH = os.path.join("master", ASSET_MASTER_FILENAME)
@@ -1410,8 +1409,6 @@ def get_work_order_source_paths():
         ]
         for pattern in data_patterns:
             candidates.extend(glob(pattern))
-        if os.path.exists(FALLBACK_WORK_ORDER_DOWNTIME_FILE):
-            candidates.append(FALLBACK_WORK_ORDER_DOWNTIME_FILE)
     ordered = []
     seen = set()
     for path in candidates:
@@ -1713,22 +1710,28 @@ def write_work_orders_to_db(
             pass
 
     deleted = 0
-    if replace_existing:
-        deleted = int((_db.clear_work_orders() or {}).get("deleted") or 0)
-        try:
-            _db.deactivate_old_batches("POWERBI_FULL_MR_WO_EXPORT")
-        except Exception:
-            pass
+    # Replacement and import logging share one transaction. Any database error
+    # restores both the prior work orders and the prior active PBI batch.
+    with _db.get_connection() as conn:
+        if replace_existing:
+            deleted = int((_db.clear_work_orders(connection=conn) or {}).get("deleted") or 0)
+            _db.deactivate_old_batches("POWERBI_FULL_MR_WO_EXPORT", connection=conn)
 
-    result = _db.upsert_work_orders(records, source_file, source_type=source_type)
-    _db.log_import(
-        source_type=source_type,
-        source_file=source_file,
-        row_count=len(records),
-        valid_count=result["valid"],
-        invalid_count=result["invalid"],
-        notes=f"Auto-sync after import ({_pbi.get_import_format_display_name(import_format)})",
-    )
+        result = _db.upsert_work_orders(
+            records,
+            source_file,
+            source_type=source_type,
+            connection=conn,
+        )
+        _db.log_import(
+            source_type=source_type,
+            source_file=source_file,
+            row_count=len(records),
+            valid_count=result["valid"],
+            invalid_count=result["invalid"],
+            notes=f"Auto-sync after import ({_pbi.get_import_format_display_name(import_format)})",
+            connection=conn,
+        )
 
     imported_at = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     out = {
@@ -1964,7 +1967,7 @@ def clean_unicode_text(value, fallback=""):
     return text or fallback
 
 
-_TRANSLATION_CACHE_FILE = os.path.abspath(os.path.join(BASE_DIR, "..", "data", "translation_cache.json"))
+_TRANSLATION_CACHE_FILE = os.path.join(DATA_DIR, "translation_cache.json")
 _translation_cache: dict[str, str] = {}
 _translation_cache_dirty = False
 _translation_cache_mtime = None

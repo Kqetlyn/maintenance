@@ -21,8 +21,9 @@ from pathlib import Path
 
 import pandas as pd
 
-DATA_DIR = Path(__file__).resolve().parent.parent / "data"
-IMPORT_DIR = DATA_DIR / "spare_parts_imports"
+from runtime_config import DATA_DIR, SPARE_PARTS_IMPORT_DIR
+
+IMPORT_DIR = SPARE_PARTS_IMPORT_DIR
 _MANIFEST_PATH = IMPORT_DIR / "_indirect_po_manifest.json"
 _INDIRECT_PO_ENV = "INDIRECT_PO_PATH"
 

@@ -11,6 +11,8 @@ from markupsafe import escape
 import os
 import secrets
 
+from runtime_config import DATA_DIR as RUNTIME_DATA_DIR, PROJECT_ROOT, ensure_runtime_directories
+
 # ── SQLite database layer (Phase 1) ──────────────────────────────────────────
 # db.init_db() is called at startup to create data/dashboard.db and all tables
 # if they don't already exist. No existing Excel logic is removed.
@@ -64,10 +66,9 @@ else:
 
 # ── Path configuration ────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIR = os.path.abspath(os.path.join(BASE_DIR, "..", "frontend"))
-# DATA_DIR can be overridden via environment variable for deployed environments
-DATA_DIR = os.environ.get("DATA_DIR") or os.path.abspath(os.path.join(BASE_DIR, "..", "data"))
-os.makedirs(DATA_DIR, exist_ok=True)
+FRONTEND_DIR = str(PROJECT_ROOT / "frontend")
+DATA_DIR = str(RUNTIME_DATA_DIR)
+ensure_runtime_directories()
 ASSET_MASTER_RELATIVE_PATH = os.path.join("master", "Asset_Master.xlsx")
 
 def _persisted_secret_key() -> str:
@@ -117,16 +118,19 @@ app.config.update(
 )
 if os.environ.get("DASHBOARD_COOKIE_SECURE", "").lower() in {"1", "true", "yes"}:
     app.config["SESSION_COOKIE_SECURE"] = True
+_STARTUP_DB_ERROR = None
 try:
+    _db.init_db()
     _auth.ensure_users_table()
     _seeded_users = _auth.seed_initial_users_from_env()
     if not (os.environ.get("DASHBOARD_MANAGEMENT_PASSWORD") or os.environ.get("DASHBOARD_STAFF_PASSWORD")):
         _seeded_users.extend(_auth.ensure_default_users("0000"))
     if _seeded_users:
-        print(f"[auth] Created initial user(s): {', '.join(_seeded_users)}")
+        app.logger.info("Created initial dashboard user(s): %s", ", ".join(_seeded_users))
 except Exception as _auth_exc:
-    print(f"[auth] WARNING: could not initialise users table - {_auth_exc}")
-APP_VERSION = "2026-06-08-stabilise-1"
+    _STARTUP_DB_ERROR = str(_auth_exc)
+    app.logger.exception("Dashboard database/auth startup validation failed")
+APP_VERSION = "2026-07-17-cleanup-1"
 _BACKEND_START = datetime.now()
 
 import json as _json
@@ -156,7 +160,7 @@ _REFRESHING_KEYS_GUARD = _threading.Lock()
 _REFRESH_TARGETS = []          # [(key, builder)] rebuilt periodically in the background
 
 
-_PUBLIC_PATHS = {"/login", "/access-denied"}
+_PUBLIC_PATHS = {"/login", "/access-denied", "/api/health"}
 _PUBLIC_STATIC_PREFIXES = ("/shared/assets/",)
 _PUBLIC_STATIC_EXTENSIONS = (".css", ".js", ".png", ".jpg", ".jpeg", ".gif", ".ico", ".svg", ".woff", ".woff2", ".ttf", ".map")
 
@@ -808,8 +812,28 @@ def api_health():
         os.environ.get("LLM_PROVIDER", "").lower() == "ollama"
         or os.environ.get("OLLAMA_ENABLED", "").lower() in {"1", "true", "yes"}
     )
-    return jsonify({
-        "status": "ok",
+    db_state = _db.get_db_status()
+    runtime_paths = {
+        "data": DATA_DIR,
+        "cache": _CACHE_DIR,
+        "workOrderImports": os.path.join(DATA_DIR, "work_order_imports"),
+        "sparePartsImports": os.path.join(DATA_DIR, "spare_parts_imports"),
+        "projectTransactionImports": os.path.join(DATA_DIR, "project_transactions_imports"),
+        "uploadTemp": os.path.join(DATA_DIR, "_upload_tmp"),
+    }
+    path_state = {
+        name: {
+            "exists": os.path.isdir(path),
+            "writable": os.path.isdir(path) and os.access(path, os.W_OK),
+        }
+        for name, path in runtime_paths.items()
+    }
+    ready = bool(db_state.get("ok")) and not _STARTUP_DB_ERROR and all(
+        state["exists"] and state["writable"] for state in path_state.values()
+    )
+    payload = {
+        "status": "ok" if ready else "degraded",
+        "ready": ready,
         "version": APP_VERSION,
         "startTime": _BACKEND_START.isoformat(),
         "uptimeSeconds": round((datetime.now() - _BACKEND_START).total_seconds()),
@@ -824,12 +848,19 @@ def api_health():
             "pmPageWarm": bool(getattr(_pm, "_PM_PAGE_PAYLOAD_CACHE", None)),
             "assetProfilesCached": _ASSET_PROFILE_CACHE.get("profiles") is not None,
         },
+        "database": {
+            "ok": bool(db_state.get("ok")),
+            "path": db_state.get("db_path"),
+            "error": _STARTUP_DB_ERROR or db_state.get("error"),
+        },
+        "runtimeDirectories": path_state,
         "ollama": {
             "enabled": ollama_enabled,
             "baseUrl": os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434"),
             "model": os.environ.get("OLLAMA_MODEL", "qwen3:8b"),
         },
-    })
+    }
+    return jsonify(payload), (200 if ready else 503)
 
 
 @app.after_request
@@ -1784,17 +1815,17 @@ def _start_cache_warming():
     # init_db() is fast (no-op if tables exist). The asset sync runs in a daemon
     # thread so it never delays server startup or the first request.
     try:
-        db_path = _db.init_db()
-        print(f"[db] SQLite ready: {db_path}")
+        db_path = str(_db.DB_PATH)
+        app.logger.info("SQLite ready: %s", db_path)
     except Exception as _db_exc:
         print(f"[db] WARNING: could not initialise SQLite — {_db_exc}")
 
     def _sync_asset_master():
         try:
             result = _db.sync_asset_master_from_file(DATA_DIR)
-            print(f"[db] {result['message']}")
+            app.logger.info("%s", result["message"])
         except Exception as exc:
-            print(f"[db] Asset Master sync error: {exc}")
+            app.logger.exception("Asset Master startup sync failed: %s", exc)
 
     _threading.Thread(target=_sync_asset_master, name="db-asset-sync", daemon=True).start()
 
@@ -1806,7 +1837,7 @@ def _start_cache_warming():
             from pm_schedule_service import _sync_pm_to_db_background
             _sync_pm_to_db_background()
         except Exception as exc:
-            print(f"[db] PM startup sync error: {exc}")
+            app.logger.exception("PM startup sync failed: %s", exc)
 
     _threading.Thread(target=_startup_pm_sync, name="db-pm-sync", daemon=True).start()
 
@@ -1817,7 +1848,7 @@ def _start_cache_warming():
             from spare_parts_service import request_spare_db_sync
             request_spare_db_sync()
         except Exception as exc:
-            print(f"[db] Spare parts startup sync error: {exc}")
+            app.logger.exception("Spare-parts startup sync failed: %s", exc)
 
     _threading.Thread(target=_startup_spare_sync, name="db-spare-sync", daemon=True).start()
     # ── end SQLite init ───────────────────────────────────────────────────────

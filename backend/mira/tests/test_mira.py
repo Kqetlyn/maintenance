@@ -151,7 +151,10 @@ def test_provider_is_local_mock():
 def test_predictive_risk_cards():
     data = predictive_service.build_predictive_risk_cards(FILTERS, top_n=3)
     _check("predictive payload has cards", isinstance(data.get("cards"), list))
-    _check("predictive payload has rules", data.get("risk_rules", {}).get("7+") == "High")
+    _check(
+        "predictive payload has rules",
+        data.get("risk_rules", {}).get("levels", {}).get("7+") == "High",
+    )
     if data.get("cards"):
         card = data["cards"][0]
         for key in (

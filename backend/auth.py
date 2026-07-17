@@ -14,6 +14,7 @@ There are exactly two roles, and permissions are entirely determined by role
 from __future__ import annotations
 
 import os
+import threading
 from datetime import datetime
 
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -45,6 +46,9 @@ _LEGACY_ROLE_ALIASES = {
     "staff": "public", "viewer": "public", "operator": "public",
 }
 
+_SCHEMA_READY = False
+_SCHEMA_LOCK = threading.Lock()
+
 
 def _normalize_role(role: str) -> str:
     role = str(role or "").strip().lower()
@@ -53,24 +57,32 @@ def _normalize_role(role: str) -> str:
 
 
 def ensure_users_table() -> None:
-    with _db.get_connection() as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id            INTEGER PRIMARY KEY AUTOINCREMENT,
-                username      TEXT NOT NULL UNIQUE,
-                password_hash TEXT NOT NULL,
-                role          TEXT NOT NULL,
-                created_at    TEXT NOT NULL,
-                is_active     INTEGER NOT NULL DEFAULT 1
+    """Ensure the auth schema once per process, retrying after any failure."""
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    with _SCHEMA_LOCK:
+        if _SCHEMA_READY:
+            return
+        with _db.get_connection() as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username      TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role          TEXT NOT NULL,
+                    created_at    TEXT NOT NULL,
+                    is_active     INTEGER NOT NULL DEFAULT 1
+                )
+                """
             )
-            """
-        )
-        _migrate_legacy_roles(conn)
-        conn.execute("DROP TABLE IF EXISTS user_permissions")
-        conn.execute("DROP TABLE IF EXISTS role_permissions")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users (username)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users (role)")
+            _migrate_legacy_roles(conn)
+            conn.execute("DROP TABLE IF EXISTS user_permissions")
+            conn.execute("DROP TABLE IF EXISTS role_permissions")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users (username)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_role ON users (role)")
+        _SCHEMA_READY = True
 
 
 def _migrate_legacy_roles(conn) -> None:
