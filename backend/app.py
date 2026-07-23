@@ -173,6 +173,21 @@ def _json_error(message, status=403):
     return jsonify({"ok": False, "error": message, "message": message}), status
 
 
+@app.errorhandler(Exception)
+def _handle_unhandled_exception(exc):
+    # Never leak a bare HTTP 500 to the UI. Return the real reason as JSON for
+    # API calls so imports show an actionable message instead of "HTTP 500";
+    # re-raise framework HTTP errors (401/403/redirects) untouched.
+    from werkzeug.exceptions import HTTPException
+    if isinstance(exc, HTTPException):
+        return exc
+    import traceback as _tb
+    app.logger.error("Unhandled server error: %s\n%s", exc, _tb.format_exc())
+    if _is_api_request():
+        return jsonify({"ok": False, "error": str(exc), "message": f"Server error: {exc}"}), 500
+    return ("Internal Server Error", 500)
+
+
 def current_user():
     user_id = session.get("user_id")
     user = _auth.get_user_by_id(user_id) if user_id else None
@@ -1233,7 +1248,12 @@ def downtime_import_work_orders():
     if not upload or not upload.filename:
         return jsonify({"ok": False, "message": "No work order file uploaded."}), 400
     replace = str(request.form.get("replace", "true")).strip().lower() not in {"0", "false", "no"}
-    result = import_work_order_file(upload, replace=replace)
+    try:
+        result = import_work_order_file(upload, replace=replace)
+    except Exception as exc:
+        import traceback as _tb
+        app.logger.error("Work order import failed: %s\n%s", exc, _tb.format_exc())
+        return jsonify({"ok": False, "message": f"Work order import failed: {exc}"}), 400
     status = 202 if result.get("ok") and result.get("pending") else (200 if result.get("ok") else 400)
     return jsonify(result), status
 

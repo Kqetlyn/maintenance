@@ -410,6 +410,17 @@ def init_db() -> str:
                     pass  # column already exists — safe to ignore
             # Phase 8 tables are declared in _SCHEMA_SQL (CREATE TABLE IF NOT EXISTS),
             # so no ALTER TABLE migrations are needed here.
+            # Phase 9: retire the deprecated POWERBI_FULL_MR_WO_EXPORT template.
+            # Deactivate any active full batches and empty the raw table so the
+            # dashboard always reads work_orders as the single source of truth.
+            try:
+                conn.execute(
+                    "UPDATE import_batches SET is_active = 0 "
+                    "WHERE source_type = 'POWERBI_FULL_MR_WO_EXPORT' AND is_active = 1"
+                )
+                conn.execute("DELETE FROM raw_powerbi_mr_wo_export")
+            except Exception:
+                pass  # tables may not exist yet on a brand-new DB — safe to ignore
     return str(DB_PATH)
 
 

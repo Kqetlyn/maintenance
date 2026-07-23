@@ -840,6 +840,7 @@ def load_work_order_downtime_sql(stage: str | None = None) -> dict:
     try:
         import db as _db
         active_batch_id = _db.get_active_powerbi_full_batch_id()
+        active_batch_id = None  # POWERBI_FULL_MR_WO_EXPORT template retired; always read work_orders
     except Exception:
         active_batch_id = None
 
@@ -1840,7 +1841,7 @@ def import_work_order_file(file_storage, replace=True):
     # so the legacy file-based loader never picks it up.
     try:
         import powerbi_adapter as _pbi
-        if _pbi.detect_powerbi_full_mr_wo(df):
+        if False and _pbi.detect_powerbi_full_mr_wo(df):  # POWERBI_FULL_MR_WO_EXPORT template retired
             # Move file to pbi_full_import/ so get_work_order_source_paths() ignores it.
             pbi_dir = os.path.join(os.path.dirname(os.path.abspath(WORK_ORDER_IMPORT_DIR)), "pbi_full_import")
             os.makedirs(pbi_dir, exist_ok=True)
