@@ -733,56 +733,68 @@ def _qwen_extract_unit(description: str, index: dict) -> Optional[str]:
     if cached is not None:
         return cached.get("unit_name")
 
-    # Build allow-list from Asset_Master display names (specific, non-area units)
-    allowed_machines = list(dict.fromkeys(
-        display_name
-        for aid, entry in index.get("id_to_specific", {}).items()
-        for _specific, _mg, _cat, display_name, is_area, _stage in [_specific_entry_parts(entry)]
-        if not is_area and display_name and not _is_catch_all(display_name)
-    ))[:40]
+    # Unit extraction is optional and disabled in normal deployments. Return
+    # before touching the Asset Master allow-list: this function is called for
+    # every distinct MR description, so rebuilding/scanning that list here used
+    # to dominate a cold Predictive Insights request even though no LLM call
+    # could be made.
+    from .. import config
+    if not getattr(config, "LOCAL_LLM_ENABLED", False):
+        _mg_inference_cache[key] = {"unit_name": None}
+        return None
+
+    # The allow-list is built once with the Asset Master index rather than once
+    # per description. Keep a compatibility fallback for externally supplied
+    # indexes (including older test fixtures).
+    allowed_machines = index.get("allowed_machines")
+    if allowed_machines is None:
+        allowed_machines = list(dict.fromkeys(
+            display_name
+            for entry in index.get("id_to_specific", {}).values()
+            for _specific, _mg, _cat, display_name, is_area, _stage in [_specific_entry_parts(entry)]
+            if not is_area and display_name and not _is_catch_all(display_name)
+        ))[:40]
 
     result: Optional[str] = None
     try:
-        from .. import config
-        if getattr(config, "LOCAL_LLM_ENABLED", False):
-            from ..providers.ollama_provider import generate_with_ollama
-            system_prompt = (
-                "You map ONE maintenance request to a machine UNIT and a symptom. "
-                "Reply with ONLY a JSON object, no prose."
-            )
-            allowed_str = json.dumps(allowed_machines)
-            user_prompt = (
-                f"ALLOWED_MACHINES: {allowed_str}\n\n"
-                'ALLOWED_CLUSTERS: ["Steam/Valve Leak","Door/Window","Sensor/Electrical",'
-                '"Noise/Vibration","Heating/Temp","Lighting","Plumbing/Sink","Facility/Building","Other"]\n\n'
-                "Rules:\n"
-                "- machine MUST map to ALLOWED_MACHINES, else null.\n"
-                "- ALWAYS extract unit_number if the text gives one.\n"
-                '- door/light/sink/toilet/ceiling with no production machine -> machine=null, cluster="Facility/Building".\n'
-                "- cluster MUST be in ALLOWED_CLUSTERS.\n\n"
-                f'Description: "{description[:300]}"\n'
-                'Return: {"machine":...,"unit_number":...,"cluster":...,"confidence":0-1}'
-            )
-            raw = generate_with_ollama(system_prompt, user_prompt, timeout=5)
-            if raw:
-                m = re.search(r'\{[\s\S]*\}', raw.strip())
-                if m:
-                    parsed = json.loads(m.group())
-                    machine = str(parsed.get("machine") or "").strip()
-                    unit_num = parsed.get("unit_number")
-                    confidence = float(parsed.get("confidence") or 0)
-                    if confidence >= 0.6 and machine:
-                        al_lower = {nm.lower(): nm for nm in allowed_machines}
-                        canonical = al_lower.get(machine.lower())
-                        if not canonical:
-                            for al, canon in al_lower.items():
-                                if machine.lower() in al:
-                                    canonical = canon
-                                    break
-                        if canonical:
-                            if unit_num is not None and str(unit_num) not in canonical:
-                                canonical = re.sub(r'\s+No\.\d+$', '', canonical) + f" No.{unit_num}"
-                            result = canonical
+        from ..providers.ollama_provider import generate_with_ollama
+        system_prompt = (
+            "You map ONE maintenance request to a machine UNIT and a symptom. "
+            "Reply with ONLY a JSON object, no prose."
+        )
+        allowed_str = json.dumps(allowed_machines)
+        user_prompt = (
+            f"ALLOWED_MACHINES: {allowed_str}\n\n"
+            'ALLOWED_CLUSTERS: ["Steam/Valve Leak","Door/Window","Sensor/Electrical",'
+            '"Noise/Vibration","Heating/Temp","Lighting","Plumbing/Sink","Facility/Building","Other"]\n\n'
+            "Rules:\n"
+            "- machine MUST map to ALLOWED_MACHINES, else null.\n"
+            "- ALWAYS extract unit_number if the text gives one.\n"
+            '- door/light/sink/toilet/ceiling with no production machine -> machine=null, cluster="Facility/Building".\n'
+            "- cluster MUST be in ALLOWED_CLUSTERS.\n\n"
+            f'Description: "{description[:300]}"\n'
+            'Return: {"machine":...,"unit_number":...,"cluster":...,"confidence":0-1}'
+        )
+        raw = generate_with_ollama(system_prompt, user_prompt, timeout=5)
+        if raw:
+            m = re.search(r'\{[\s\S]*\}', raw.strip())
+            if m:
+                parsed = json.loads(m.group())
+                machine = str(parsed.get("machine") or "").strip()
+                unit_num = parsed.get("unit_number")
+                confidence = float(parsed.get("confidence") or 0)
+                if confidence >= 0.6 and machine:
+                    al_lower = {nm.lower(): nm for nm in allowed_machines}
+                    canonical = al_lower.get(machine.lower())
+                    if not canonical:
+                        for al, canon in al_lower.items():
+                            if machine.lower() in al:
+                                canonical = canon
+                                break
+                    if canonical:
+                        if unit_num is not None and str(unit_num) not in canonical:
+                            canonical = re.sub(r'\s+No\.\d+$', '', canonical) + f" No.{unit_num}"
+                        result = canonical
     except Exception:
         pass
 
@@ -897,11 +909,19 @@ def _compute_group_index(mapping: dict) -> dict:
     # Longest (most specific) first so the matcher can short-circuit deterministically.
     keywords.sort(key=lambda t: (-t[2], t[1], t[0]))
 
+    allowed_machines = list(dict.fromkeys(
+        display_name
+        for entry in id_to_specific.values()
+        for _specific, _mg, _cat, display_name, is_area, _stage in [_specific_entry_parts(entry)]
+        if not is_area and display_name and not _is_catch_all(display_name)
+    ))[:40]
+
     return {
         "id_to_group": id_to_group,
         "id_to_specific": id_to_specific,
         "mg_to_cat": mg_to_cat,
         "keywords": keywords,
+        "allowed_machines": allowed_machines,
         "cat_display": _CAT_DISPLAY,
     }
 
@@ -930,7 +950,14 @@ def _group_index() -> dict:
     except Exception:
         if _GROUP_INDEX_CACHE["index"] is not None:
             return _GROUP_INDEX_CACHE["index"]
-        return {"id_to_group": {}, "id_to_specific": {}, "mg_to_cat": {}, "keywords": [], "cat_display": _CAT_DISPLAY}
+        return {
+            "id_to_group": {},
+            "id_to_specific": {},
+            "mg_to_cat": {},
+            "keywords": [],
+            "allowed_machines": [],
+            "cat_display": _CAT_DISPLAY,
+        }
     sig = mapping.get("last_synced")
     if _GROUP_INDEX_CACHE["sig"] == sig and _GROUP_INDEX_CACHE["index"] is not None:
         _GROUP_INDEX_CACHE["checked_at"] = now
