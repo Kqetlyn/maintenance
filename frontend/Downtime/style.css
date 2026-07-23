@@ -198,6 +198,12 @@ html.downtime-embed .dashboard-content {
 }
 
 
+.import-inline.dragover {
+    outline: 2px dashed #2f9e78;
+    outline-offset: 3px;
+    background: rgba(47, 158, 120, 0.08);
+    border-radius: 6px;
+}
 .import-status {
     margin: -12px 0 18px;
     color: var(--text-muted);

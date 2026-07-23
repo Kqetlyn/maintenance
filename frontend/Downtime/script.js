@@ -7656,6 +7656,52 @@ function setCardVisible(id, visible) {
     if (el) el.classList.toggle("hidden", !visible);
 }
 
+function bindWorkOrderImportDragDrop() {
+    const form = document.getElementById("work-order-import-form");
+    const fileInput = document.getElementById("work-order-import-file");
+    if (!form || !fileInput || form.dataset.dndBound === "true") return;
+    form.dataset.dndBound = "true";
+
+    const ACCEPT = [".csv", ".xlsx", ".xls"];
+    const hasValidExt = (name) => ACCEPT.some((ext) => String(name || "").toLowerCase().endsWith(ext));
+    const stop = (event) => { event.preventDefault(); event.stopPropagation(); };
+
+    ["dragenter", "dragover"].forEach((type) => {
+        form.addEventListener(type, (event) => {
+            stop(event);
+            if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+            form.classList.add("dragover");
+        });
+    });
+    ["dragleave", "dragend"].forEach((type) => {
+        form.addEventListener(type, (event) => {
+            stop(event);
+            form.classList.remove("dragover");
+        });
+    });
+    form.addEventListener("drop", (event) => {
+        stop(event);
+        form.classList.remove("dragover");
+        const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+        if (!file) return;
+        if (!hasValidExt(file.name)) {
+            setImportStatus("Unsupported file type. Drop a CSV, XLSX, or XLS work order file.", "error");
+            return;
+        }
+        try {
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            fileInput.files = dt.files;
+        } catch (err) {
+            setImportStatus("Your browser blocked the dropped file. Use Choose File instead.", "error");
+            return;
+        }
+        // Import immediately using the current Replace setting (defaults to checked).
+        if (typeof form.requestSubmit === "function") form.requestSubmit();
+        else handleWorkOrderImport(new Event("submit", { cancelable: true }));
+    });
+}
+
 function setImportStatus(message, state = "") {
     const el = document.getElementById("work-order-import-status");
     if (!el) return;
@@ -9873,6 +9919,7 @@ function wireFilters() {
         renderPreventiveCorrectiveAnalysis(preventiveCorrectiveSourceRows);
     });
     document.getElementById("work-order-import-form")?.addEventListener("submit", handleWorkOrderImport);
+    bindWorkOrderImportDragDrop();
     document.getElementById("mr-movement-year")?.addEventListener("change", (event) => {
         mrMovementSelectedYear = event.target.value || mrMovementSelectedYear;
         mrMovementUserSelectedYear = true;

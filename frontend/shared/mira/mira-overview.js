@@ -4897,6 +4897,11 @@
     // of which tab is currently visible. Refreshing is unconditional once the
     // view has mounted; only the optional export depends on lastOverview/PPT.
     window.miraOverviewAutoExportPptAfterImport = async function miraOverviewAutoExportPptAfterImport() {
+        // Always bust the client-side reload guard so the next time Predictive
+        // Insights is opened it performs a fresh server load reflecting the new
+        // import — even if the tab has never been mounted this session. When the
+        // view is already mounted, the refresh below reloads it immediately.
+        lastLoadSignature = "";
         if (!mounted) return;
         const shouldExport = !!(lastOverview && window.PptxGenJS);
         try {
