@@ -1322,9 +1322,19 @@ def import_validate():
 def import_last_result():
     """Return the stats from the most recent background DB import write."""
     stats = get_last_import_stats()
-    if not stats:
-        return jsonify({"ok": False, "message": "No import has been run yet in this session."}), 200
-    return jsonify(stats)
+    if stats:
+        return jsonify(stats)
+    # In-memory tracker is empty (fresh process after deploy/restart, or a
+    # different worker served this poll than ran the import). Fall back to the
+    # durable import_log so a completed import is never reported as failed.
+    try:
+        import db as _db
+        logged = _db.get_latest_work_order_import()
+    except Exception:
+        logged = None
+    if logged:
+        return jsonify(logged)
+    return jsonify({"ok": False, "message": "No import has been run yet in this session."}), 200
 
 
 @app.route("/api/import/repair-quality-flags", methods=["POST"])

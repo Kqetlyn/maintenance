@@ -3698,11 +3698,23 @@
 
         // Status
         const status = deriveStatus(data);
-        refs.statusBadge.textContent = showWarmState ? "Data warming" : status.level;
-        refs.statusBadge.className = `mira-ov-status-badge mira-ov-status-${showWarmState ? "watch" : status.tone}`;
+        // Distinguish "loaded but no work-order data for this period" from a real
+        // dataset, so all-zero cards don't look like a healthy dashboard or a
+        // silent stall. Zero/null across every work-order total means nothing has
+        // been imported for this period yet — the Overview reads the same
+        // work_orders source as the Downtime page and refreshes after an import.
+        const woForStatus = (data && data.work_orders) || {};
+        const dtForStatus = (data && data.downtime_summary) || {};
+        const noWorkOrderData = !showWarmState
+            && !num(woForStatus.total) && !num(woForStatus.open) && !num(woForStatus.closed)
+            && !num(dtForStatus.total_work_orders);
+        refs.statusBadge.textContent = showWarmState ? "Data warming" : noWorkOrderData ? "Awaiting import" : status.level;
+        refs.statusBadge.className = `mira-ov-status-badge mira-ov-status-${showWarmState || noWorkOrderData ? "watch" : status.tone}`;
         refs.statusPeriod.textContent = `Data period: ${vdu.period_label || periodLabel()}${vdu.date_range ? " · " + vdu.date_range : ""}`;
         refs.exec.textContent = showWarmState
             ? (availabilityWarnings[0] || "Full verified KPI detail is still warming in the background. The page remains available and will show verified cards once the cache is ready.")
+            : noWorkOrderData
+            ? "No work-order data is loaded for this period yet. Import a work-order file on the Downtime tab — the Overview refreshes automatically once the import finishes. If you just imported, give it a few seconds, or check the selected period."
             : ruleBasedExecutive(data);
 
         // Headline KPIs + compact summary + action table

@@ -949,6 +949,52 @@ def log_import(
         return cursor.lastrowid
 
 
+def get_latest_work_order_import() -> dict | None:
+    """Most recent work-order import_log row, shaped like a poll result.
+
+    Durable fallback for /api/import/last-result when the in-memory
+    _LAST_IMPORT_STATS dict is empty — e.g. after a server restart, or when the
+    status poll is served by a different worker than the one that ran the
+    import. Reads persisted state so a completed import is never reported to the
+    UI as a failure. Returns None only if no work-order import was ever logged.
+    """
+    with get_connection() as conn:
+        row = conn.execute(
+            """
+            SELECT source_type, source_file, imported_at, row_count, valid_count, invalid_count
+            FROM import_log
+            WHERE source_type IN ('work_orders', 'powerbi')
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        return None
+    rows = int(row["row_count"] or 0)
+    valid = int(row["valid_count"] or 0)
+    review = int(row["invalid_count"] or 0)
+    return {
+        "ok": True,
+        "pending": False,
+        "complete": True,
+        "job_id": None,
+        "source_type": row["source_type"],
+        "source_file": row["source_file"],
+        "sqlite_table": "work_orders",
+        "imported_at": row["imported_at"],
+        "total_rows": rows,
+        "rows_valid": valid,
+        "rows_review": review,
+        "from_import_log": True,
+        "message": (
+            f"Last work-order import: {rows} row(s) ({valid} valid, {review} review)"
+            + (f" from {row['source_file']}" if row["source_file"] else "")
+            + (f" at {row['imported_at']}" if row["imported_at"] else "")
+            + "."
+        ),
+    }
+
+
 # ── Phase 3: SQL-backed loader for the Downtime page ─────────────────────────
 
 def load_work_orders_from_sql(stage: str | None = None) -> list[dict]:
