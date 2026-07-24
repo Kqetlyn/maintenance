@@ -14,7 +14,7 @@ import re
 import sqlite3
 import threading
 from contextlib import contextmanager, nullcontext
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from runtime_config import DATA_DIR
@@ -408,6 +408,17 @@ def init_db() -> str:
                     conn.execute(f"ALTER TABLE asset_master ADD COLUMN {_col} {_type}")
                 except Exception:
                     pass  # column already exists — safe to ignore
+            # Phase 10: D365 Functional Location CODE (e.g. ZN4-PL1) on asset_master.
+            # Used to capture work orders into their stage by matching the WO's own
+            # functional_location code against the asset master's Stage 2 codes.
+            try:
+                conn.execute("ALTER TABLE asset_master ADD COLUMN func_loc_code TEXT")
+            except Exception:
+                pass  # column already exists — safe to ignore
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_am_func_loc_code ON asset_master (func_loc_code)")
+            except Exception:
+                pass
             # Phase 8 tables are declared in _SCHEMA_SQL (CREATE TABLE IF NOT EXISTS),
             # so no ALTER TABLE migrations are needed here.
             # Phase 9: retire the deprecated POWERBI_FULL_MR_WO_EXPORT template.
@@ -468,6 +479,7 @@ def upsert_asset_master_from_mapping(asset_map: dict, source_file: str = "Asset_
             str(entry.get("maint_type_code") or "").strip(),
             str(entry.get("maint_type")      or "").strip(),
             str(entry.get("func_loc_name")   or "").strip(),
+            str(entry.get("func_loc_code")   or "").strip(),
         ))
 
     if not rows:
@@ -477,8 +489,8 @@ def upsert_asset_master_from_mapping(asset_map: dict, source_file: str = "Asset_
         INSERT INTO asset_master
             (asset_id, asset_name, functional_location, stage, category,
              machine_group, criticality, is_critical, area, source_file, updated_at,
-             maint_type_code, maint_type, func_loc_name)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             maint_type_code, maint_type, func_loc_name, func_loc_code)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(asset_id) DO UPDATE SET
             asset_name          = excluded.asset_name,
             functional_location = excluded.functional_location,
@@ -492,7 +504,8 @@ def upsert_asset_master_from_mapping(asset_map: dict, source_file: str = "Asset_
             updated_at          = excluded.updated_at,
             maint_type_code     = excluded.maint_type_code,
             maint_type          = excluded.maint_type,
-            func_loc_name       = excluded.func_loc_name
+            func_loc_name       = excluded.func_loc_name,
+            func_loc_code       = excluded.func_loc_code
     """
 
     with get_connection() as conn:
@@ -501,7 +514,40 @@ def upsert_asset_master_from_mapping(asset_map: dict, source_file: str = "Asset_
     return len(rows)
 
 
-def sync_asset_master_from_file(data_dir: str | Path) -> dict:
+def _asset_master_excel_is_newer(data_dir: str | Path) -> bool:
+    """True if the Asset_Master.xlsx on disk is newer than the last SQL sync.
+
+    Lets an edited Excel file re-sync automatically on the next startup without
+    forcing the operator to clear the DB — the Excel remains the source of truth.
+    """
+    try:
+        from asset_mapping import _resolve_path
+        path, _sig = _resolve_path(str(data_dir))
+        if not path:
+            return False
+        excel_mtime = datetime.utcfromtimestamp(Path(path).stat().st_mtime)
+    except Exception:
+        return False
+
+    try:
+        with get_connection() as conn:
+            row = conn.execute("SELECT MAX(updated_at) AS last FROM asset_master").fetchone()
+        last = (row["last"] if row else None) or ""
+    except Exception:
+        return False
+    if not last:
+        return True
+    for fmt in ("%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            last_dt = datetime.strptime(last.strip(), fmt)
+            # 2-second margin absorbs filesystem/timestamp rounding.
+            return excel_mtime > last_dt + timedelta(seconds=2)
+        except ValueError:
+            continue
+    return False
+
+
+def sync_asset_master_from_file(data_dir: str | Path, force: bool = False) -> dict:
     """
     Load the Asset Master Excel file via the existing asset_mapping loader and
     sync every asset row into the asset_master SQL table.
@@ -510,17 +556,23 @@ def sync_asset_master_from_file(data_dir: str | Path) -> dict:
     refresh.  The Excel loader remains the source of truth; this function just
     mirrors its output into SQLite.
 
+    force=True (or an Excel file newer than the last sync) re-reads the Excel and
+    overwrites the SQL rows so edits to Asset_Master.xlsx take effect.
+
     Returns a status dict: {"ok": bool, "rows": int, "message": str}.
     """
     try:
         # Import here to avoid a circular import at module level.
         from asset_mapping import load_asset_mapping, ASSET_MASTER_FILENAME
-        mapping = load_asset_mapping(str(data_dir))
+
+        prefer_excel = bool(force) or _asset_master_excel_is_newer(data_dir)
+        mapping = load_asset_mapping(str(data_dir), prefer_excel=prefer_excel)
         if not mapping.get("available"):
             return {"ok": False, "rows": 0, "message": mapping.get("message", "Asset Master not available.")}
 
-        # If mapping was already loaded from SQL, nothing to sync from Excel.
-        if mapping.get("data_source") == "sql":
+        # If mapping was already loaded from SQL (and we're not forcing an Excel
+        # re-read), nothing to sync from Excel.
+        if not prefer_excel and mapping.get("data_source") == "sql":
             asset_count = len(mapping.get("asset_map", {}))
             return {
                 "ok": True,

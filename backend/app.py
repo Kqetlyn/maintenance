@@ -915,8 +915,23 @@ def db_status():
 @app.route("/api/db/sync-asset-master", methods=["POST"])
 def db_sync_asset_master():
     """Re-import the Asset Master Excel into the asset_master SQL table.
-    Useful after dropping a new Asset_Master.xlsx without restarting the server."""
-    result = _db.sync_asset_master_from_file(DATA_DIR)
+    Useful after dropping a new Asset_Master.xlsx without restarting the server.
+    force=true re-reads the Excel even when SQL is already populated."""
+    force = str(request.args.get("force", "")).strip().lower() in {"1", "true", "yes"}
+    result = _db.sync_asset_master_from_file(DATA_DIR, force=force)
+    if result.get("ok"):
+        try:
+            import asset_mapping as _am
+            _am._CACHE.update(sig=None, payload=None)
+        except Exception:
+            pass
+        try:
+            import downtime_service as _ds
+            _ds.clear_work_order_runtime_caches()
+            retag = _ds.retag_stage2_by_functional_location()
+            result["work_orders_retagged_stage2"] = retag.get("updated", 0)
+        except Exception:
+            pass
     return jsonify(result), (200 if result.get("ok") else 500)
 
 
@@ -1321,6 +1336,7 @@ def import_validate():
 @app.route("/api/import/last-result")
 def import_last_result():
     """Return the stats from the most recent background DB import write."""
+    requested_job_id = (request.args.get("job_id") or "").strip()
     stats = get_last_import_stats()
     if stats:
         return jsonify(stats)
@@ -1334,6 +1350,19 @@ def import_last_result():
         logged = None
     if logged:
         return jsonify(logged)
+    if requested_job_id:
+        # The uploading request already got a 202 "accepted" for this job_id
+        # from some worker; this poll just landed on a worker (or arrived
+        # before the durable write) that doesn't know about it yet. Report
+        # "still processing" rather than a false failure so the client keeps
+        # polling instead of showing a spurious "Import failed" banner.
+        return jsonify({
+            "ok": True,
+            "pending": True,
+            "complete": False,
+            "job_id": requested_job_id,
+            "message": "Import accepted and still processing...",
+        }), 200
     return jsonify({"ok": False, "message": "No import has been run yet in this session."}), 200
 
 
@@ -1856,6 +1885,15 @@ def _start_cache_warming():
             app.logger.info("%s", result["message"])
         except Exception as exc:
             app.logger.exception("Asset Master startup sync failed: %s", exc)
+        # Keep already-imported work orders consistent with the functional-location
+        # Stage 2 capture rule (no re-import required).
+        try:
+            import downtime_service as _ds
+            retag = _ds.retag_stage2_by_functional_location()
+            if retag.get("updated"):
+                app.logger.info("Re-tagged %s work order(s) to Stage 2 by functional location.", retag["updated"])
+        except Exception as exc:
+            app.logger.exception("Stage 2 functional-location re-tag failed: %s", exc)
 
     _threading.Thread(target=_sync_asset_master, name="db-asset-sync", daemon=True).start()
 

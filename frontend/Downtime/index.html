@@ -10,7 +10,7 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260623-crit-collapse-2">
+    <link rel="stylesheet" href="style.css?v=20260724-dropzone-1">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -655,6 +655,9 @@
                                 <th>MR ID / Work Order ID</th>
                                 <th>Equipment / Machine</th>
                                 <th>AssetID</th>
+                                <th>Functional Location</th>
+                                <th>Description (Thai)</th>
+                                <th>Description (English)</th>
                                 <th>Raised Date</th>
                                 <th>Severity</th>
                                 <th>Acknowledgement Status</th>
@@ -665,7 +668,7 @@
                             </tr>
                         </thead>
                         <tbody id="mr-outstanding-body">
-                            <tr><td colspan="10" class="empty-cell">Loading outstanding MR.</td></tr>
+                            <tr><td colspan="13" class="empty-cell">Loading outstanding MR.</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -2129,7 +2132,7 @@
     </aside>
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
-    <script src="script.js?v=20260723-dnd-predictive-v1" defer></script>
+    <script src="script.js?v=20260724-mr-cols-noassetid-1" defer></script>
 
 </body>
 </html>

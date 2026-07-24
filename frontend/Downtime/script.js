@@ -1839,7 +1839,8 @@ function normalizeMrTrackingRows(rows = []) {
             return;
         }
         const equipmentRaw = getMrTrackingText(row, MR_EQUIPMENT_ALIASES, "");
-        const assetId = getMrTrackingText(row, MR_ASSET_ID_ALIASES, "");
+        const assetIdRaw = getMrTrackingText(row, MR_ASSET_ID_ALIASES, "");
+        const assetId = rowHasMissingAssetId(row) ? "" : assetIdRaw;
         const raised = parseMrTrackingDateField(row, MR_RAISED_DATE_ALIASES);
         const finished = parseMrTrackingDateField(row, MR_FINISHED_DATE_ALIASES);
         const ackDate = parseMrTrackingDateField(row, MR_ACK_DATE_ALIASES);
@@ -1855,7 +1856,7 @@ function normalizeMrTrackingRows(rows = []) {
             hasMrId: keyInfo.hasMrId,
             equipment: equipmentRaw || "Data not available",
             equipmentKey: equipmentRaw,
-            assetId: assetId || "Data not available",
+            assetId: assetId || "No Asset ID",
             raised,
             finished,
             ackDate,
@@ -2055,7 +2056,7 @@ function renderMrTrackingLoading(message = "Loading MR tracking.") {
     ["mr-ack-outstanding", "mr-open-critical", "mr-open-total", "mr-raised-this-year"].forEach((id) => setText(id, "--"));
     setText("mr-tracking-summary", message);
     const body = document.getElementById("mr-outstanding-body");
-    if (body) body.innerHTML = `<tr><td colspan="10" class="empty-cell">${escapeHtml(message)}</td></tr>`;
+    if (body) body.innerHTML = `<tr><td colspan="13" class="empty-cell">${escapeHtml(message)}</td></tr>`;
     ["mrParetoChart", "mrMonthlySeverityChart"].forEach((id) => renderEmptyChart(id, message));
 }
 
@@ -2255,6 +2256,41 @@ function getMrWaitingDays(item) {
     return Math.max(0, Math.floor((end.getTime() - item.raised.date.getTime()) / 86400000));
 }
 
+function getMrFunctionalLocation(row) {
+    if (!row) return "--";
+    const value = String(
+        row.func_loc
+        || row.func_loc_name
+        || row.raw_functional_location
+        || row.functional_location
+        || row.mappedLocation
+        || row.location
+        || ""
+    ).trim();
+    return value || "--";
+}
+
+function getMrDescriptionThai(row) {
+    if (!row) return "--";
+    const value = String(
+        row.description_original
+        || row.description
+        || row.remarks
+        || ""
+    ).trim();
+    return value || "--";
+}
+
+function getMrDescriptionEnglish(row) {
+    if (!row) return "--";
+    const value = String(row.translated_description || "").trim();
+    if (value) return value;
+    // Fall back to the original text only when it is already Latin (English) so
+    // we never leave the column blank for records that arrived pre-translated.
+    const original = String(row.description_original || row.description || "").trim();
+    return original && !/[฀-๿]/.test(original) ? original : "--";
+}
+
 function renderMrOutstandingBadges(item) {
     const badges = [];
     const waitingDays = getMrWaitingDays(item);
@@ -2279,7 +2315,7 @@ function renderMrOutstandingTable(model) {
         return (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9);
     });
     if (!rows.length) {
-        body.innerHTML = `<tr><td colspan="10" class="empty-cell">No open MR awaiting acknowledgement for the selected filters.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="13" class="empty-cell">No open MR awaiting acknowledgement for the selected filters.</td></tr>`;
         return;
     }
     body.innerHTML = rows.map((item) => `
@@ -2287,6 +2323,9 @@ function renderMrOutstandingTable(model) {
             <td>${escapeHtml(item.id)}${renderMrOutstandingBadges(item)}</td>
             <td>${escapeHtml(item.equipment)}</td>
             <td>${escapeHtml(item.assetId)}</td>
+            <td>${escapeHtml(getMrFunctionalLocation(item.row))}</td>
+            <td>${escapeHtml(getMrDescriptionThai(item.row))}</td>
+            <td>${escapeHtml(getMrDescriptionEnglish(item.row))}</td>
             <td>${escapeHtml(item.raised.date ? fmtDateOnly(item.raised.date) : "Invalid Date")}</td>
             <td>${escapeHtml(formatMrSeverityCode(item.severity, item.row))}</td>
             <td>${escapeHtml(getMrAcknowledgementDisplay(item, model.hasAckTracking))}</td>
@@ -3598,10 +3637,10 @@ function renderCriticalMrComparison(rows = []) {
 function buildMachineMrRows(rows = []) {
     const grouped = new Map();
     normalizeMrTrackingRows(rows).items.forEach((item) => {
-        const assetId = item.assetId === "Data not available" ? "" : item.assetId;
+        const assetId = item.assetId === "No Asset ID" ? "" : item.assetId;
         const key = assetId || item.equipmentKey || item.key;
         const bucket = grouped.get(key) || {
-            assetId: assetId || "--",
+            assetId: assetId || "No Asset ID",
             machineName: item.equipment || getMrMachineName(item.row),
             criticality: item.criticality || "--",
             rows: [],
@@ -3637,10 +3676,10 @@ function populateMachineMrFilter(machineRows) {
     if (!select) return;
     const current = mrMachineFilter;
     select.innerHTML = `<option value="all">All Machines</option>` + machineRows.map((row) => {
-        const value = row.assetId !== "--" ? row.assetId : row.machineName;
-        return `<option value="${escapeHtml(value)}">${escapeHtml(row.machineName)}${row.assetId !== "--" ? ` | ${escapeHtml(row.assetId)}` : ""}</option>`;
+        const value = row.assetId !== "No Asset ID" ? row.assetId : row.machineName;
+        return `<option value="${escapeHtml(value)}">${escapeHtml(row.machineName)}${row.assetId !== "No Asset ID" ? ` | ${escapeHtml(row.assetId)}` : ""}</option>`;
     }).join("");
-    const values = new Set(["all", ...machineRows.map((row) => row.assetId !== "--" ? row.assetId : row.machineName)]);
+    const values = new Set(["all", ...machineRows.map((row) => row.assetId !== "No Asset ID" ? row.assetId : row.machineName)]);
     mrMachineFilter = values.has(current) ? current : "all";
     select.value = mrMachineFilter;
 }
@@ -7665,24 +7704,26 @@ function bindWorkOrderImportDragDrop() {
     const ACCEPT = [".csv", ".xlsx", ".xls"];
     const hasValidExt = (name) => ACCEPT.some((ext) => String(name || "").toLowerCase().endsWith(ext));
     const stop = (event) => { event.preventDefault(); event.stopPropagation(); };
+    const dragHasFiles = (event) =>
+        Array.from(event.dataTransfer?.types || []).includes("Files");
 
-    ["dragenter", "dragover"].forEach((type) => {
-        form.addEventListener(type, (event) => {
-            stop(event);
-            if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
-            form.classList.add("dragover");
-        });
-    });
-    ["dragleave", "dragend"].forEach((type) => {
-        form.addEventListener(type, (event) => {
-            stop(event);
-            form.classList.remove("dragover");
-        });
-    });
-    form.addEventListener("drop", (event) => {
-        stop(event);
-        form.classList.remove("dragover");
-        const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+    // Full-page overlay shown while a file is dragged anywhere over the Downtime
+    // page, so the drop target is obvious and generous (not just the small inline
+    // form). Created lazily and reused.
+    let overlay = document.getElementById("wo-import-drop-overlay");
+    if (!overlay) {
+        overlay = document.createElement("div");
+        overlay.id = "wo-import-drop-overlay";
+        overlay.setAttribute("aria-hidden", "true");
+        overlay.innerHTML = `<div class="wo-import-drop-inner">
+            <div class="wo-import-drop-icon">⬇</div>
+            <div class="wo-import-drop-title">Drop MR / WO file to import</div>
+            <div class="wo-import-drop-sub">CSV, XLSX, or XLS — replaces the current dataset</div>
+        </div>`;
+        document.body.appendChild(overlay);
+    }
+
+    const startFile = (file) => {
         if (!file) return;
         if (!hasValidExt(file.name)) {
             setImportStatus("Unsupported file type. Drop a CSV, XLSX, or XLS work order file.", "error");
@@ -7699,6 +7740,45 @@ function bindWorkOrderImportDragDrop() {
         // Import immediately using the current Replace setting (defaults to checked).
         if (typeof form.requestSubmit === "function") form.requestSubmit();
         else handleWorkOrderImport(new Event("submit", { cancelable: true }));
+    };
+
+    // Depth counter so nested dragenter/dragleave events don't flicker the overlay.
+    let dragDepth = 0;
+    const showOverlay = () => overlay.classList.add("active");
+    const hideOverlay = () => { dragDepth = 0; overlay.classList.remove("active"); };
+
+    window.addEventListener("dragenter", (event) => {
+        if (!dragHasFiles(event)) return;
+        stop(event);
+        dragDepth += 1;
+        showOverlay();
+    });
+    window.addEventListener("dragover", (event) => {
+        if (!dragHasFiles(event)) return;
+        // Prevent the browser from navigating away and opening the dropped file.
+        stop(event);
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+        showOverlay();
+    });
+    window.addEventListener("dragleave", (event) => {
+        if (!dragHasFiles(event)) return;
+        stop(event);
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) hideOverlay();
+    });
+    window.addEventListener("drop", (event) => {
+        if (!dragHasFiles(event)) return;
+        stop(event);
+        hideOverlay();
+        startFile(event.dataTransfer?.files?.[0]);
+    });
+
+    // Keep the inline form highlight for users who drop directly on it.
+    ["dragenter", "dragover"].forEach((type) => {
+        form.addEventListener(type, (event) => { form.classList.add("dragover"); });
+    });
+    ["dragleave", "dragend", "drop"].forEach((type) => {
+        form.addEventListener(type, () => { form.classList.remove("dragover"); });
     });
 }
 
@@ -9714,6 +9794,10 @@ async function handleAssetMappingRefresh() {
     downtimeCachePayload = null;
     setImportStatus("Refreshing Asset Master mapping...", "");
     try {
+        // Force a re-read of Asset_Master.xlsx into the SQL layer so edits to the
+        // master (e.g. machine-group reclassification) take effect without a
+        // server restart, then reload the asset list + downtime data.
+        await fetch("/api/db/sync-asset-master?force=true", { method: "POST" }).catch(() => {});
         await Promise.all([
             loadAssetList(),
             reloadCurrentDowntimeData(),

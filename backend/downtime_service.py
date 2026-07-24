@@ -1030,6 +1030,107 @@ def get_asset_master_path(data_dir=DATA_DIR):
     return fallback
 
 
+_STAGE2_FUNC_LOC_CACHE: dict = {"sig": None, "locs": frozenset()}
+
+# Stages that are not a confident asset-mapped Stage 1/2 — these are eligible for
+# functional-location-based Stage 2 capture (see resolve_work_order_stage).
+_STAGE_UNCONFIDENT = {"Unmapped", "Missing Asset ID", "Needs Stage Review", "Keyword Matched", ""}
+
+
+def _normalize_func_loc(value) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower())
+
+
+def get_stage2_functional_locations() -> frozenset:
+    """Functional-location labels that belong exclusively to Stage 2 assets.
+
+    Built from Asset_Master (via the asset mapping). A location shared with any
+    Stage 1 asset is excluded so a Stage 1 work order is never mis-captured as
+    Stage 2. Cached and rebuilt only when the mapping's last_synced changes.
+    """
+    try:
+        from asset_mapping import load_asset_mapping
+        mapping = load_asset_mapping(DATA_DIR)
+    except Exception:
+        return frozenset()
+    sig = (mapping.get("last_synced"), len(mapping.get("asset_map", {})))
+    if _STAGE2_FUNC_LOC_CACHE["sig"] == sig:
+        return _STAGE2_FUNC_LOC_CACHE["locs"]
+
+    stage2, stage1 = set(), set()
+    for entry in mapping.get("asset_map", {}).values():
+        stage = str(entry.get("stage") or entry.get("mappedStage") or "").strip()
+        # Match on the D365 Functional Location CODE (e.g. ZN4-PL1) — this is what
+        # the work orders carry in their own functional_location field. The
+        # descriptive name/label is added too so a WO that stored the label still
+        # matches. Codes give clean Stage 1/2 separation with zero overlap.
+        vals = {
+            _normalize_func_loc(entry.get("func_loc_code")),
+            _normalize_func_loc(entry.get("func_loc_name")),
+            _normalize_func_loc(entry.get("mappedSystemArea")),
+        }
+        vals.discard("")
+        vals.discard("unassigned")
+        if stage == "Stage 2":
+            stage2 |= vals
+        elif stage == "Stage 1":
+            stage1 |= vals
+    locs = frozenset(stage2 - stage1)
+    _STAGE2_FUNC_LOC_CACHE.update(sig=sig, locs=locs)
+    return locs
+
+
+def _stage2_by_functional_location(row) -> bool:
+    """True when a work order's own functional location matches a Stage-2-only location."""
+    stage2_locs = get_stage2_functional_locations()
+    if not stage2_locs:
+        return False
+    for field in ("raw_functional_location", "func_loc", "functional_location", "func_loc_name", "area"):
+        if _normalize_func_loc(row.get(field)) in stage2_locs:
+            return True
+    return False
+
+
+def retag_stage2_by_functional_location() -> dict:
+    """Re-tag already-imported work orders as Stage 2 when their functional location
+    belongs exclusively to Stage 2 assets and their stored stage isn't a confident
+    Stage 1/2. Keeps existing SQL data consistent with the import-time rule without
+    forcing a re-import. Returns {"updated": int}.
+    """
+    stage2_locs = get_stage2_functional_locations()
+    if not stage2_locs:
+        return {"updated": 0}
+    try:
+        import db as _db
+        unconfident = tuple(s for s in _STAGE_UNCONFIDENT if s)
+        placeholders = ", ".join("?" for _ in unconfident)
+        with _db.get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT id, functional_location
+                FROM work_orders
+                WHERE (stage IS NULL OR stage IN ({placeholders}))
+                  AND functional_location IS NOT NULL AND TRIM(functional_location) != ''
+                """,
+                unconfident,
+            ).fetchall()
+            ids = [
+                r["id"] for r in rows
+                if _normalize_func_loc(r["functional_location"]) in stage2_locs
+            ]
+            for chunk_start in range(0, len(ids), 500):
+                chunk = ids[chunk_start:chunk_start + 500]
+                marks = ", ".join("?" for _ in chunk)
+                conn.execute(
+                    f"UPDATE work_orders SET stage = 'Stage 2' WHERE id IN ({marks})",
+                    chunk,
+                )
+    except Exception as exc:
+        return {"updated": 0, "error": str(exc)}
+    clear_work_order_runtime_caches()
+    return {"updated": len(ids)}
+
+
 def _asset_mapped_stage(row):
     """Read the asset-master-assigned stage from an enriched record (no text scanning)."""
     status = str(row.get("mappingStatus") or row.get("mapping_status") or "").strip()
@@ -1090,6 +1191,18 @@ def resolve_work_order_stage(row):
         return text_stage
 
     asset_stage = _asset_mapped_stage(row)
+
+    # Functional-location capture: a work order that isn't confidently mapped to a
+    # stage, but whose functional location belongs exclusively to Stage 2 assets,
+    # is classified as Stage 2 so the Stage 2 filter picks it up.
+    if asset_stage in _STAGE_UNCONFIDENT and _stage2_by_functional_location(row):
+        _log.debug(
+            "resolve_stage=Stage 2 [func-loc capture] | asset_id=%s | func_loc=%s",
+            row.get("asset_id") or row.get("machine_code"),
+            row.get("raw_functional_location") or row.get("area") or row.get("location"),
+        )
+        return "Stage 2"
+
     _log.debug(
         "resolve_stage=%s [asset-mapping] | asset_id=%s | mappedStage=%s | status=%s",
         asset_stage,

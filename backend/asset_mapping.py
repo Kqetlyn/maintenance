@@ -87,6 +87,7 @@ def _build_mapping_from_sql_rows(rows):
         area = str(row.get("area") or "").strip()
         maint_type_code = str(row.get("maint_type_code") or "").strip()
         maint_type      = str(row.get("maint_type")      or "").strip()
+        func_loc_code   = str(row.get("func_loc_code")   or "").strip()
         func_loc_name   = str(row.get("func_loc_name")   or "").strip()
 
         mapping_status = _stage_mapping_status(stage, asset_id)
@@ -133,6 +134,7 @@ def _build_mapping_from_sql_rows(rows):
             # D365 equipment-function + physical location fields
             "maint_type_code": maint_type_code,
             "maint_type": maint_type,
+            "func_loc_code": func_loc_code,
             "func_loc_name": func_loc_name,
         }
         asset_map[asset_id] = entry
@@ -283,14 +285,16 @@ def _resolve_path(data_dir):
     return None, None
 
 
-def load_asset_mapping(data_dir):
+def load_asset_mapping(data_dir, prefer_excel=False):
     # ── SQL-first path ─────────────────────────────────────────────────────────
     # If the asset_master SQL table has been populated (even once), use it so
     # that Asset_Master.xlsx is no longer required at runtime.
+    # prefer_excel=True skips the SQL layer so a freshly edited Asset_Master.xlsx
+    # can be re-read and re-synced into SQL (see db.sync_asset_master_from_file).
     try:
         import db as _db
         meta = _db.get_asset_master_sync_meta()
-        if meta.get("available") and meta.get("asset_count", 0) > 0:
+        if not prefer_excel and meta.get("available") and meta.get("asset_count", 0) > 0:
             sql_sig = ("sql", meta["asset_count"], meta.get("last_synced"))
             if _CACHE["sig"] == sql_sig and _CACHE["payload"] is not None:
                 return _CACHE["payload"]
@@ -387,6 +391,7 @@ def load_asset_mapping(data_dir):
         remarks = _clean(cell(row, "Remarks", fallback_index=7), "")
         maint_type_code = _clean(cell(row, "Maint. Type Code", "Maint Type Code", "MaintenanceTypeCode"), "")
         maint_type      = _clean(cell(row, "Maintenance Type", "MaintenanceType"), "")
+        func_loc_code   = _clean(cell(row, "Functional Location", "FunctionalLocation"), "")
         func_loc_name   = _clean(cell(row, "Functional Location Name", "FunctionalLocationName"), "")
 
         raw_criticality = ""
@@ -448,6 +453,7 @@ def load_asset_mapping(data_dir):
             # D365 equipment-function + physical location fields
             "maint_type_code": maint_type_code,
             "maint_type": maint_type,
+            "func_loc_code": func_loc_code,
             "func_loc_name": func_loc_name,
         }
         asset_map[asset_id] = entry
