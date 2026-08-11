@@ -2,6 +2,7 @@ import os
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timedelta
+from functools import lru_cache, wraps
 
 import pandas as pd
 
@@ -52,6 +53,34 @@ YEAR_START_MONTH = 1
 YEAR_START_DAY = 1
 
 
+def _scalar_memo(maxsize=8192):
+    """
+    Memoize a pure normalizer that takes hashable scalar args. These are called
+    tens of thousands of times per request over a tiny value domain (criticality
+    strings, timestamps, keys), so caching collapses the work with no behaviour
+    change. Falls back to the uncached call for any unhashable arg or kwargs, so
+    it can never change results or raise where the plain function would not.
+    """
+    def deco(fn):
+        cached = lru_cache(maxsize=maxsize)(fn)
+
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if kwargs:
+                return fn(*args, **kwargs)
+            try:
+                return cached(*args)
+            except TypeError:
+                return fn(*args)
+
+        wrapper.cache_info = cached.cache_info
+        wrapper.cache_clear = cached.cache_clear
+        return wrapper
+
+    return deco
+
+
+@_scalar_memo()
 def _clean_text(value, fallback=""):
     text = str(value or "").replace("\ufeff", " ").strip()
     text = re.sub(r"\s+", " ", text)
@@ -88,6 +117,7 @@ def _include_row_in_individual_mtbf(row):
     return not (row.get("mixer_related") and row.get("alias_mtbf_include") is False)
 
 
+@_scalar_memo()
 def _normalize_key(value):
     return "".join(ch for ch in str(value or "").strip().lower() if ch.isalnum())
 
@@ -101,6 +131,7 @@ def _normalize_asset_id(value):
     return _clean_text(value).upper()
 
 
+@_scalar_memo()
 def _normalize_criticality(value):
     cleaned = _clean_text(value)
     normalized = _normalize_key(cleaned)
@@ -121,6 +152,7 @@ def _extract_asset_ids(value):
     return matches
 
 
+@_scalar_memo()
 def _parse_timestamp(value):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -983,6 +1015,27 @@ def _build_historical_trend(records):
     return rows
 
 
+def _historical_trend_via_summary(records):
+    """
+    Phase 4 read path: serve the yearly historical trend from the pre-aggregated
+    maintenance_daily_asset_summary instead of re-scanning every record, but only
+    when the summaries are proven fresh for the current work_orders. Falls back to
+    the live _build_historical_trend on any staleness/error, so figures can never
+    diverge (validated byte-identical by the equivalence harness). Deferred imports
+    avoid a module import cycle.
+    """
+    try:
+        import db as _db
+        import maintenance_summaries as _ms
+        stages = {(_clean_text(r.get("stage")) or "Unmapped") for r in records or []}
+        with _db.get_connection() as conn:
+            if not _ms.summaries_fresh(conn):
+                return _build_historical_trend(records)
+            return _ms.query_yearly_trend_from_summary(conn, stages)
+    except Exception:
+        return _build_historical_trend(records)
+
+
 def build_management_downtime_payload(
     records,
     status_events,
@@ -1408,7 +1461,7 @@ def build_management_downtime_payload(
     mtbf_source_records = mtbf_records if mtbf_records is not None else rows
     historical_source_records = historical_records if historical_records is not None else mtbf_source_records
     mtbf_payload = _build_mtbf_views(rows, historical_source_records, period_start, period_end)
-    historical_trend = _build_historical_trend(historical_source_records)
+    historical_trend = _historical_trend_via_summary(historical_source_records)
 
     summary = {
         "total_downtime_hours": total_hours,

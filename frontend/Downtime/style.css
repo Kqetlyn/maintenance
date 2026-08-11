@@ -5985,3 +5985,130 @@ details.kdi-asset-drilldown[open] > .kdi-drilldown-summary::before {
 .isb-label { color: #1e293b; font-weight: 500; }
 .isb-count { color: var(--isb-color); font-weight: 700; font-size: 0.8rem; }
 .isb-note { color: #64748b; font-size: 0.76rem; line-height: 1.4; }
+.equipment-link-notice {
+    margin: 0 0 14px;
+    padding: 10px 14px;
+    border: 1px solid #b9d9c5;
+    border-radius: 8px;
+    background: #f2fbf5;
+    color: #205c35;
+    font-size: 13px;
+    font-weight: 600;
+}
+
+.equipment-link-notice.is-warning {
+    border-color: #e8cf9a;
+    background: #fff9ec;
+    color: #7a5412;
+}
+
+/* ── Data Reliability Index breakdown (View Analysis) ─────────────────────────────────────────── */
+.dq-breakdown {
+    border-left: 4px solid var(--warning);
+}
+
+.dq-breakdown-lead {
+    margin: 0 0 12px;
+    color: #475569;
+    font-size: 0.84rem;
+    line-height: 1.55;
+}
+
+.dq-breakdown-delta {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    font-size: 0.76rem;
+    font-weight: 800;
+}
+
+.dq-breakdown-delta.up { background: #dcfce7; color: #166534; }
+.dq-breakdown-delta.down { background: #fee2e2; color: #991b1b; }
+.dq-breakdown-delta.neutral { background: #f1f5f9; color: #64748b; }
+
+.dq-breakdown-table-wrap {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+}
+
+.dq-breakdown-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.8rem;
+}
+
+.dq-breakdown-table th {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.04em;
+    text-align: left;
+    text-transform: uppercase;
+}
+
+.dq-breakdown-table td {
+    padding: 9px 12px;
+    border-bottom: 1px solid #f1f5f9;
+    vertical-align: top;
+}
+
+.dq-breakdown-table tr:last-child td { border-bottom: none; }
+
+.dq-dim-label {
+    color: var(--text-dark);
+    font-weight: 700;
+}
+
+.dq-dim-detail {
+    margin-top: 2px;
+    color: var(--text-muted);
+    line-height: 1.45;
+}
+
+.dq-dim-weight {
+    width: 78px;
+    color: #475569;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.dq-dim-score {
+    width: 190px;
+    white-space: nowrap;
+}
+
+.dq-score-value {
+    display: block;
+    font-size: 0.95rem;
+    font-weight: 800;
+}
+
+.dq-score-value.good { color: #166534; }
+.dq-score-value.warn { color: #92400e; }
+.dq-score-value.bad { color: #991b1b; }
+
+.dq-dim-basis {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 0.74rem;
+    font-weight: 600;
+}
+
+.dq-breakdown-note {
+    margin: 10px 0 0;
+    color: var(--text-muted);
+    font-size: 0.76rem;
+    line-height: 1.5;
+}
+
+/* Year + month pair, hidden while the panel is in YTD view */
+.topic-scope-fields {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}

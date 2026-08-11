@@ -37,7 +37,7 @@ python -m pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Export the values from `.env` through the deployment platform or shell. Flask does not load `.env` automatically. At minimum, configure strong `DASHBOARD_MANAGEMENT_PASSWORD`, `DASHBOARD_STAFF_PASSWORD`, and `DASHBOARD_SECRET_KEY` values before the first start. Existing database users are preserved on restarts.
+For local development, the maintenance backend loads the project-root `.env` file. Deployment environments can provide the same values through their platform configuration. At minimum, configure strong `DASHBOARD_MANAGEMENT_PASSWORD`, `DASHBOARD_STAFF_PASSWORD`, and `DASHBOARD_SECRET_KEY` values before the first start. Existing database users are preserved on restarts.
 
 ## Runtime data
 

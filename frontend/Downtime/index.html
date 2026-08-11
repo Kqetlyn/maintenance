@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
+    <base href="/Downtime/">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Downtime</title>
     <script>
@@ -78,6 +79,7 @@
         </header>
         <div class="import-status hidden" id="export-status"></div>
         <div class="import-status hidden" id="work-order-import-status"></div>
+        <div class="equipment-link-notice hidden" id="equipment-link-notice" role="status" aria-live="polite"></div>
         <div class="alert-banner hidden" id="period-helper-banner">
             <div class="alert-inner">
                 <div class="alert-item warning" id="period-helper-text"></div>
@@ -149,7 +151,7 @@
                     <div class="severity-critical-display" id="kpi-open-severity-critical-breakdown"><span class="sl-trend-label">Critical open MR by Service level.</span></div>
                 </div>
                 <div class="kpi-card highlight-amber compact-summary-card">
-                    <div class="kpi-label">Data Reliability</div>
+                    <div class="kpi-label">Data Reliability Index</div>
                     <div class="kpi-value" id="kpi-data-reliability">--</div>
                     <div class="summary-stat-row stacked">
                         <div class="summary-stat">
@@ -161,7 +163,7 @@
                             <span class="summary-stat-value" id="kpi-data-review-count">--</span>
                         </div>
                     </div>
-                    <div class="kpi-trend" id="kpi-data-reliability-sub">Based on Data Quality Flag.</div>
+                    <div class="kpi-trend" id="kpi-data-reliability-sub">Composite of 6 weighted quality dimensions, YTD.</div>
                 </div>
             </div>
         </section>
@@ -1556,23 +1558,29 @@
                     <div class="card-title" id="data-reliability-title">Data Reliability</div>
                 </div>
                 <div class="topic-scope-filter">
-                    <select id="topic-reliability-year-filter" class="topic-scope-select" aria-label="Year filter — Data Reliability">
-                        <option value="">All Years</option>
+                    <select id="topic-reliability-view-filter" class="topic-scope-select" aria-label="View — Data Reliability">
+                        <option value="month">By Month</option>
+                        <option value="ytd">YTD</option>
                     </select>
-                    <select id="topic-reliability-month-filter" class="topic-scope-select" aria-label="Month filter — Data Reliability">
-                        <option value="">All Months</option>
-                        <option value="01">Jan</option><option value="02">Feb</option><option value="03">Mar</option>
-                        <option value="04">Apr</option><option value="05">May</option><option value="06">Jun</option>
-                        <option value="07">Jul</option><option value="08">Aug</option><option value="09">Sep</option>
-                        <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dec</option>
-                    </select>
+                    <span class="topic-scope-fields" id="topic-reliability-scope-fields">
+                        <select id="topic-reliability-year-filter" class="topic-scope-select" aria-label="Year filter — Data Reliability">
+                            <option value="">All Years</option>
+                        </select>
+                        <select id="topic-reliability-month-filter" class="topic-scope-select" aria-label="Month filter — Data Reliability">
+                            <option value="">All Months</option>
+                            <option value="01">Jan</option><option value="02">Feb</option><option value="03">Mar</option>
+                            <option value="04">Apr</option><option value="05">May</option><option value="06">Jun</option>
+                            <option value="07">Jul</option><option value="08">Aug</option><option value="09">Sep</option>
+                            <option value="10">Oct</option><option value="11">Nov</option><option value="12">Dec</option>
+                        </select>
+                    </span>
                 </div>
             </div>
             <div class="kpi-grid compact-kpi-grid topic-mini-kpi-grid">
                 <div class="kpi-card compact-summary-card highlight-amber">
-                    <div class="kpi-label">Data Reliability %</div>
+                    <div class="kpi-label">Data Reliability Index %</div>
                     <div class="kpi-value mini" id="topic-data-reliability-pct">--</div>
-                    <div class="kpi-trend" id="topic-data-reliability-sub">Based on Data Quality Flag.</div>
+                    <div class="kpi-trend" id="topic-data-reliability-sub">Composite of 6 weighted quality dimensions. Open View Analysis for the breakdown.</div>
                 </div>
                 <div class="kpi-card compact-summary-card highlight-red">
                     <div class="kpi-label">Invalid Work Orders</div>
@@ -1599,6 +1607,7 @@
             <button type="button" class="topic-analysis-toggle" data-analysis-toggle aria-expanded="false">View Analysis</button>
             <div class="topic-analysis-only">
                 <div class="topic-analysis-stack">
+                    <div class="card nested-card dq-breakdown" id="data-reliability-index-breakdown"></div>
                     <div class="card nested-card">
                         <div class="card-title">Records Requiring Correction Before KPI Use</div>
                         <p class="card-subtitle">Shows only records that affect KPI reliability: missing Asset ID / WO ID, missing ActualStart, Finished records with missing ActualEnd, or invalid date sequence (real ActualEnd before ActualStart). Open or incomplete records (New / Confirm / In Progress / Rejected / reWork) with a D365 placeholder ActualEnd (1900-01-01 or blank) are excluded from MTTR but are <strong>not</strong> treated as data errors. SLA fields are not checked for D365 exports. <button type="button" id="repair-pbi-flags-btn" class="inline-action-btn" title="Re-evaluate quality flags for D365 records imported before the lifecycle fix">Repair Import Flags</button></p>

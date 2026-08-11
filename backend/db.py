@@ -331,6 +331,96 @@ CREATE TABLE IF NOT EXISTS inventory_item_mapping (
 );
 CREATE INDEX IF NOT EXISTS idx_iim_item_number ON inventory_item_mapping (item_number);
 CREATE INDEX IF NOT EXISTS idx_iim_item_group  ON inventory_item_mapping (item_group);
+
+-- ── Production-integration core tables (availability integration Phase 5A) ──────
+-- These support the read-only maintenance availability API consumed by the
+-- production dashboard. They never let production open this database directly:
+-- production reaches them only through /api/v1/maintenance/*.
+--
+-- Canonical join keys everywhere: asset_id (matches asset_master.asset_id,
+-- stored UPPERCASE) + facility_stage stored as "Stage 1"/"Stage 2" to match the
+-- existing asset_master.stage / work_orders.stage convention. Timestamps are ISO
+-- 8601 in the factory-local timezone (same convention as work_orders.actual_*).
+
+-- downtime_event: materialised machine-unavailable intervals for the availability
+-- engine. Today these are derived from work-order actual_start/actual_end and are
+-- therefore PROXY (confirmed_unavailable = 0); a future verified/partial source can
+-- set confirmed_unavailable = 1 with an explicit unavailable_start/unavailable_end.
+-- Only confirmed_unavailable = 1 rows may auto-block a planned asset.
+CREATE TABLE IF NOT EXISTS downtime_event (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id                TEXT    NOT NULL,
+    facility_stage          TEXT,
+    equipment_family        TEXT,
+    downtime_start          TEXT,
+    downtime_end            TEXT,
+    confirmed_unavailable   INTEGER DEFAULT 0,
+    unavailable_start       TEXT,
+    unavailable_end         TEXT,
+    production_affected      INTEGER,
+    capacity_factor         REAL    DEFAULT 0.0,
+    wo_number               TEXT,
+    classification          TEXT,
+    confirmation_source     TEXT,
+    availability_confidence TEXT    DEFAULT 'proxy',
+    source_updated_at       TEXT,
+    updated_at              TEXT,
+    UNIQUE(asset_id, downtime_start, wo_number)
+);
+CREATE INDEX IF NOT EXISTS idx_de_asset_id       ON downtime_event (asset_id);
+CREATE INDEX IF NOT EXISTS idx_de_stage          ON downtime_event (facility_stage);
+CREATE INDEX IF NOT EXISTS idx_de_start          ON downtime_event (downtime_start);
+CREATE INDEX IF NOT EXISTS idx_de_end            ON downtime_event (downtime_end);
+CREATE INDEX IF NOT EXISTS idx_de_confirmed      ON downtime_event (confirmed_unavailable);
+CREATE INDEX IF NOT EXISTS idx_de_wo             ON downtime_event (wo_number);
+CREATE INDEX IF NOT EXISTS idx_de_asset_start    ON downtime_event (asset_id, downtime_start);
+
+-- equipment_capability: process/technical capability and approved contingency
+-- fallbacks for the planner. A fallback may only be auto-assigned when
+-- approved_fallback = 1 AND all three approvals (production/engineering/qa) are set.
+-- Until then the planner may show it as a possible alternative only.
+CREATE TABLE IF NOT EXISTS equipment_capability (
+    id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id                TEXT    NOT NULL,
+    facility_stage          TEXT,
+    equipment_family        TEXT,
+    capability_key          TEXT,
+    rated_capacity          REAL,
+    capacity_unit           TEXT,
+    approved_fallback       INTEGER DEFAULT 0,
+    fallback_for_asset_id   TEXT,
+    approved_by_production   INTEGER DEFAULT 0,
+    approved_by_engineering  INTEGER DEFAULT 0,
+    approved_by_qa           INTEGER DEFAULT 0,
+    approval_notes          TEXT,
+    source_updated_at       TEXT,
+    updated_at              TEXT,
+    UNIQUE(asset_id, capability_key, fallback_for_asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_ec_asset_id        ON equipment_capability (asset_id);
+CREATE INDEX IF NOT EXISTS idx_ec_stage           ON equipment_capability (facility_stage);
+CREATE INDEX IF NOT EXISTS idx_ec_family          ON equipment_capability (equipment_family);
+CREATE INDEX IF NOT EXISTS idx_ec_fallback_for    ON equipment_capability (fallback_for_asset_id);
+
+-- asset_alias: formalises production-label → canonical asset_id resolution and
+-- reconciles the two Asset ID schemes (legacy EN..-NNNNNN vs D365 functional
+-- location ENPD-Lnn-..) plus stage-scoped display-name collisions. Stage-scoped so
+-- a "Bratt Pan 1" in Stage 1 and Stage 2 never collapse to one asset.
+CREATE TABLE IF NOT EXISTS asset_alias (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    alias               TEXT    NOT NULL,
+    asset_id            TEXT    NOT NULL,
+    facility_stage      TEXT,
+    alias_type          TEXT,
+    active_from         TEXT,
+    active_to           TEXT,
+    source_updated_at   TEXT,
+    updated_at          TEXT,
+    UNIQUE(alias, facility_stage, asset_id)
+);
+CREATE INDEX IF NOT EXISTS idx_aa_alias     ON asset_alias (alias);
+CREATE INDEX IF NOT EXISTS idx_aa_asset_id  ON asset_alias (asset_id);
+CREATE INDEX IF NOT EXISTS idx_aa_stage     ON asset_alias (facility_stage);
 """
 
 
@@ -432,6 +522,50 @@ def init_db() -> str:
                 conn.execute("DELETE FROM raw_powerbi_mr_wo_export")
             except Exception:
                 pass  # tables may not exist yet on a brand-new DB — safe to ignore
+            # Phase 11 (perf): index updated_at on the tables whose freshness is
+            # probed with SELECT MAX(updated_at) on every dashboard build. SQLite
+            # optimises MAX(indexed_col) to an O(1) index lookup, replacing the
+            # full-table scans measured in the performance audit. These are the
+            # only new indexes justified by *current* query usage — composite
+            # date-range indexes are deferred until a SQL date-range filter uses
+            # them, to avoid dead write-overhead on import.
+            for _idx_sql in (
+                "CREATE INDEX IF NOT EXISTS idx_wo_updated_at ON work_orders (updated_at)",
+                "CREATE INDEX IF NOT EXISTS idx_am_updated_at ON asset_master (updated_at)",
+                "CREATE INDEX IF NOT EXISTS idx_pm_updated_at ON pm_schedule (updated_at)",
+                "CREATE INDEX IF NOT EXISTS idx_sp_updated_at ON spare_parts (updated_at)",
+            ):
+                try:
+                    conn.execute(_idx_sql)
+                except Exception:
+                    pass  # column/table may not exist on an older DB — safe to ignore
+            # Phase 4 (perf): historical summary tables. DDL lives in
+            # maintenance_summaries (single source of truth); deferred import
+            # avoids a top-level cycle. Safe CREATE TABLE IF NOT EXISTS.
+            try:
+                import maintenance_summaries as _ms
+                _ms.ensure_schema(conn)
+            except Exception:
+                pass  # summaries are optional storage; never block startup
+            # Availability integration (Phase 7): materialisation bookkeeping columns
+            # on downtime_event — source_work_order_id (traceability) and last_synced_at
+            # (staleness: proxy rows not seen in the latest sync are superseded).
+            for _col in ("source_work_order_id", "last_synced_at"):
+                try:
+                    conn.execute(f"ALTER TABLE downtime_event ADD COLUMN {_col} TEXT")
+                except Exception:
+                    pass  # column already exists or table not yet created — safe to ignore
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_de_confirmation ON downtime_event (confirmation_source)")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_de_last_synced ON downtime_event (last_synced_at)")
+            except Exception:
+                pass
+            # Recommended by SQLite after schema/index changes: refresh the query
+            # planner's stat tables so it picks the new indexes.
+            try:
+                conn.execute("PRAGMA optimize")
+            except Exception:
+                pass
     return str(DB_PATH)
 
 
@@ -622,6 +756,193 @@ def query_asset_master(
     with get_connection() as conn:
         rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
+
+
+def query_downtime_events(
+    asset_ids: "list[str] | None" = None,
+    start_iso: str | None = None,
+    end_iso: str | None = None,
+    facility_stage: str | None = None,
+    confirmed_only: bool = False,
+) -> list[dict]:
+    """Read materialised downtime_event intervals overlapping [start_iso, end_iso).
+
+    The availability API reads verified/partial confirmed intervals from here and
+    falls back to a live work-order proxy where none exist. Returns [] gracefully if
+    the table has not been created yet (pre-migration) so the API never hard-fails.
+    An event with a NULL end is treated as still open (overlaps any later window).
+    Overlap: event_start < window_end AND (event_end IS NULL OR event_end > window_start).
+    """
+    conditions: list[str] = []
+    params: list = []
+    if asset_ids:
+        placeholders = ",".join("?" for _ in asset_ids)
+        conditions.append(f"asset_id IN ({placeholders})")
+        params.extend(str(value or "").strip().upper() for value in asset_ids)
+    if facility_stage:
+        conditions.append("facility_stage = ?")
+        params.append(facility_stage)
+    if confirmed_only:
+        conditions.append("confirmed_unavailable = 1")
+    start_col = "COALESCE(unavailable_start, downtime_start)"
+    end_col = "COALESCE(unavailable_end, downtime_end)"
+    if end_iso:
+        conditions.append(f"({start_col} IS NULL OR {start_col} < ?)")
+        params.append(end_iso)
+    if start_iso:
+        conditions.append(f"({end_col} IS NULL OR {end_col} > ?)")
+        params.append(start_iso)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    sql = f"SELECT * FROM downtime_event {where} ORDER BY asset_id, {start_col}"
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(sql, params).fetchall()
+    except sqlite3.Error:
+        return []
+    return [dict(r) for r in rows]
+
+
+def upsert_equipment_capability(rows: list[dict]) -> int:
+    """Idempotent upsert of approved-fallback rows into equipment_capability.
+
+    Keyed on (asset_id, capability_key, fallback_for_asset_id) so re-running the loader
+    updates approvals in place rather than duplicating. ``asset_id`` is the SUBSTITUTE
+    asset; ``fallback_for_asset_id`` is the original it may cover. Returns rows written.
+    """
+    if not rows:
+        return 0
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    written = 0
+    with get_connection() as conn:
+        for row in rows:
+            asset_id = str(row.get("asset_id") or "").strip().upper()
+            if not asset_id:
+                continue
+            conn.execute(
+                """
+                INSERT INTO equipment_capability
+                    (asset_id, facility_stage, equipment_family, capability_key, rated_capacity,
+                     capacity_unit, approved_fallback, fallback_for_asset_id,
+                     approved_by_production, approved_by_engineering, approved_by_qa,
+                     approval_notes, source_updated_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(asset_id, capability_key, fallback_for_asset_id) DO UPDATE SET
+                    facility_stage=excluded.facility_stage,
+                    equipment_family=excluded.equipment_family,
+                    rated_capacity=excluded.rated_capacity,
+                    capacity_unit=excluded.capacity_unit,
+                    approved_fallback=excluded.approved_fallback,
+                    approved_by_production=excluded.approved_by_production,
+                    approved_by_engineering=excluded.approved_by_engineering,
+                    approved_by_qa=excluded.approved_by_qa,
+                    approval_notes=excluded.approval_notes,
+                    source_updated_at=excluded.source_updated_at,
+                    updated_at=excluded.updated_at
+                """,
+                (asset_id, row.get("facility_stage"), row.get("equipment_family"),
+                 row.get("capability_key"), row.get("rated_capacity"), row.get("capacity_unit"),
+                 1 if row.get("approved_fallback") else 0,
+                 (str(row.get("fallback_for_asset_id")).strip().upper()
+                  if row.get("fallback_for_asset_id") else None),
+                 1 if row.get("approved_by_production") else 0,
+                 1 if row.get("approved_by_engineering") else 0,
+                 1 if row.get("approved_by_qa") else 0,
+                 row.get("approval_notes"), row.get("source_updated_at") or now, now),
+            )
+            written += 1
+    return written
+
+
+def query_equipment_capability(for_asset_ids: "list[str] | None" = None,
+                               approved_only: bool = False) -> list[dict]:
+    """Read equipment_capability rows, optionally for specific original asset ids.
+
+    ``for_asset_ids`` filters on ``fallback_for_asset_id`` (the original being covered).
+    Returns [] gracefully if the table does not exist yet.
+    """
+    conditions: list[str] = []
+    params: list = []
+    if for_asset_ids:
+        placeholders = ",".join("?" for _ in for_asset_ids)
+        conditions.append(f"fallback_for_asset_id IN ({placeholders})")
+        params.extend(str(v or "").strip().upper() for v in for_asset_ids)
+    if approved_only:
+        conditions.append("approved_fallback = 1 AND approved_by_production = 1 "
+                          "AND approved_by_engineering = 1 AND approved_by_qa = 1")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    try:
+        with get_connection() as conn:
+            rows = conn.execute(f"SELECT * FROM equipment_capability {where}", params).fetchall()
+    except sqlite3.Error:
+        return []
+    return [dict(r) for r in rows]
+
+
+def upsert_downtime_events(rows: list[dict]) -> int:
+    """Idempotent upsert of downtime_event rows (Phase 7 proxy materialisation).
+
+    Keyed on (asset_id, downtime_start, wo_number) — the stable source interval key. The
+    DO UPDATE is guarded to ``confirmation_source = 'work_order'`` so a manually verified
+    row sharing that key is NEVER overwritten by the proxy sync. Returns rows processed.
+    """
+    if not rows:
+        return 0
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    processed = 0
+    with get_connection() as conn:
+        for row in rows:
+            asset_id = str(row.get("asset_id") or "").strip().upper()
+            if not asset_id:
+                continue
+            conn.execute(
+                """
+                INSERT INTO downtime_event
+                    (asset_id, facility_stage, equipment_family, downtime_start, downtime_end,
+                     confirmed_unavailable, unavailable_start, unavailable_end, production_affected,
+                     capacity_factor, wo_number, classification, confirmation_source,
+                     availability_confidence, source_work_order_id, source_updated_at,
+                     last_synced_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(asset_id, downtime_start, wo_number) DO UPDATE SET
+                    facility_stage=excluded.facility_stage,
+                    equipment_family=excluded.equipment_family,
+                    downtime_end=excluded.downtime_end,
+                    classification=excluded.classification,
+                    availability_confidence=excluded.availability_confidence,
+                    source_work_order_id=excluded.source_work_order_id,
+                    source_updated_at=excluded.source_updated_at,
+                    last_synced_at=excluded.last_synced_at,
+                    updated_at=excluded.updated_at
+                WHERE downtime_event.confirmation_source = 'work_order'
+                """,
+                (asset_id, row.get("facility_stage"), row.get("equipment_family"),
+                 row.get("downtime_start"), row.get("downtime_end"),
+                 0, None, None, row.get("production_affected"),
+                 row.get("capacity_factor", 0.0), row.get("wo_number"),
+                 row.get("classification"), "work_order", "proxy",
+                 row.get("source_work_order_id"), row.get("source_updated_at"),
+                 row.get("last_synced_at") or now, now),
+            )
+            processed += 1
+    return processed
+
+
+def delete_stale_proxy_downtime(before_synced_at: str) -> int:
+    """Supersede proxy downtime rows not seen in the latest sync (safe: proxy only).
+
+    Only rows with confirmation_source = 'work_order' are eligible; verified/partial rows
+    are never touched. Returns rows removed.
+    """
+    try:
+        with get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM downtime_event WHERE confirmation_source = 'work_order' "
+                "AND (last_synced_at IS NULL OR last_synced_at < ?)",
+                (before_synced_at,),
+            )
+            return cur.rowcount or 0
+    except sqlite3.Error:
+        return 0
 
 
 def get_asset_master_sync_meta() -> dict:

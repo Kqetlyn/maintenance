@@ -2766,14 +2766,36 @@ def _critical_machine_norm(value):
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").strip().lower()).strip()
 
 
+def _fast_iso_dt(text: str):
+    """
+    Parse the unambiguous ISO-8601 timestamps stored by the SQL layer without
+    pandas.  Returns a naive datetime, or None if the text is not plain ISO
+    (caller then falls back to pd.to_datetime for exotic formats).
+
+    ISO-8601 is unambiguous, so any value this accepts is parsed to the exact
+    same instant pd.to_datetime would produce — this is a pure speed fast-path,
+    not a behaviour change.
+    """
+    try:
+        d = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return d.replace(tzinfo=None) if d.tzinfo else d
+
+
 def _critical_machine_parse_dt(*values):
     for value in values:
         text = str(value or "").strip()
         if not text or text == "--":
             continue
-        parsed = pd.to_datetime(text, errors="coerce")
-        if pd.notna(parsed):
-            return parsed.to_pydatetime()
+        # Fast-path the common stored ISO format; fall back to pandas for any
+        # exotic string so results stay byte-identical to the original parser.
+        parsed = _fast_iso_dt(text)
+        if parsed is not None:
+            return parsed
+        ts = pd.to_datetime(text, errors="coerce")
+        if pd.notna(ts):
+            return ts.to_pydatetime()
     return None
 
 

@@ -5,11 +5,16 @@ Serves only the Maintenance page and its required API endpoints.
 
 from datetime import datetime, timedelta
 from functools import wraps
+from pathlib import Path
 from urllib.parse import urlparse
 from flask import Flask, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from markupsafe import escape
+from dotenv import load_dotenv
+import logging
 import os
 import secrets
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 from runtime_config import DATA_DIR as RUNTIME_DATA_DIR, PROJECT_ROOT, ensure_runtime_directories
 
@@ -57,6 +62,7 @@ from downtime_service import (
     get_last_import_stats,
     register_work_order_import_completion_callback,
 )
+from equipment_integration_api import bp as maintenance_v1_bp
 try:
     from mira.api import mira_bp
 except Exception as mira_import_error:
@@ -110,6 +116,7 @@ def _persisted_secret_key() -> str:
 
 # ── App setup ─────────────────────────────────────────────────────────────────
 app = Flask(__name__, static_folder=FRONTEND_DIR)
+app.logger.setLevel(logging.INFO)
 app.config.update(
     SECRET_KEY=_persisted_secret_key(),
     PERMANENT_SESSION_LIFETIME=timedelta(minutes=int(os.environ.get("DASHBOARD_SESSION_TIMEOUT_MINUTES", "60"))),
@@ -118,6 +125,7 @@ app.config.update(
 )
 if os.environ.get("DASHBOARD_COOKIE_SECURE", "").lower() in {"1", "true", "yes"}:
     app.config["SESSION_COOKIE_SECURE"] = True
+app.register_blueprint(maintenance_v1_bp)
 _STARTUP_DB_ERROR = None
 try:
     _db.init_db()
@@ -407,6 +415,11 @@ def enforce_login_and_roles():
     if _is_public_request():
         return None
 
+    # The read-only integration API authenticates its own server token in its
+    # blueprint. This is not a dashboard-login bypass and applies to no other API.
+    if request.path.startswith("/api/v1/maintenance/"):
+        return None
+
     user = current_user()
     if not user:
         if _is_api_request():
@@ -641,11 +654,49 @@ def _invalidate_route_cache():
         clear_work_order_runtime_caches()
     except Exception:
         pass
+    # Phase 6: force the next request to recompute the data-version token.
+    _DATA_VERSION_CACHE["ts"] = 0.0
+
+
+# ── Phase 6: data-version token for cache keys ────────────────────────────────
+# Including the data version in every cache key means a data change (import) can
+# never serve a stale cached payload even if an explicit invalidation is missed:
+# the version changes, so the key changes, so the request recomputes.
+_DATA_VERSION_CACHE = {"version": None, "ts": 0.0}
+_DATA_VERSION_TTL = 3.0  # seconds; MAX(updated_at) is indexed but avoid a DB hit per request
+
+
+def _data_version():
+    now = _time.time()
+    if _DATA_VERSION_CACHE["version"] is not None and (now - _DATA_VERSION_CACHE["ts"]) < _DATA_VERSION_TTL:
+        return _DATA_VERSION_CACHE["version"]
+    try:
+        import maintenance_summaries as _ms
+        version = _ms.get_data_version()
+    except Exception:
+        version = "unknown"
+    _DATA_VERSION_CACHE["version"] = version
+    _DATA_VERSION_CACHE["ts"] = now
+    return version
+
+
+def _rebuild_summaries_after_import():
+    """Phase 5: keep the historical summary tables fresh after a work-order
+    import so the summary-backed read paths stay active (they safely fall back to
+    live computation while stale, but that is slower)."""
+    try:
+        import maintenance_summaries as _ms
+        _ms.rebuild_summaries_if_stale()
+    except Exception as exc:
+        print(f"[summaries] post-import rebuild skipped: {exc}")
 
 
 # An asynchronous work-order upload returns before its database write finishes.
 # Clear all route/MIRA caches again after that commit so no request made during
 # the import can leave Predictive Insights pinned to the previous dataset.
+# Order: rebuild summaries first (so the next request reads fresh summaries),
+# then invalidate the route/payload caches.
+register_work_order_import_completion_callback(_rebuild_summaries_after_import)
 register_work_order_import_completion_callback(_invalidate_route_cache)
 
 
@@ -957,6 +1008,14 @@ def downtime_root():
     return redirect("/?view=downtime")
 
 
+@app.route("/downtime")
+@login_required
+@permission_required("downtime")
+def downtime_deep_link():
+    """Standalone authenticated entry used by Equipment Loading deep links."""
+    return _serve_html_with_auth(os.path.join(FRONTEND_DIR, "Downtime"), "index.html")
+
+
 @app.route("/<path:path>")
 def frontend_files(path):
     """Catch-all static file server for CSS, JS, shared assets, etc."""
@@ -1072,7 +1131,7 @@ def downtime_data():
     stage = request.args.get("stage")
     work_orders_only = str(request.args.get("work_orders_only", "")).strip().lower() in {"1", "true", "yes", "on"}
     return _cached_json(
-        ("downtime", "lean-v3", period, month, start, end, work_orders_only, stage),
+        ("downtime", "lean-v3", _data_version(), period, month, start, end, work_orders_only, stage),
         lambda: build_downtime_payload(period, month, start, end, work_orders_only=work_orders_only, stage=stage),
     )
 
@@ -1089,7 +1148,7 @@ def inactive_critical_machines_api():
     stage = request.args.get("stage")
     category = request.args.get("equipmentCategory") or request.args.get("category")
     return _cached_json(
-        ("inactive-critical-machines", period, month, start, end, stage, category),
+        ("inactive-critical-machines", _data_version(), period, month, start, end, stage, category),
         lambda: build_inactive_critical_machines_payload(period, month, start, end, stage=stage, category=category),
     )
 
@@ -1660,7 +1719,16 @@ def maintenance_data_quality():
 
 @app.route("/api/downtime/mtbf-history")
 def downtime_mtbf_history():
-    return jsonify(build_mtbf_work_order_history_payload(stage=request.args.get("stage")))
+    # Historical MTBF work-order history: large (~1.6 MB uncompressed) and changes
+    # only on import. Route through the shared cache so it is gzip-compressed
+    # (~107 KB on the wire) and served from disk, instead of rebuilding + sending
+    # it uncompressed on every open of the MTBF history view. Import clears this
+    # cache via _invalidate_route_cache().
+    stage = request.args.get("stage")
+    return _cached_json(
+        ("mtbf-history", "v1", _data_version(), stage),
+        lambda: build_mtbf_work_order_history_payload(stage=stage),
+    )
 
 
 def get_path_mtime_iso(path):

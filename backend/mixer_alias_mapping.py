@@ -8,6 +8,7 @@ for mixer tracking and reliability grouping.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Any
 
 
@@ -106,18 +107,34 @@ def _contains_keyword(text: str, compact_text: str, keyword: str) -> bool:
     return low in text or _compact(low) in compact_text
 
 
-def detect_mixer_alias(description: str, asset_name: str = "", machine_group: str = "") -> dict[str, Any]:
-    text = _normal_text(description, asset_name, machine_group)
+@lru_cache(maxsize=8192)
+def _detect_mixer_core(text: str) -> tuple[tuple[str, ...], bool, bool]:
+    """
+    Regex-heavy keyword scan, memoized on the normalized text.
+
+    ALIAS_RULES / MIXER_KEYWORDS / MULTIPLE_MACHINE_KEYWORDS are module-level
+    constants, so the result is a pure function of ``text`` and safe to cache
+    for the process lifetime.  Work orders repeat the same descriptions/assets,
+    so this collapses per-request calls to the number of unique texts.
+    Returns immutable data; detect_mixer_alias rebuilds a fresh dict per call.
+    """
     compact_text = _compact(text)
-    aliases = [
+    aliases = tuple(
         alias
         for alias, rule in ALIAS_RULES.items()
         if any(_contains_keyword(text, compact_text, kw) for kw in rule["keywords"])
-    ]
+    )
     is_mixer = any(_contains_keyword(text, compact_text, kw) for kw in MIXER_KEYWORDS)
     if any(token in text for token in ("food mixer", "foodmixer")):
         is_mixer = True
     multiple = any(_contains_keyword(text, compact_text, kw) for kw in MULTIPLE_MACHINE_KEYWORDS)
+    return aliases, is_mixer, multiple
+
+
+def detect_mixer_alias(description: str, asset_name: str = "", machine_group: str = "") -> dict[str, Any]:
+    text = _normal_text(description, asset_name, machine_group)
+    alias_tuple, is_mixer, multiple = _detect_mixer_core(text)
+    aliases = list(alias_tuple)  # fresh mutable list per call — never share cached state
     return {
         "is_mixer_related": is_mixer or bool(aliases),
         "aliases": aliases,
@@ -133,6 +150,8 @@ def _display_name(base_name: str, alias: str | None) -> str:
 
 
 def _manual_override_key(row: dict[str, Any]) -> dict[str, Any] | None:
+    if not MANUAL_OVERRIDES:
+        return None  # no overrides configured — skip per-row key building entirely
     candidates = [
         row.get("maintenance_order_id"),
         row.get("mr_number"),

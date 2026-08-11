@@ -1300,10 +1300,20 @@ function getDataQualityFlags(row) {
         flags.push(...single.split(";").map((flag) => flag.trim()).filter(Boolean));
     }
     const actionableFlags = flags.filter((flag) => flag && flag !== "Valid");
-    if (rowHasMissingAssetId(row) && !actionableFlags.some((flag) => flag.toLowerCase() === "missing asset id")) {
+    // A New MR that has not become a work order yet has nothing to correct: the
+    // asset, dates and closure are attached when the WO is raised. Flagging it
+    // would report normal intake as a data error and make recent months look worse.
+    if (rowHasMissingAssetId(row) && !isPendingWorkOrderAssignment(row)
+        && !actionableFlags.some((flag) => flag.toLowerCase() === "missing asset id")) {
         actionableFlags.push("Missing Asset ID");
     }
     return actionableFlags.length ? actionableFlags : ["Valid"];
+}
+
+// New MR raised but not yet turned into a work order — awaiting acknowledgement,
+// not a defective record.
+function isPendingWorkOrderAssignment(row) {
+    return isMrNewStatus(getMrStatus(row)) && !getMrWorkOrderOnlyId(row);
 }
 
 function getDataQualityFlag(row) {
@@ -2617,8 +2627,12 @@ function buildSeverityBreakdownCriticalHtml(map, limit = 2) {
 let downtimeOverviewRowsCache = [];
 
 // Scoped filters live on the dedicated topic panels — the top KPI strip stays YTD.
+// Data Reliability opens on the current period; "ytd" swaps the year/month pair
+// for the year-to-date scope the top KPI strip uses.
+let topicReliabilityViewMode = "month";
 let topicReliabilityYearFilter = "";
 let topicReliabilityMonthFilter = "";
+let topicReliabilityDefaultApplied = false;
 let topicPreventiveYearFilter = "";
 let topicPreventiveMonthFilter = "";
 
@@ -2686,9 +2700,52 @@ function populateTopicYearOptions(rows) {
     });
 }
 
+// Data Reliability opens on the current month. When the current month has no
+// records yet (import lag), fall back to the newest period that does, so the
+// panel never opens on an empty or blended all-time scope.
+function applyTopicReliabilityDefaultScope(rows = []) {
+    if (topicReliabilityDefaultApplied || !rows.length) return;
+    const periods = new Set();
+    rows.forEach((row) => {
+        const { year, month } = getOverviewRowYearMonth(row);
+        if (/^\d{4}$/.test(year) && /^\d{2}$/.test(month)) periods.add(`${year}-${month}`);
+    });
+    if (!periods.size) return;
+    const now = new Date();
+    const currentPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+    const period = periods.has(currentPeriod) ? currentPeriod : [...periods].sort().pop();
+    topicReliabilityYearFilter = period.slice(0, 4);
+    topicReliabilityMonthFilter = period.slice(5, 7);
+    topicReliabilityDefaultApplied = true;
+    syncTopicReliabilityScopeControls();
+}
+
+// Keeps the three scope selects in step with the stored filter state and hides
+// the year/month pair while the panel is in YTD mode.
+function syncTopicReliabilityScopeControls() {
+    const viewSelect = document.getElementById("topic-reliability-view-filter");
+    if (viewSelect) viewSelect.value = topicReliabilityViewMode;
+    const yearSelect = document.getElementById("topic-reliability-year-filter");
+    if (yearSelect) yearSelect.value = topicReliabilityYearFilter;
+    const monthSelect = document.getElementById("topic-reliability-month-filter");
+    if (monthSelect) monthSelect.value = topicReliabilityMonthFilter;
+    const fields = document.getElementById("topic-reliability-scope-fields");
+    if (fields) fields.classList.toggle("hidden", topicReliabilityViewMode === "ytd");
+}
+
+// Resolves the rows the panel should score: the selected month, or the
+// year-to-date scope the top KPI strip uses.
+function getTopicReliabilityScope() {
+    if (topicReliabilityViewMode === "ytd") {
+        return { year: getOverviewYtdYear(downtimeOverviewRowsCache || []), month: "", mode: "ytd" };
+    }
+    return { year: topicReliabilityYearFilter, month: topicReliabilityMonthFilter, mode: "month" };
+}
+
 function renderDowntimeOverviewFromRows(rows = []) {
     downtimeOverviewRowsCache = rows;
     populateTopicYearOptions(rows);
+    applyTopicReliabilityDefaultScope(rows);
     if (!rows.length) {
         setText("kpi-maintenance-resolution-time", "--");
         setText("kpi-maintenance-resolution-sub", "No imported work orders loaded.");
@@ -2734,13 +2791,451 @@ function renderDowntimeOverviewFromRows(rows = []) {
     setText("kpi-work-order-count-sub", fmtNumber(machinesAffected.size));
     setHtml("kpi-open-severity-breakdown", buildSeverityBreakdownHtml(severityMap));
     setHtml("kpi-open-severity-critical-breakdown", buildSeverityBreakdownCriticalHtml(criticalSeverityMap));
-    setText("kpi-data-reliability", fmtPercent((qualityValid / kpiRows.length) * 100));
+    // Same composite index as the Data Reliability panel, scoped to YTD so the two
+    // cards measure the same thing and differ only by period.
+    const ytdIndex = buildDataQualityIndex(kpiRows);
+    const ytdYear = getOverviewYtdYear(rows);
+    setText("kpi-data-reliability", fmtPercent(ytdIndex?.index));
     setText("kpi-invalid-work-orders", fmtNumber(invalidCount));
     setText("kpi-data-review-count", fmtNumber(reviewCount));
-    setText("kpi-data-reliability-sub", `${fmtNumber(qualityValid)} of ${fmtNumber(kpiRows.length)} work order records are valid.`);
+    setText("kpi-data-reliability-sub", `Composite index${ytdYear ? ` — YTD ${ytdYear}` : ""}. ${fmtNumber(qualityValid)} of ${fmtNumber(kpiRows.length)} records carry no import quality flag.`);
 
     renderTopicDataReliabilityPanel();
     syncTopicMirrors();
+}
+
+// ─── Composite Data Quality Index ───────────────────────────────────────────
+// The Data Reliability % on the topic panel is a weighted composite of six
+// quality dimensions rather than the source quality flag alone. The flag on its
+// own misses the reliability problems the maintenance team actually hits:
+// records booked to a general area asset instead of the machine that failed,
+// PM work logged as corrective, odd start/finish timestamps, and a service
+// level scale that is not being segregated. Every dimension scores 0-100 over
+// the rows in the selected period and reports the evidence behind its score, so
+// the footnote under the card can show exactly what moved the number.
+
+// Weights sum to 100. Asset identification carries the most weight because an
+// unidentified asset breaks every downstream per-machine KPI (MTBF, MTTR,
+// spare consumption); the source flag is second because it gates MTTR.
+const DQ_INDEX_WEIGHTS = {
+    validity: 20,
+    asset: 25,
+    workType: 15,
+    timeline: 20,
+    serviceLevel: 12,
+    lifecycle: 8,
+};
+
+// Expected shape of a healthy service-level mix (% of records per level).
+// S1 is meant to be the exception; the bulk of logged work should sit in S3/S4
+// with a real S2 band. Deviation from this profile is what "not segregated"
+// means in practice — everything dumped into one or two levels.
+const DQ_EXPECTED_SERVICE_MIX = { S1: 5, S2: 15, S3: 40, S4: 40 };
+
+// Share of records that should carry a Preventive label before PM labelling is
+// considered trustworthy. Below this the PM/CM split cannot be read.
+const DQ_PREVENTIVE_TARGET_SHARE = 15;
+
+const DQ_MAX_PLAUSIBLE_REPAIR_HOURS = 24 * 30;
+const DQ_MIN_PLAUSIBLE_REPAIR_MINUTES = 1;
+const DQ_START_BEFORE_RAISED_TOLERANCE_HOURS = 1;
+const DQ_STALE_OPEN_DAYS = 90;
+
+// Asset names that describe an area / risk zone rather than a machine.
+const DQ_GENERAL_AREA_PATTERNS = [
+    /\b(low|medium|high)\s*risk\b/i,
+    /\bwork\s*area\b/i,
+    /\bgeneral\b/i,
+    /\bcommon\b/i,
+    /\bmisc(ellaneous)?\b/i,
+    /\bunassigned\b/i,
+    /\bunmapped\b/i,
+    /\bother\b/i,
+];
+
+// Only equipment-scoped records are penalised for an area-level asset: a
+// facility job against "Front Office" is legitimately booked to the room.
+const DQ_EQUIPMENT_CATEGORIES = new Set([
+    "production equipment",
+    "refrigeration",
+    "utilities",
+    "utilities support",
+    "utility",
+]);
+
+function getRowFunctionalLocationText(row) {
+    return String(row?.raw_functional_location || row?.func_loc || row?.functional_location || "").trim();
+}
+
+// Source quality flags with the injected Missing Asset ID flag removed — asset
+// identification is scored as its own dimension and must not count twice.
+function getSourceQualityFlags(row) {
+    return getDataQualityFlags(row).filter((flag) => normalizeClassification(flag) !== "missing asset id");
+}
+
+function hasSourceQualityFlag(row) {
+    const flags = getSourceQualityFlags(row);
+    return flags.some((flag) => flag && flag !== "Valid");
+}
+
+// "Assets mixed into general asset IDs" — the record names an area or risk zone
+// instead of the machine that actually failed.
+function getAssetIdentificationIssue(row) {
+    // The asset is attached when the MR becomes a WO — a New MR still in the
+    // queue is pending, not defective.
+    if (rowHasMissingAssetId(row)) {
+        return isPendingWorkOrderAssignment(row) ? "" : "Missing / placeholder asset ID";
+    }
+    const category = normalizeClassification(row?.equipment_category || row?.machine_group);
+    if (!DQ_EQUIPMENT_CATEGORIES.has(category)) return "";
+    const assetName = getMachineEquipmentName(row);
+    if (DQ_GENERAL_AREA_PATTERNS.some((pattern) => pattern.test(assetName))) return "Booked to a general area asset";
+    if (/^work\s*area$/i.test(getRowFunctionalLocationText(row))) return "Booked to a general area asset";
+    return "";
+}
+
+// PM labelling: a record with no work type at all, or one logged corrective
+// while its own wording describes planned/preventive work.
+function getWorkTypeClassificationIssue(row) {
+    const typeText = getPreventiveCorrectiveTypeText(row);
+    if (!typeText) return "No work type recorded";
+    if (matchPmCmPatterns(typeText, PM_CM_PREVENTIVE_PATTERNS).length) return "";
+    const narrativeMatches = matchPmCmPatterns(getPreventiveCorrectiveNarrativeText(row), PM_CM_PREVENTIVE_PATTERNS);
+    return narrativeMatches.length ? "Corrective record with preventive wording" : "";
+}
+
+function isRowLoggedPreventive(row) {
+    return matchPmCmPatterns(getPreventiveCorrectiveTypeText(row), PM_CM_PREVENTIVE_PATTERNS).length > 0;
+}
+
+// "Start and finish date are wrong / odd" — every timestamp contradiction that
+// makes a record unusable for TTR / SLA.
+function getTimelineIntegrityIssues(row, referenceDate) {
+    // New MRs carry only the intake timestamp; there is no repair timeline to judge.
+    if (isMrNewStatus(getMrStatus(row))) return { issues: [], checked: false };
+    const created = getWorkOrderSlaCreatedDate(row).date;
+    const start = getWorkOrderSlaStartDate(row).date;
+    const end = getWorkOrderSlaEndDate(row).date;
+    const finished = isWorkOrderSlaFinished(getMrStatus(row), row);
+    const issues = [];
+    if (!start && !end && !finished) return { issues, checked: false };
+    if (finished && !start) issues.push("Finished without a start time");
+    if (finished && !end) issues.push("Finished without a finish time");
+    if (start && end && end < start) issues.push("Finish before start");
+    if (created && end && end < created) issues.push("Finish before the request was raised");
+    if (created && start && start < new Date(created.getTime() - DQ_START_BEFORE_RAISED_TOLERANCE_HOURS * 3600000)) {
+        issues.push("Start before the request was raised");
+    }
+    if (start && end && end >= start) {
+        const hours = (end - start) / 3600000;
+        if (hours > DQ_MAX_PLAUSIBLE_REPAIR_HOURS) issues.push("Repair span over 30 days");
+        else if (hours * 60 < DQ_MIN_PLAUSIBLE_REPAIR_MINUTES) issues.push("Repair span under 1 minute");
+    }
+    if (referenceDate instanceof Date) {
+        if (start && start > referenceDate) issues.push("Start time in the future");
+        if (end && end > referenceDate) issues.push("Finish time in the future");
+    }
+    return { issues, checked: true };
+}
+
+function getLifecycleConsistencyIssue(row, referenceDate) {
+    const status = getMrStatus(row);
+    // New MRs are waiting to be picked up — closure hygiene applies once work started.
+    if (isMrNewStatus(status)) return "";
+    const open = isNormalOpenMrStatus(status);
+    if (open && getWorkOrderSlaEndDate(row).date) return "Open record carrying a finish time";
+    if (open && referenceDate instanceof Date) {
+        const raised = getWorkOrderSlaCreatedDate(row).date || getMrRaisedDate(row).date;
+        if (raised && (referenceDate - raised) / 86400000 > DQ_STALE_OPEN_DAYS) {
+            return `Open for more than ${DQ_STALE_OPEN_DAYS} days`;
+        }
+    }
+    return "";
+}
+
+function toIndexScore(good, total) {
+    return total > 0 ? (good / total) * 100 : null;
+}
+
+// Total-variation distance between the observed service-level mix and the
+// expected profile, expressed as a 0-100 score.
+function scoreServiceLevelBalance(mixCounts, gradedTotal) {
+    if (!gradedTotal) return { score: null, shares: {} };
+    const shares = {};
+    let deviation = 0;
+    Object.entries(DQ_EXPECTED_SERVICE_MIX).forEach(([key, expected]) => {
+        const share = ((mixCounts[key] || 0) / gradedTotal) * 100;
+        shares[key] = share;
+        deviation += Math.abs(share - expected);
+    });
+    return { score: Math.max(0, 100 - deviation / 2), shares };
+}
+
+// Builds the composite index for a set of rows. Returns the weighted index plus
+// one entry per dimension carrying its score, weight and supporting counts.
+function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferenceDate()) {
+    const total = rows.length;
+    if (!total) return null;
+
+    let flagged = 0;
+    let assetIssues = 0;
+    let missingAssetId = 0;
+    let generalAreaAsset = 0;
+    let workTypeIssues = 0;
+    let missingWorkType = 0;
+    let preventiveLogged = 0;
+    let timelineChecked = 0;
+    let timelineIssues = 0;
+    const timelineReasons = new Map();
+    let severityUnclassified = 0;
+    const severityMix = {};
+    let lifecycleIssues = 0;
+    let staleOpen = 0;
+    let openWithFinish = 0;
+    let newMrRecords = 0;
+
+    rows.forEach((row) => {
+        if (isMrNewStatus(getMrStatus(row))) newMrRecords += 1;
+        if (hasSourceQualityFlag(row)) flagged += 1;
+
+        const assetIssue = getAssetIdentificationIssue(row);
+        if (assetIssue) {
+            assetIssues += 1;
+            if (assetIssue === "Missing / placeholder asset ID") missingAssetId += 1;
+            else generalAreaAsset += 1;
+        }
+
+        const workTypeIssue = getWorkTypeClassificationIssue(row);
+        if (workTypeIssue) {
+            workTypeIssues += 1;
+            if (workTypeIssue === "No work type recorded") missingWorkType += 1;
+        }
+        if (isRowLoggedPreventive(row)) preventiveLogged += 1;
+
+        const timeline = getTimelineIntegrityIssues(row, referenceDate);
+        if (timeline.checked) {
+            timelineChecked += 1;
+            if (timeline.issues.length) {
+                timelineIssues += 1;
+                timeline.issues.forEach((issue) => timelineReasons.set(issue, (timelineReasons.get(issue) || 0) + 1));
+            }
+        }
+
+        const severity = getWorkOrderSlaSeverity(row);
+        if (!severity || severity.key === WORK_ORDER_SLA_UNCLASSIFIED.key) severityUnclassified += 1;
+        else severityMix[severity.key] = (severityMix[severity.key] || 0) + 1;
+
+        const lifecycleIssue = getLifecycleConsistencyIssue(row, referenceDate);
+        if (lifecycleIssue) {
+            lifecycleIssues += 1;
+            if (lifecycleIssue === "Open record carrying a finish time") openWithFinish += 1;
+            else staleOpen += 1;
+        }
+    });
+
+    const duplicateRows = detectDuplicateWorkOrders(rows).sameDayGroups
+        .reduce((sum, group) => sum + Math.max(0, group.length - 1), 0);
+
+    const gradedTotal = total - severityUnclassified;
+    const balance = scoreServiceLevelBalance(severityMix, gradedTotal);
+    const preventiveShare = (preventiveLogged / total) * 100;
+    const preventiveCoverage = Math.min(100, (preventiveShare / DQ_PREVENTIVE_TARGET_SHARE) * 100);
+    const workTypeLabelScore = toIndexScore(total - workTypeIssues, total);
+    const severityGradedScore = toIndexScore(gradedTotal, total);
+    const lifecycleDefects = Math.min(total, lifecycleIssues + duplicateRows);
+
+    const mixText = Object.keys(DQ_EXPECTED_SERVICE_MIX)
+        .map((key) => `${key} ${fmtPercent(balance.shares[key] ?? 0)}`)
+        .join(" · ");
+    const topTimelineReasons = [...timelineReasons.entries()]
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([reason, count]) => `${reason} (${fmtNumber(count)})`)
+        .join(", ");
+
+    const dimensions = [
+        {
+            key: "validity",
+            label: "Record validity (source flag)",
+            weight: DQ_INDEX_WEIGHTS.validity,
+            score: toIndexScore(total - flagged, total),
+            basis: `${fmtNumber(total - flagged)} of ${fmtNumber(total)} records`,
+            detail: flagged
+                ? `${fmtNumber(flagged)} record${flagged === 1 ? "" : "s"} carry an import data-quality flag. Missing asset IDs are scored under Asset identification instead of here, so this count is lower than the Invalid Work Orders card.`
+                : "No record carries an import data-quality flag.",
+        },
+        {
+            key: "asset",
+            label: "Asset identification",
+            weight: DQ_INDEX_WEIGHTS.asset,
+            score: toIndexScore(total - assetIssues, total),
+            basis: `${fmtNumber(total - assetIssues)} of ${fmtNumber(total)} records`,
+            detail: assetIssues
+                ? `${fmtNumber(generalAreaAsset)} booked to a general area / risk-zone asset instead of a dedicated asset ID, ${fmtNumber(missingAssetId)} with a missing or placeholder asset ID.`
+                : "Every record is booked to a dedicated asset ID.",
+        },
+        {
+            key: "workType",
+            label: "Work-type classification (PM vs CM)",
+            weight: DQ_INDEX_WEIGHTS.workType,
+            // Half the score is per-record labelling, half is whether PM work is
+            // being labelled at all — a month with no PM label is not credible.
+            score: workTypeLabelScore === null ? null : (workTypeLabelScore * 0.5) + (preventiveCoverage * 0.5),
+            basis: `${fmtNumber(preventiveLogged)} preventive of ${fmtNumber(total)} records`,
+            detail: `${fmtPercent(preventiveShare)} logged preventive against a ${fmtPercent(DQ_PREVENTIVE_TARGET_SHARE)} expectation; ${fmtNumber(workTypeIssues - missingWorkType)} corrective record${workTypeIssues - missingWorkType === 1 ? "" : "s"} use preventive wording, ${fmtNumber(missingWorkType)} carry no work type.`,
+        },
+        {
+            key: "timeline",
+            label: "Start / finish timeline integrity",
+            weight: DQ_INDEX_WEIGHTS.timeline,
+            score: toIndexScore(timelineChecked - timelineIssues, timelineChecked),
+            basis: `${fmtNumber(timelineChecked - timelineIssues)} of ${fmtNumber(timelineChecked)} dated records`,
+            detail: timelineIssues
+                ? `${fmtNumber(timelineIssues)} record${timelineIssues === 1 ? "" : "s"} with an odd timeline — ${topTimelineReasons}.`
+                : "No inverted, missing, or implausible start/finish times.",
+        },
+        {
+            key: "serviceLevel",
+            label: "Service-level segregation",
+            weight: DQ_INDEX_WEIGHTS.serviceLevel,
+            // 40% for grading the record at all, 60% for using the scale properly.
+            score: balance.score === null
+                ? severityGradedScore
+                : (severityGradedScore * 0.4) + (balance.score * 0.6),
+            basis: `${fmtNumber(gradedTotal)} of ${fmtNumber(total)} records graded`,
+            detail: gradedTotal
+                ? `Logged mix ${mixText} against an expected ${Object.entries(DQ_EXPECTED_SERVICE_MIX).map(([key, value]) => `${key} ${fmtPercent(value)}`).join(" · ")}. ${fmtNumber(severityUnclassified)} unclassified.`
+                : `No record carries a usable service level.`,
+        },
+        {
+            key: "lifecycle",
+            label: "Lifecycle & duplicates",
+            weight: DQ_INDEX_WEIGHTS.lifecycle,
+            score: toIndexScore(total - lifecycleDefects, total),
+            basis: `${fmtNumber(total - lifecycleDefects)} of ${fmtNumber(total)} records`,
+            detail: lifecycleDefects
+                ? `${fmtNumber(duplicateRows)} duplicate entr${duplicateRows === 1 ? "y" : "ies"}, ${fmtNumber(openWithFinish)} open record${openWithFinish === 1 ? "" : "s"} carrying a finish time, ${fmtNumber(staleOpen)} open beyond ${DQ_STALE_OPEN_DAYS} days.`
+                : "No duplicates or open/closed contradictions.",
+        },
+    ];
+
+    const scored = dimensions.filter((dimension) => dimension.score !== null);
+    const weightTotal = scored.reduce((sum, dimension) => sum + dimension.weight, 0);
+    const index = weightTotal
+        ? scored.reduce((sum, dimension) => sum + (dimension.score * dimension.weight), 0) / weightTotal
+        : null;
+
+    return {
+        index,
+        total,
+        dimensions,
+        counts: {
+            newMrRecords,
+            flagged,
+            assetIssues,
+            generalAreaAsset,
+            missingAssetId,
+            workTypeIssues,
+            preventiveLogged,
+            timelineChecked,
+            timelineIssues,
+            severityUnclassified,
+            duplicateRows,
+            lifecycleIssues,
+        },
+    };
+}
+
+// Human label for a Data Reliability scope.
+function getTopicReliabilityPeriodLabel(scope = getTopicReliabilityScope()) {
+    const { year, month, mode } = scope || {};
+    const monthLabel = month ? MR_MONTH_LABELS[Number(month) - 1] || "" : "";
+    if (mode === "ytd") return year ? `YTD ${year}` : "Year to date";
+    if (mode === "year" && year) return `${year} (full year)`;
+    if (year && monthLabel) return `${monthLabel} ${year}`;
+    if (year) return `${year} (all months)`;
+    if (monthLabel) return `${monthLabel} (all years)`;
+    return "All periods";
+}
+
+// Previous comparable scope: previous month when a month is selected, the same
+// scope a year earlier otherwise. Returns null when there is nothing to compare.
+function getTopicReliabilityPreviousScope(scope = getTopicReliabilityScope()) {
+    const { year, month, mode } = scope || {};
+    if (!year) return null;
+    if (mode === "ytd") return { year: String(Number(year) - 1), month: "", mode: "year" };
+    if (month) {
+        const monthNumber = Number(month);
+        if (monthNumber === 1) return { year: String(Number(year) - 1), month: "12", mode: "month" };
+        return { year, month: String(monthNumber - 1).padStart(2, "0"), mode: "month" };
+    }
+    return { year: String(Number(year) - 1), month: "", mode: "year" };
+}
+
+function getDataQualityIndexTone(score) {
+    if (score === null || score === undefined) return "";
+    if (score >= 85) return "good";
+    if (score >= 70) return "warn";
+    return "bad";
+}
+
+// Index breakdown card under View Analysis: what each dimension scored for the
+// selected scope and what the score is built from.
+function renderDataQualityIndexBreakdown(model, periodLabel, previous) {
+    const host = document.getElementById("data-reliability-index-breakdown");
+    if (!host) return;
+    if (!model) {
+        host.innerHTML = `
+            <div class="card-title">Data Reliability Index Breakdown</div>
+            <p class="dq-breakdown-lead">No work order records in the selected scope.</p>`;
+        return;
+    }
+
+    const deltaHtml = previous && previous.index !== null && model.index !== null
+        ? (() => {
+            const delta = model.index - previous.index;
+            const tone = delta >= 0 ? "up" : "down";
+            const sign = delta >= 0 ? "+" : "−";
+            return `<span class="dq-breakdown-delta ${tone}">${sign}${Math.abs(delta).toFixed(1)} pts vs ${escapeHtml(previous.label)} (${escapeHtml(fmtPercent(previous.index))})</span>`;
+        })()
+        : `<span class="dq-breakdown-delta neutral">No comparable earlier period loaded.</span>`;
+
+    const rows = model.dimensions.map((dimension) => `
+        <tr>
+            <td>
+                <div class="dq-dim-label">${escapeHtml(dimension.label)}</div>
+                <div class="dq-dim-detail">${escapeHtml(dimension.detail)}</div>
+            </td>
+            <td class="dq-dim-weight">${escapeHtml(fmtPercent(dimension.weight))}</td>
+            <td class="dq-dim-score">
+                <span class="dq-score-value ${escapeHtml(getDataQualityIndexTone(dimension.score))}">${escapeHtml(dimension.score === null ? "N/A" : fmtPercent(dimension.score))}</span>
+                <span class="dq-dim-basis">${escapeHtml(dimension.basis)}</span>
+            </td>
+        </tr>`).join("");
+
+    host.innerHTML = `
+        <div class="card-title">Data Reliability Index Breakdown</div>
+        <p class="dq-breakdown-lead">
+            <strong>${escapeHtml(periodLabel)}</strong> — ${escapeHtml(fmtNumber(model.total))} work order record${model.total === 1 ? "" : "s"} raised in this period.
+            The index is the weighted average of the six dimensions below, not the import flag alone. ${deltaHtml}
+        </p>
+        <div class="table-wrapper dq-breakdown-table-wrap">
+            <table class="dq-breakdown-table">
+                <thead>
+                    <tr><th>Quality dimension</th><th>Weight</th><th>Score for ${escapeHtml(periodLabel)}</th></tr>
+                </thead>
+                <tbody>${rows}</tbody>
+            </table>
+        </div>
+        <p class="dq-breakdown-note">
+            New MRs still awaiting a work order (${escapeHtml(fmtNumber(model.counts.newMrRecords))} in this period) are not counted as
+            defects for asset assignment, repair timeline, or closure — those are attached when the WO is raised — but they are still
+            scored on how they were raised (service level, work type, area vs dedicated asset, double entries).
+            Timeline integrity is otherwise scored over records that carry a start, finish, or closed status, so a period with many still-open
+            records is judged on fewer dated records than its total. Service-level segregation compares the logged S1–S4 mix with an
+            expected ${escapeHtml(Object.entries(DQ_EXPECTED_SERVICE_MIX).map(([key, value]) => `${key} ${value}%`).join(" · "))} profile;
+            work-type classification expects at least ${escapeHtml(fmtPercent(DQ_PREVENTIVE_TARGET_SHARE))} of records to be labelled preventive.
+        </p>`;
 }
 
 // Renders the dedicated Data Reliability topic panel with its own year/month scope.
@@ -2748,12 +3243,15 @@ function renderDowntimeOverviewFromRows(rows = []) {
 // with the YTD values mirrored from the top strip.
 function renderTopicDataReliabilityPanel() {
     const rows = downtimeOverviewRowsCache || [];
-    const scoped = filterOverviewRowsByDate(rows, topicReliabilityYearFilter, topicReliabilityMonthFilter);
+    syncTopicReliabilityScopeControls();
+    const scope = getTopicReliabilityScope();
+    const scoped = filterOverviewRowsByDate(rows, scope.year, scope.month);
     if (!scoped.length) {
         setText("topic-data-reliability-pct", "--");
         setText("topic-data-reliability-sub", "No work order records in the selected scope.");
         setText("topic-invalid-work-orders", "--");
         setText("topic-data-review-count", "--");
+        renderDataQualityIndexBreakdown(null, getTopicReliabilityPeriodLabel(scope));
         renderDataReliabilityActionList([]);
         renderAliasMappingReview();
         renderDataReliabilityHistoryTable([]);
@@ -2769,10 +3267,25 @@ function renderTopicDataReliabilityPanel() {
         }
         return getDataQualityFlags(row).some((flag) => flag === "Review status") || getAcknowledgementStatus(row) === "Review";
     }).length;
-    setText("topic-data-reliability-pct", fmtPercent((qualityValid / scoped.length) * 100));
+    const referenceDate = getWorkOrderSlaReferenceDate();
+    const indexModel = buildDataQualityIndex(scoped, referenceDate);
+    const periodLabel = getTopicReliabilityPeriodLabel(scope);
+    const previousScope = getTopicReliabilityPreviousScope(scope);
+    const previousModel = previousScope
+        ? buildDataQualityIndex(filterOverviewRowsByDate(rows, previousScope.year, previousScope.month), referenceDate)
+        : null;
+
+    setText("topic-data-reliability-pct", fmtPercent(indexModel?.index));
     setText("topic-invalid-work-orders", fmtNumber(invalidCount));
     setText("topic-data-review-count", fmtNumber(reviewCount));
-    setText("topic-data-reliability-sub", `${fmtNumber(qualityValid)} of ${fmtNumber(scoped.length)} work order records are valid.`);
+    setText("topic-data-reliability-sub", `Composite of 6 weighted dimensions for ${periodLabel}. ${fmtNumber(qualityValid)} of ${fmtNumber(scoped.length)} records carry no import quality flag.`);
+    renderDataQualityIndexBreakdown(
+        indexModel,
+        periodLabel,
+        previousModel
+            ? { index: previousModel.index, label: getTopicReliabilityPeriodLabel(previousScope) }
+            : null
+    );
     renderDataReliabilityActionList(buildWorkOrderSlaModel(scoped, getWorkOrderSlaReferenceDate()).entries);
     renderAliasMappingReview();
     renderDataReliabilityHistoryTable(scoped);
@@ -5854,8 +6367,10 @@ function aliasReviewStatusKey(rowOrStatus) {
 }
 
 function aliasReviewMatchesTopicScope(row) {
-    const year = String(topicReliabilityYearFilter || "").trim();
-    const month = String(topicReliabilityMonthFilter || "").trim();
+    // Follows the panel scope, including YTD view.
+    const scope = getTopicReliabilityScope();
+    const year = String(scope.year || "").trim();
+    const month = String(scope.month || "").trim();
     if (!year && !month) return true;
     const dt = parseDateValue(row?.actual_start || row?.actual_start_time || row?.actual_end || row?.actual_end_time || row?.created_date || row?.request_created_time);
     if (!dt) return false;
@@ -6176,11 +6691,15 @@ function populateMachineExplorerFilters(rows = []) {
 
     const assetSelect = document.getElementById("machine-explorer-asset");
     if (assetSelect) {
-        const previous = assetSelect.value;
-        assetSelect.innerHTML = `<option value="">All Assets</option>` + machineOptions.map((item) => (
+        const previous = machineExplorerSelectedAssetId || assetSelect.value;
+        let optionsHtml = `<option value="">All Assets</option>` + machineOptions.map((item) => (
             `<option value="${escapeHtml(item.assetId)}">${escapeHtml(item.assetId)}</option>`
         )).join("");
-        assetSelect.value = machineOptions.some((item) => item.assetId === previous) ? previous : "";
+        if (previous && assetProfiles?.[previous] && !machineOptions.some((item) => item.assetId === previous)) {
+            optionsHtml += `<option value="${escapeHtml(previous)}">${escapeHtml(previous)}</option>`;
+        }
+        assetSelect.innerHTML = optionsHtml;
+        assetSelect.value = Array.from(assetSelect.options).some((item) => item.value === previous) ? previous : "";
     }
 
     const raisedDates = rows
@@ -7423,6 +7942,17 @@ function renderMachineExplorer(rows = []) {
 
     // Stub so the standard history panel can still show context for a refrig asset with no WO/MR records.
     const allAssetRows = [...assetRows];
+    const selectedProfile = machineExplorerSelectedAssetId ? assetProfiles?.[machineExplorerSelectedAssetId] : null;
+    if (machineExplorerSelectedAssetId && selectedProfile
+        && !allAssetRows.some((row) => row.assetId === machineExplorerSelectedAssetId)) {
+        allAssetRows.push({
+            assetId: machineExplorerSelectedAssetId,
+            name: selectedProfile.canonicalName || machineExplorerSelectedAssetId,
+            criticality: "Unknown",
+            machineGroup: selectedProfile.machineGroup || "Unknown",
+            rows: [],
+        });
+    }
     if (machineExplorerSelectedGroup === "Refrigeration" && machineExplorerSelectedAssetId
         && machineExplorerRefrigSubgroup !== "condenser-evaporator") {
         if (!assetRows.some((r) => r.assetId === machineExplorerSelectedAssetId)) {
@@ -9970,6 +10500,10 @@ function wireFilters() {
     document.getElementById("refresh-asset-mapping-btn")?.addEventListener("click", handleAssetMappingRefresh);
 
     // Topic-panel scoped filters — only the dedicated panels respect these.
+    document.getElementById("topic-reliability-view-filter")?.addEventListener("change", (event) => {
+        topicReliabilityViewMode = event.target.value === "ytd" ? "ytd" : "month";
+        renderTopicDataReliabilityPanel();
+    });
     document.getElementById("topic-reliability-year-filter")?.addEventListener("change", (event) => {
         topicReliabilityYearFilter = event.target.value || "";
         renderTopicDataReliabilityPanel();
@@ -11146,6 +11680,7 @@ async function loadAssetList() {
         assetListLoaded = true;
         assetListLoadFailed = false;
         renderMachineNameList();
+        if (equipmentLoadingDeepLinkContext) applyEquipmentLoadingDeepLink(equipmentLoadingDeepLinkContext);
         renderActivityStatusCharts();
         if (openWorkOrdersData.length) renderCurrentDowntimeKpi();
         // Re-render MTBF and KDI views once Asset Master has arrived so per-asset
@@ -12364,12 +12899,97 @@ async function _runExport(btn) {
 
 // ─────────────────────────────────────────────────────────────────────
 
+let equipmentLoadingDeepLinkContext = null;
+
+function readEquipmentLoadingDeepLink() {
+    const params = new URLSearchParams(window.location.search);
+    const requested = ["asset_id", "from", "to", "stage", "return_url"].some((key) => params.has(key));
+    if (!requested) return null;
+    const warnings = [];
+    const isoDate = /^\d{4}-\d{2}-\d{2}$/;
+    const assetId = String(params.get("asset_id") || "").trim().toUpperCase();
+    const from = String(params.get("from") || "").trim();
+    const to = String(params.get("to") || "").trim();
+    const rawStage = String(params.get("stage") || "").trim();
+    const stage = rawStage === "1" || rawStage.toLowerCase() === "stage 1" ? "Stage 1"
+        : rawStage === "2" || rawStage.toLowerCase() === "stage 2" ? "Stage 2" : "";
+    if (assetId && !/^[A-Z0-9][A-Z0-9._-]{1,63}$/.test(assetId)) warnings.push("The Asset ID was ignored because its format is invalid.");
+    const validAssetId = /^[A-Z0-9][A-Z0-9._-]{1,63}$/.test(assetId) ? assetId : "";
+    let validDates = isoDate.test(from) && isoDate.test(to) && from <= to;
+    if ((from || to) && !validDates) warnings.push("The requested date range was ignored because it is invalid.");
+    if (rawStage && !stage) warnings.push("The requested production stage was ignored because it is invalid.");
+    const periodSelect = document.getElementById("period-select");
+    if (validDates) {
+        if (periodSelect) periodSelect.value = "custom";
+        const startInput = document.getElementById("custom-start");
+        const endInput = document.getElementById("custom-end");
+        if (startInput) startInput.value = from;
+        if (endInput) endInput.value = to;
+    }
+    if (stage) {
+        const stageSelect = document.getElementById("downtime-stage-filter");
+        if (stageSelect) stageSelect.value = stage;
+    }
+    return { assetId: validAssetId, from: validDates ? from : "", to: validDates ? to : "", stage, warnings };
+}
+
+function showEquipmentLoadingDeepLinkNotice(context) {
+    const notice = document.getElementById("equipment-link-notice");
+    if (!notice || !context) return;
+    const applied = [
+        context.assetId ? `Asset ${context.assetId}` : "",
+        context.from && context.to ? `${context.from} to ${context.to}` : "",
+        context.stage || "",
+    ].filter(Boolean).join(" · ");
+    const suffix = context.warnings.length ? ` ${context.warnings.join(" ")}` : "";
+    notice.textContent = `Opened from Equipment Loading & Capacity.${applied ? ` ${applied}.` : ""}${suffix}`;
+    notice.classList.remove("hidden");
+    notice.classList.toggle("is-warning", context.warnings.length > 0);
+}
+
+function applyEquipmentLoadingDeepLink(context) {
+    if (!context) return;
+    const rows = getCategoryScopedAllRows();
+    const profileIds = Object.keys(assetProfiles || {}).map((value) => String(value).trim().toUpperCase());
+    const accessible = context.assetId && (
+        profileIds.includes(context.assetId) || rows.some((row) =>
+            String(getMachineAssetId(row) || "").trim().toUpperCase() === context.assetId
+        )
+    );
+    if (context.assetId && accessible) {
+        machineExplorerSelectedGroup = MACHINE_EXPLORER_ALL_GROUP;
+        machineExplorerSelectedAssetId = context.assetId;
+        const assetSelect = document.getElementById("machine-explorer-asset");
+        const machineSelect = document.getElementById("machine-name-select");
+        if (assetSelect && !Array.from(assetSelect.options).some((option) => option.value === context.assetId)) {
+            assetSelect.add(new Option(context.assetId, context.assetId));
+        }
+        if (assetSelect) {
+            assetSelect.value = context.assetId;
+        }
+        if (machineSelect && !Array.from(machineSelect.options).some((option) => option.value === context.assetId)) {
+            machineSelect.add(new Option(context.assetId, context.assetId));
+        }
+        if (machineSelect) {
+            machineSelect.value = context.assetId;
+        }
+        setPerformanceView("utilities");
+        if (rows.length) renderMachineExplorer(rows);
+    } else if (context.assetId && assetListLoaded && !context.warnings.includes("The requested asset is unavailable or is not accessible to this user.")) {
+        context.warnings.push("The requested asset is unavailable or is not accessible to this user.");
+    }
+    showEquipmentLoadingDeepLinkNotice(context);
+}
+
 async function init() {
     wireDashboardTopicControls();
     wireFilters();
     wireInactiveCriticalMachineDrawer();
     setSummaryView("criticality");
     setPerformanceView("utilities");
+    const equipmentLink = readEquipmentLoadingDeepLink();
+    equipmentLoadingDeepLinkContext = equipmentLink;
+    showEquipmentLoadingDeepLinkNotice(equipmentLink);
     const period = document.getElementById("period-select")?.value || "ytd";
     const stageSelect = document.getElementById("downtime-stage-filter");
     if (stageSelect) downtimeStageFilter = stageSelect.value || DOWNTIME_STAGE_ALL;
@@ -12402,7 +13022,12 @@ async function init() {
 
     try {
         await Promise.all([
-            loadDowntimeCacheFile().then(() => loadDowntimeData(period, "")).catch((error) => {
+            loadDowntimeCacheFile().then(() => loadDowntimeData(
+                period,
+                "",
+                period === "custom" ? (document.getElementById("custom-start")?.value || "") : "",
+                period === "custom" ? (document.getElementById("custom-end")?.value || "") : ""
+            )).catch((error) => {
                 console.error("Downtime page load error:", error);
                 renderAlerts([{ level: "critical", message: "Downtime data could not be loaded from the current imported work order source." }]);
             }),
@@ -12414,6 +13039,8 @@ async function init() {
         console.error("Downtime page load error:", error);
         renderAlerts([{ level: "critical", message: "Downtime data could not be loaded from the current imported work order source." }]);
     }
+
+    applyEquipmentLoadingDeepLink(equipmentLink);
 
     // Wire the "Repair PBI Flags" button in the data quality card.
     const repairPbiFlagsBtn = document.getElementById("repair-pbi-flags-btn");
