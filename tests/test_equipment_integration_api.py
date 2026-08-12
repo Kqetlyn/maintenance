@@ -1,3 +1,4 @@
+import datetime as dt
 import os
 import sys
 from pathlib import Path
@@ -9,6 +10,7 @@ BACKEND = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND))
 
 from app import app  # noqa: E402
+from equipment_integration_api import _work_orders_raised_in_last_days  # noqa: E402
 
 
 @pytest.fixture()
@@ -22,6 +24,22 @@ def client(monkeypatch):
 
 def headers(token="test-service-token", caller="production-equipment-loading"):
     return {"Authorization": f"Bearer {token}", "X-Caller-ID": caller}
+
+
+def test_work_orders_raised_uses_an_inclusive_rolling_30_day_window():
+    rows = [
+        {"request_created_time": "2026-07-13T00:00:00"},
+        {"request_created_time": "2026-08-11T23:59:59"},
+        {"request_created_time": "2026-07-12T23:59:59"},
+        {"request_created_time": "2026-08-12T00:00:00"},
+        {"request_created_time": None, "actual_start_time": "2026-08-01T08:00:00"},
+    ]
+
+    count, start, end = _work_orders_raised_in_last_days(rows, as_of=dt.date(2026, 8, 11))
+
+    assert count == 2
+    assert start.isoformat() == "2026-07-13"
+    assert end.isoformat() == "2026-08-11"
 
 
 def test_missing_authentication_is_401(client):

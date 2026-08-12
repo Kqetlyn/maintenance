@@ -137,11 +137,12 @@ SLA_TARGETS_SHEET = "SLA_Targets"
 STAGE_FILTER_OPTIONS = ["Stage 1", "Stage 2", "Unmapped", "Missing Asset ID", "Needs Stage Review"]
 
 # ── Stage text-detection (explicit "Stage 1" / "Stage 2" in work order fields) ─────────
-# Require the word "stage" + digit so standalone severity codes "S1" / "S2" never match.
-# Patterns cover: "Stage 2", "Stage2", "STAGE 2", "Stage-2", "Stage 2 Gemba Walk",
-#                 "Gemba Walk Stage 2", etc.
-_STAGE2_TEXT_RE = re.compile(r"\bstage[\s_-]*2\b", re.IGNORECASE)
-_STAGE1_TEXT_RE = re.compile(r"\bstage[\s_-]*1\b", re.IGNORECASE)
+# Require either the word "stage" or the shop-floor abbreviation "ST." + digit,
+# so standalone severity codes "S1" / "S2" never match. Some imported descriptions
+# join the marker directly to the previous word (for example "allergenST.2"), so the
+# dotted abbreviation deliberately does not require a leading word boundary.
+_STAGE2_TEXT_RE = re.compile(r"(?:\bstage[\s_.-]*2\b|st\.\s*2\b)", re.IGNORECASE)
+_STAGE1_TEXT_RE = re.compile(r"(?:\bstage[\s_.-]*1\b|st\.\s*1\b)", re.IGNORECASE)
 
 # Fields scanned for explicit stage text.  Severity/priority fields are intentionally
 # excluded to prevent "S2" severity from being misread as Stage 2.
@@ -1092,14 +1093,12 @@ def _stage2_by_functional_location(row) -> bool:
 
 
 def retag_stage2_by_functional_location() -> dict:
-    """Re-tag already-imported work orders as Stage 2 when their functional location
-    belongs exclusively to Stage 2 assets and their stored stage isn't a confident
-    Stage 1/2. Keeps existing SQL data consistent with the import-time rule without
-    forcing a re-import. Returns {"updated": int}.
+    """Re-tag already-imported work orders as Stage 2 when their text explicitly
+    contains a Stage 2 marker or their functional location belongs exclusively to
+    Stage 2 assets. Keeps existing SQL data consistent with the import-time rules
+    without forcing a re-import. Returns {"updated": int}.
     """
     stage2_locs = get_stage2_functional_locations()
-    if not stage2_locs:
-        return {"updated": 0}
     try:
         import db as _db
         unconfident = tuple(s for s in _STAGE_UNCONFIDENT if s)
@@ -1107,16 +1106,22 @@ def retag_stage2_by_functional_location() -> dict:
         with _db.get_connection() as conn:
             rows = conn.execute(
                 f"""
-                SELECT id, functional_location
+                SELECT id, functional_location, description, asset_name, machine_group, trade
                 FROM work_orders
                 WHERE (stage IS NULL OR stage IN ({placeholders}))
-                  AND functional_location IS NOT NULL AND TRIM(functional_location) != ''
                 """,
                 unconfident,
             ).fetchall()
             ids = [
                 r["id"] for r in rows
-                if _normalize_func_loc(r["functional_location"]) in stage2_locs
+                if detect_stage_from_text({
+                    "raw_functional_location": r["functional_location"],
+                    "description": r["description"],
+                    "machine_name": r["asset_name"],
+                    "machine_group": r["machine_group"],
+                    "job_trade": r["trade"],
+                }) == "Stage 2"
+                or _normalize_func_loc(r["functional_location"]) in stage2_locs
             ]
             for chunk_start in range(0, len(ids), 500):
                 chunk = ids[chunk_start:chunk_start + 500]
@@ -1149,7 +1154,7 @@ def detect_stage_from_text(row):
 
     Scans description, location, functional location, machine name, and related text
     fields.  Severity/priority fields are deliberately excluded so that an "S2 severity"
-    code is never mistaken for Stage 2.  Only the word "stage" followed by 1 or 2 (with
+    code is never mistaken for Stage 2. Accepted forms include "stage" plus 1 or 2, or
     optional separator) is accepted — e.g. "Stage 2 Gemba Walk", "Gemba Walk Stage 2",
     "Stage-1", "Stage1", "STAGE 2".
     """

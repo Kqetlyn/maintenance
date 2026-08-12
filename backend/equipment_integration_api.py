@@ -27,6 +27,7 @@ _LOG.setLevel(logging.INFO)
 _ASSET_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,63}$")
 _FALSE_VALUES = {"0", "false", "no", "off"}
 _PLACEHOLDER_TOKEN_PREFIXES = ("replace-with", "your_", "changeme")
+WO_RAISED_WINDOW_DAYS = 30
 
 
 def _truthy(value, default=False):
@@ -155,6 +156,18 @@ def _in_period(row, start, end):
     return bool(event and start <= event.date() <= end)
 
 
+def _work_orders_raised_in_last_days(rows, as_of=None, days=WO_RAISED_WINDOW_DAYS):
+    """Count work orders by their raised date over an inclusive rolling window."""
+    end = as_of or dt.date.today()
+    start = end - dt.timedelta(days=days - 1)
+    count = 0
+    for row in rows:
+        raised = _parse_datetime(row.get("request_created_time"))
+        if raised and start <= raised.date() <= end:
+            count += 1
+    return count, start, end
+
+
 def _source_through(source_payload, records):
     values = [_event_datetime(row) for row in records]
     latest = max((value for value in values if value), default=None)
@@ -221,8 +234,10 @@ def _asset_summary(asset, all_rows, period_rows, start, end, pm):
     last_completed = max((value for value, _row in completed if value), default=None)
     last_breakdown = max((_event_datetime(row) for row in corrective if _event_datetime(row)), default=None)
     invalid_count = sum(1 for row in period_rows if str(row.get("data_quality_flag") or "").strip().lower() != "valid")
+    raised_30d, raised_from, raised_to = _work_orders_raised_in_last_days(all_rows)
     notes = [
         "open_work_orders is current across the owned work-order source; period counts use the requested dates.",
+        "work_orders_raised_30d uses the work-order raised date over the latest inclusive 30 calendar days.",
         "asset_status is unavailable because work-order evidence is not an operating-state field.",
     ]
     if mttr is None:
@@ -240,6 +255,10 @@ def _asset_summary(asset, all_rows, period_rows, start, end, pm):
         "corrective_work_orders": len(corrective),
         "preventive_work_orders": len(preventive),
         "selected_period_work_orders": len(period_rows),
+        "work_orders_raised_30d": raised_30d,
+        "work_orders_raised_window": {
+            "from": raised_from.isoformat(), "to": raised_to.isoformat(), "days": WO_RAISED_WINDOW_DAYS,
+        },
         "mttr_hours": round(float(mttr), 3) if mttr is not None else None,
         "mtbf_days": mtbf_days,
         "last_breakdown_at": last_breakdown.isoformat() if last_breakdown else None,
