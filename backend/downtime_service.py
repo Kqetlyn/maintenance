@@ -52,7 +52,7 @@ _DOWNTIME_CACHE = {}
 _WO_LOAD_CACHE = {"sig": None, "payload": None}
 # Keyed by normalised stage string; cleared by import_work_order_file().
 _SQL_WO_CACHE: dict = {}
-DOWNTIME_CACHE_VERSION = "2026-06-18-stage-text-detection"
+DOWNTIME_CACHE_VERSION = "2026-08-13-open-wo-data-reliability"
 # Stores the most recent import result so the frontend can poll it after upload.
 _LAST_IMPORT_STATS: dict = {}
 _WORK_ORDER_IMPORT_COMPLETION_CALLBACKS: list = []
@@ -278,6 +278,18 @@ def _infer_criticality_from_category(category: str, machine_group: str) -> str:
     return CRITICALITY_NON_CRITICAL
 
 
+_OPEN_WO_END_PLACEHOLDER_DATES = {"0001-01-01", "1899-12-30", "1900-01-01", "1970-01-01"}
+
+
+def _is_open_wo_end_date(end_dt) -> bool:
+    if not end_dt:
+        return True
+    try:
+        return end_dt.date().isoformat() in _OPEN_WO_END_PLACEHOLDER_DATES
+    except (AttributeError, ValueError):
+        return False
+
+
 def _pbi_derive_quality_flags(is_finished: bool, is_open: bool, start_dt, end_dt) -> list[str]:
     """
     Re-evaluate quality flags for Power BI source records.
@@ -285,10 +297,11 @@ def _pbi_derive_quality_flags(is_finished: bool, is_open: bool, start_dt, end_dt
     and SLA-related checks are skipped.
     """
     if is_finished:
+        # No end (including D365 sentinel dates) means Open WO, not bad data.
+        if _is_open_wo_end_date(end_dt):
+            return ["Valid"]
         if not start_dt:
             return ["Missing start date for finished MR"]
-        if not end_dt:
-            return ["Missing finished date for finished MR"]
         if end_dt < start_dt:
             return ["Finished date before start date"]
         return ["Valid"]
@@ -1184,7 +1197,35 @@ def resolve_work_order_stage(row):
       - original asset_id, mappedStage, mapping status, and the text fields that triggered
         the decision — useful for validating classification without changing production output.
     """
+    asset_stage = _asset_mapped_stage(row)
+    mapped_group = str(
+        row.get("mappedMainAssetGroup")
+        or row.get("mapped_main_asset_group")
+        or row.get("machine_group")
+        or ""
+    ).strip()
     text_stage = detect_stage_from_text(row)
+
+    # Facility/building assets use the Asset Master's stage as the authority.
+    # A description can mention the physical work area (for example
+    # "Warehouse Stage 2") without changing ownership of a Stage 1 facility
+    # asset. This prevents Store Office (ENWA-240004) from leaking into the
+    # Stage 2 equipment scope while preserving text overrides for production
+    # assets whose request genuinely names another stage.
+    if (
+        mapped_group == "Facility / Building"
+        and asset_stage in {"Stage 1", "Stage 2"}
+        and text_stage in {"Stage 1", "Stage 2"}
+        and text_stage != asset_stage
+    ):
+        _log.debug(
+            "resolve_stage=%s [facility asset-master lock] | asset_id=%s | text_stage=%s",
+            asset_stage,
+            row.get("asset_id") or row.get("machine_code"),
+            text_stage,
+        )
+        return asset_stage
+
     if text_stage is not None:
         _log.debug(
             "resolve_stage=%s [text-detected] | asset_id=%s | mappedStage=%s | text_fields=%s",
@@ -1194,8 +1235,6 @@ def resolve_work_order_stage(row):
             {f: row[f] for f in _STAGE_TEXT_FIELDS if row.get(f)},
         )
         return text_stage
-
-    asset_stage = _asset_mapped_stage(row)
 
     # Functional-location capture: a work order that isn't confidently mapped to a
     # stage, but whose functional location belongs exclusively to Stage 2 assets,
@@ -1765,13 +1804,14 @@ def build_work_order_quality_flags(
     if has_real_created_date and not request_created_time:
         flags.append("Missing raised date")
     if is_finished_lifecycle(status):
-        if not actual_start_time:
+        # Blank/sentinel Actual End is an operationally Open WO. Date checks
+        # begin only once a genuine end value is present.
+        end_is_open = _is_open_wo_end_date(actual_end_time) and not actual_end_invalid
+        if not end_is_open and not actual_start_time:
             flags.append("Missing start date for finished MR")
-        if not actual_end_time:
-            flags.append("Missing finished date for finished MR")
-        if actual_start_time and actual_end_time and actual_end_time < actual_start_time:
+        if not end_is_open and actual_start_time and actual_end_time and actual_end_time < actual_start_time:
             flags.append("Finished date before start date")
-        if has_real_created_date and request_created_time and actual_end_time and actual_end_time < request_created_time:
+        if not end_is_open and has_real_created_date and request_created_time and actual_end_time and actual_end_time < request_created_time:
             flags.append("Finished date before raised date")
     elif is_new_lifecycle(status) or is_in_progress_lifecycle(status):
         if has_present_value(actual_end_raw) and actual_end_time:

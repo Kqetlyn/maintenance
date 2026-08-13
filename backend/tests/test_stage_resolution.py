@@ -24,6 +24,30 @@ def test_severity_s2_is_not_mistaken_for_stage_2():
     assert downtime.detect_stage_from_text({"description": "S2 severity electrical repair"}) is None
 
 
+def test_facility_asset_keeps_asset_master_stage_when_description_names_another_stage():
+    row = {
+        "asset_id": "ENWA-240004",
+        "mappedStage": "Stage 1",
+        "mappingStatus": "Mapped",
+        "mappedMainAssetGroup": "Facility / Building",
+        "description": "Install first aid holder in Warehouse Stage 2",
+    }
+
+    assert downtime.resolve_work_order_stage(row) == "Stage 1"
+
+
+def test_production_asset_can_still_use_an_explicit_stage_text_override():
+    row = {
+        "asset_id": "ENWA-240008",
+        "mappedStage": "Stage 1",
+        "mappingStatus": "Mapped",
+        "mappedMainAssetGroup": "Production Equipment",
+        "description": "Production repair in Stage 2",
+    }
+
+    assert downtime.resolve_work_order_stage(row) == "Stage 2"
+
+
 def test_existing_unmapped_st2_record_is_retagged(monkeypatch):
     class FakeRows(list):
         def fetchall(self):

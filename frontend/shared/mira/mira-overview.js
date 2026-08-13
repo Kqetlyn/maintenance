@@ -603,8 +603,12 @@
     let predictiveAbort = null;
     let predictiveCategoryView = "Production Equipment";
     let predictiveLatestPayload = null;
+    let predictiveScopeSignature = "";
 
     function loadPredictive() {
+        const signature = filtersSignature();
+        predictiveLatestPayload = null;
+        predictiveScopeSignature = "";
         const catsBody = document.getElementById("mira-pred-cats-body");
         const faultBody = document.getElementById("mira-pred-fault-body");
         const confBody = document.getElementById("mira-pred-confidence-body");
@@ -620,7 +624,13 @@
         );
         predictiveAbort = req.controller;
         req.promise
-            .then(function(json) { if (json && json.data) renderPredictive(json.data); })
+            .then(function(json) {
+                if (filtersSignature() !== signature) return;
+                if (json && json.data) {
+                    renderPredictive(json.data);
+                    predictiveScopeSignature = signature;
+                }
+            })
             .catch(function(err) {
                 if (err && err.name === "AbortError") return;
                 if (catsBody) catsBody.innerHTML = "<p class=\"mira-ov-muted\">Predictive insights unavailable.</p>";
@@ -3834,12 +3844,40 @@
 
     // ── § Overview Export Report ──────────────────────────────────────────────
     const OVC = {
-        navyBg: "1e293b", white: "FFFFFF",
-        accent: "4f46e5", green: "16a34a", amber: "d97706",
-        red: "dc2626", slate: "64748b", text: "1e293b",
-        lightBg: "f8fafc", border: "e2e8f0", sub: "94a3b8",
-        teal: "0891b2",
+        // SATS presentation standard: clean white canvas, Aptos typography,
+        // SATS red as the primary accent, and restrained neutral support tones.
+        navyBg: "2F2F2F", white: "FFFFFF",
+        accent: "EF2536", green: "2E7D32", amber: "C87800",
+        red: "EF2536", slate: "666666", text: "2F2F2F",
+        lightBg: "F7F7F7", border: "D9D9D9", sub: "8A8A8A",
+        teal: "27798F",
     };
+
+    const OV_PPT_ASSET_URLS = {
+        satsLogo: "/shared/mira/sats-logo-red.png",
+    };
+    const ovPptAssetCache = new Map();
+
+    function _ovLoadPptAssetData(url) {
+        if (ovPptAssetCache.has(url)) return ovPptAssetCache.get(url);
+        const pending = fetch(url, { cache: "force-cache" })
+            .then(response => {
+                if (!response.ok) throw new Error("Unable to load the SATS PowerPoint template asset.");
+                return response.blob();
+            })
+            .then(blob => new Promise((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => resolve(reader.result);
+                reader.onerror = () => reject(new Error("Unable to read the SATS PowerPoint template asset."));
+                reader.readAsDataURL(blob);
+            }))
+            .catch(error => {
+                ovPptAssetCache.delete(url);
+                throw error;
+            });
+        ovPptAssetCache.set(url, pending);
+        return pending;
+    }
 
     function _ovSetBtn(id, loading, label) {
         const btn = document.getElementById(id);
@@ -3994,6 +4032,31 @@
         return `Assets Assessed: ${pred.assets_assessed}  \xb7  With Risk Signals: ${pred.scored_assets || 0}  \xb7  High Risk: ${highRisk}  \xb7  Period: ${pred.period || "—"}`;
     }
 
+    function _normalizeOverviewStage(value) {
+        const key = String(value || "all").trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+        if (["stage1", "st1", "s1", "1"].includes(key)) return "stage1";
+        if (["stage2", "st2", "s2", "2"].includes(key)) return "stage2";
+        return "all";
+    }
+
+    function _pptStageApiValue(value) {
+        const normalized = _normalizeOverviewStage(value);
+        return normalized === "stage1" ? "Stage 1" : normalized === "stage2" ? "Stage 2" : "all";
+    }
+
+    function _pptRowMatchesStage(row, selectedStage) {
+        if (selectedStage === "all") return true;
+        const wanted = _pptStageApiValue(selectedStage).toLowerCase();
+        const candidates = [
+            row && row.resolved_stage,
+            row && row.stage,
+            row && row.mappedStage,
+            row && row.mapped_stage,
+            row && row.facility_stage,
+        ].map((value) => String(value || "").trim().toLowerCase()).filter(Boolean);
+        return candidates.some((value) => value === wanted);
+    }
+
     // ── Build PPT data (async — fetches MR + PM rows) ─────────────────────────
     async function buildPptReportData() {
         const data = (lastOverview && lastOverview.data) || {};
@@ -4004,7 +4067,8 @@
         const dt  = data.downtime_summary || {};
         const vdu = pres.view_data_used || {};
 
-        const stageParam = state.stage === "stage1" ? "Stage 1" : state.stage === "stage2" ? "Stage 2" : "all";
+        const selectedStage = _normalizeOverviewStage(state.stage);
+        const stageParam = _pptStageApiValue(selectedStage);
         const yr = state.year || new Date().getFullYear();
 
         // ── Fetch MR records ─────────────────────────────────────────────────
@@ -4023,9 +4087,10 @@
                     : (j.management && Array.isArray(j.management.work_orders))
                         ? j.management.work_orders
                         : [];
-                mrRows = src;
+                mrRows = src.filter((row) => _pptRowMatchesStage(row, selectedStage));
                 window.console.debug("[PPT] MR loaded:", mrRows.length,
-                    "source=", j.work_order_source ? "work_order_source" : "management");
+                    "source=", j.work_order_source ? "work_order_source" : "management",
+                    "stage=", stageParam);
             }
         } catch (e) {
             window.console.warn("[PPT] MR fetch error:", e && e.message);
@@ -4034,18 +4099,17 @@
         // ── Fetch PM tasks ───────────────────────────────────────────────────
         // Correct path: j.schedule.tasks (not j.payload.schedule.tasks)
         // j.schedule.tables.overdue = pre-filtered overdue list (already computed by backend)
-        let pmTasks = [], pmOverdueTasks = [];
-        let _pmFallback = false;
+        let pmTasks = [];
         try {
             const u = "/api/maintenance/pm-schedule?year=" + encodeURIComponent(yr) + "&stage=" + encodeURIComponent(stageParam);
             const r = await fetch(u, { cache: "no-store", signal: AbortSignal.timeout(15000) });
             if (r.ok) {
                 const j = await r.json();
                 const sched = j.schedule || {};
-                pmTasks = Array.isArray(sched.tasks) ? sched.tasks
+                const rawPmTasks = Array.isArray(sched.tasks) ? sched.tasks
                     : (sched.tables && Array.isArray(sched.tables.all)) ? sched.tables.all : [];
-                pmOverdueTasks = (sched.tables && Array.isArray(sched.tables.overdue)) ? sched.tables.overdue : [];
-                window.console.debug("[PPT] PM loaded:", pmTasks.length, "tasks,", pmOverdueTasks.length, "pre-filtered overdue");
+                pmTasks = rawPmTasks.filter((task) => _pptRowMatchesStage(task, selectedStage));
+                window.console.debug("[PPT] PM loaded:", pmTasks.length, "tasks, stage=", stageParam);
             }
         } catch (e) {
             window.console.warn("[PPT] PM fetch error:", e && e.message);
@@ -4158,7 +4222,7 @@
                 groups[mg].iss.push(r.translated_description || r.description || "");
             });
             return Object.entries(groups)
-                .filter(([, g]) => g.ttrs.length >= 2)
+                .filter(([, g]) => g.ttrs.length >= 1)
                 .map(([mg, g]) => {
                     const avg = g.ttrs.reduce((a, b) => a + b, 0) / g.ttrs.length;
                     const ic = {};
@@ -4175,6 +4239,7 @@
                 .slice(0, 10);
         })();
 
+        const allMtbfGaps = [];
         const mtbfByGroup = (() => {
             const groups = {};
             mrRows.forEach(r => {
@@ -4201,9 +4266,10 @@
                         if (gaps.length) {
                             assetAvg[an] = gaps.reduce((x, y) => x + y, 0) / gaps.length;
                             allGaps.push(...gaps);
+                            allMtbfGaps.push(...gaps);
                         }
                     });
-                    if (allGaps.length < 2) return null;
+                    if (allGaps.length < 1) return null;
                     const avg = allGaps.reduce((a, b) => a + b, 0) / allGaps.length;
                     const ic = {};
                     g.iss.forEach(t => { const k = _classifyIssue(t); ic[k] = (ic[k] || 0) + 1; });
@@ -4271,8 +4337,9 @@
 
         const perfSummary = {
             mttrAvgDays:    _allMttrVals.length ? +(_allMttrVals.reduce((a, b) => a + b, 0) / _allMttrVals.length).toFixed(1) : null,
-            mtbfAvgDays:    mtbfByGroup.length  ? +(mtbfByGroup.reduce((a, g) => a + g.avgMtbf, 0) / mtbfByGroup.length).toFixed(1) : null,
+            mtbfAvgDays:    allMtbfGaps.length  ? +(allMtbfGaps.reduce((a, b) => a + b, 0) / allMtbfGaps.length).toFixed(1) : null,
             validWoCount:   _allMttrVals.length,
+            validMtbfGapCount: allMtbfGaps.length,
             totalMrCount:   mrRows.length,
             worstMttrGroup: mttrByGroup[0] || null,
             worstMtbfGroup: mtbfByGroup[0] || null,
@@ -4282,59 +4349,42 @@
         };
         window.console.debug("[PPT] MTTR groups:", mttrByGroup.length, "| MTBF groups:", mtbfByGroup.length, "| valid WOs:", perfSummary.validWoCount);
 
-        // ── PM unfinished filter ─────────────────────────────────────────────
-        // Public task fields: completionStatus ("Open"/"Completed (inferred)"),
-        // scheduleStatus ("Overdue"/"Due This Month"/etc), daysOverdue (number).
-        // Note: isDone/isOverdue are STRIPPED by _public_task() — use completionStatus/daysOverdue.
-        const _isPmUnfinished = (t) => {
-            const cs = String(t.completionStatus || "").toLowerCase();
-            if (/completed|done|confirmed/.test(cs)) return false;
-            if (cs === "open") return true;
-            if ((t.daysOverdue || 0) > 0) return true;
-            const ss = String(t.scheduleStatus || t.status || "").toLowerCase();
-            if (/\b(overdue|open|pending|in.?progress|not.?started|backlog)\b/.test(ss)) return true;
-            if (!t.completionDate && !t.actualCompletionDate) return true;
-            return false;
+        // ── PM due in the next seven days ───────────────────────────────────
+        // This slide is forward-looking only. Overdue/backlog/completed tasks
+        // are intentionally excluded even if they remain open operationally.
+        const todayDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+        const pmWeekEnd = new Date(todayDate);
+        pmWeekEnd.setDate(pmWeekEnd.getDate() + 6);
+        const _localDateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+        const _parsePmDate = (value) => {
+            const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
+            if (!match) return null;
+            const parsed = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+            return Number.isNaN(parsed.getTime()) ? null : parsed;
+        };
+        const _isPmDueThisWeek = (task) => {
+            const due = _parsePmDate(task.plannedDate);
+            if (!due || due < todayDate || due > pmWeekEnd) return false;
+            const completion = String(task.completionStatus || task.status || "").toLowerCase();
+            const schedule = String(task.scheduleStatus || "").toLowerCase();
+            if (/completed|done|confirmed/.test(completion)) return false;
+            if (/overdue|backlog/.test(schedule) || Number(task.daysOverdue || 0) > 0) return false;
+            return true;
         };
         const _pmToRow = (t) => ({
             id:          _ovTrunc(t.pmTaskId || "—", 20),
             asset:       _ovTrunc(t.assetName || "—", 34),
             location:    _ovTrunc(t.systemArea || "—", 24),
             dueDate:     String(t.plannedDate || "").slice(0, 10),
-            daysOverdue: t.daysOverdue || 0,
-            status:      _ovTrunc(t.scheduleStatus || t.completionStatus || "Open", 22),
+            activity:    _ovTrunc(t.pmDescription || "—", 48),
+            frequency:   _ovTrunc(t.frequency || "—", 18),
             assignedTo:  _ovTrunc(t.contractorOrPIC || "—", 24),
-            isOverdue:   (t.daysOverdue || 0) > 0,
+            daysUntilDue: Math.max(0, Math.round((_parsePmDate(t.plannedDate) - todayDate) / 86400000)),
         });
-
-        // Start from pre-filtered overdue list (from backend), then add non-overdue unfinished
-        let allUnfinished = [];
-        if (pmOverdueTasks.length > 0) {
-            const overdueIds = new Set(pmOverdueTasks.map(t => t.pmTaskId));
-            const otherUnfinished = pmTasks.filter(t => !overdueIds.has(t.pmTaskId) && _isPmUnfinished(t));
-            allUnfinished = [...pmOverdueTasks, ...otherUnfinished];
-        } else {
-            allUnfinished = pmTasks.filter(_isPmUnfinished);
-        }
-        window.console.debug("[PPT] PM unfinished:", allUnfinished.length, "| KPI overdue:", pm.overdue);
-
-        // Fallback: filter returned 0 but KPI says overdue > 0 — use all non-completed tasks
-        if (allUnfinished.length === 0 && pmTasks.length > 0) {
-            _pmFallback = true;
-            window.console.warn("[PPT] PM mismatch: KPI overdue=" + (pm.overdue || 0) + " but filter returned 0. Using all non-completed tasks.");
-            allUnfinished = pmTasks.filter(t => {
-                const cs = String(t.completionStatus || "").toLowerCase();
-                return !/completed|done|confirmed/.test(cs);
-            });
-            window.console.debug("[PPT] PM fallback rows:", allUnfinished.length);
-        }
-
-        // Sort: overdue first (highest daysOverdue first), then oldest dueDate first
-        allUnfinished.sort((a, b) => {
-            const aOv = (a.daysOverdue || 0), bOv = (b.daysOverdue || 0);
-            if (bOv !== aOv) return bOv - aOv;
-            return (a.plannedDate || "") < (b.plannedDate || "") ? -1 : 1;
-        });
+        const pmDueThisWeek = pmTasks
+            .filter(_isPmDueThisWeek)
+            .sort((a, b) => String(a.plannedDate || "").localeCompare(String(b.plannedDate || "")));
+        window.console.debug("[PPT] PM due next 7 days:", pmDueThisWeek.length, "stage=", stageParam);
 
         const actionNotes = refs.summaryLine ? refs.summaryLine.map(l => (l.textContent || "").trim()).filter(Boolean) : [];
         const alertRows = [];
@@ -4381,73 +4431,100 @@
             faultPattern:        _buildFaultPatternSummary(predCards),
             dataConfidence:      _buildAssessmentCoverage(pred, predCards),
             predKpiStrip:        _buildPredKpiStripText(pred, predCards),
-            unfinishedPm:        allUnfinished.slice(0, 10).map(_pmToRow),
-            totalUnfinishedPm:   allUnfinished.length,
-            pmFallbackNote: _pmFallback ? "List based on non-completed PM records — status field not available in this dataset." : null,
+            pmDueThisWeek:       pmDueThisWeek.slice(0, 12).map(_pmToRow),
+            totalPmDueThisWeek:  pmDueThisWeek.length,
+            pmWeekStart:         _localDateKey(todayDate),
+            pmWeekEnd:           _localDateKey(pmWeekEnd),
+            pmWeekAssetCount:    new Set(pmDueThisWeek.map((task) => task.assetId || task.assetName).filter(Boolean)).size,
+            pmWeekAssignedCount: pmDueThisWeek.filter((task) => String(task.contractorOrPIC || "").trim()).length,
             actionNotes,
             alertRows,
             exportedAt: new Date().toLocaleString(),
         };
     }
 
-    // ── Generate 7-slide management PPT from structured data ───────────────────
+    // ── Generate 5-slide management PPT from structured data ───────────────────
     async function generateOvPpt(R) {
+        const satsLogo = await _ovLoadPptAssetData(OV_PPT_ASSET_URLS.satsLogo);
         const pptx = new PptxGenJS();
+        pptx.author = "SATS Food Solutions Thailand";
+        pptx.company = "SATS Food Solutions Thailand";
+        pptx.subject = "Maintenance performance report";
+        pptx.title = "Maintenance Overview Report";
+        pptx.lang = "en-US";
+        pptx.theme = {
+            headFontFace: "Aptos Display",
+            bodyFontFace: "Aptos",
+            lang: "en-US",
+        };
         pptx.layout = "LAYOUT_WIDE"; // 13.33 × 7.5"
         const stg  = R.filters.stage === "stage1" ? "Stage 1" : R.filters.stage === "stage2" ? "Stage 2" : "All Stages";
         const sub  = R.filters.label + (R.filters.dateRange ? "  \xb7  " + R.filters.dateRange : "") + "  \xb7  " + stg;
-        const TOTAL = 6;
-        const FF = "Calibri";
+        const TOTAL = 5;
+        const FF = "Aptos";
+        const HFF = "Aptos Display";
+        const MX = 0.45;
+        const CW = 12.43;
 
         function hdr(slide, title, n) {
-            slide.addShape(pptx.ShapeType.rect, { x: 0, y: 0, w: 13.33, h: 0.54, fill: { color: OVC.navyBg } });
-            slide.addText(title, { x: 0.18, y: 0.05, w: 9.5,  h: 0.26, fontSize: 14, bold: true, color: OVC.white, fontFace: FF });
-            slide.addText(sub,   { x: 0.18, y: 0.30, w: 10.5, h: 0.19, fontSize: 8.5, color: OVC.sub, fontFace: FF });
-            slide.addText(n + " / " + TOTAL, { x: 12.0, y: 0.14, w: 1.15, h: 0.24, fontSize: 9, color: OVC.sub, align: "right", fontFace: FF });
+            slide.background = { color: OVC.white };
+            slide.addText(title, {
+                x: MX, y: 0.16, w: 10.25, h: 0.40,
+                fontSize: 27, bold: true, color: OVC.accent,
+                fontFace: HFF, margin: 0,
+            });
+            slide.addText(sub, {
+                x: MX, y: 0.63, w: 9.95, h: 0.18,
+                fontSize: 9, color: OVC.slate, fontFace: FF, margin: 0,
+            });
+            slide.addText(n + " / " + TOTAL, {
+                x: 10.45, y: 0.63, w: 0.55, h: 0.18,
+                fontSize: 8.5, color: OVC.sub, align: "right", fontFace: FF, margin: 0,
+            });
+            slide.addImage({ data: satsLogo, x: 11.24, y: 0.10, w: 1.98, h: 0.81 });
+            slide.addShape(pptx.ShapeType.rect, {
+                x: MX, y: 0.91, w: CW, h: 0.025,
+                fill: { color: OVC.accent }, line: { color: OVC.accent, transparency: 100 },
+            });
         }
         function secLabel(slide, x, y, w, text, count) {
-            slide.addShape(pptx.ShapeType.rect, { x, y, w: 0.04, h: 0.22, fill: { color: OVC.accent }, line: { color: OVC.accent } });
+            slide.addShape(pptx.ShapeType.rect, { x, y, w: 0.045, h: 0.22, fill: { color: OVC.accent }, line: { color: OVC.accent } });
             const label = count != null ? text + "  (" + count + ")" : text;
-            slide.addText(label, { x: x + 0.10, y, w: w - 0.10, h: 0.22, fontSize: 9.5, bold: true, color: OVC.navyBg, fontFace: FF });
+            slide.addText(label, { x: x + 0.11, y, w: w - 0.11, h: 0.22, fontSize: 10, bold: true, color: OVC.text, fontFace: FF, margin: 0 });
         }
         function kpiCard(slide, x, y, w, h, value, label, color) {
-            slide.addShape(pptx.ShapeType.roundRect, { x, y, w, h, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
-            slide.addShape(pptx.ShapeType.rect,      { x, y: y + 0.07, w: 0.05, h: h - 0.14, fill: { color: color }, line: { color: color } });
-            slide.addText(_ovFmt(value), { x: x + 0.12, y: y + 0.06, w: w - 0.16, h: h * 0.57, fontSize: 20, bold: true, color, fontFace: FF, valign: "middle" });
-            slide.addText(label,         { x: x + 0.12, y: y + h * 0.62, w: w - 0.16, h: h * 0.35, fontSize: 7.5, color: OVC.slate, fontFace: FF });
+            slide.addShape(pptx.ShapeType.rect, { x, y, w, h, fill: { color: OVC.white }, line: { color: OVC.border, width: 0.8 } });
+            slide.addShape(pptx.ShapeType.rect, { x, y, w, h: 0.045, fill: { color }, line: { color, transparency: 100 } });
+            slide.addText(_ovFmt(value), { x: x + 0.12, y: y + 0.10, w: w - 0.24, h: h * 0.52, fontSize: 21, bold: true, color, fontFace: HFF, valign: "middle", margin: 0 });
+            slide.addText(label, { x: x + 0.12, y: y + h * 0.66, w: w - 0.24, h: h * 0.25, fontSize: 8, color: OVC.slate, fontFace: FF, margin: 0 });
         }
         function tHdr(cols) {
-            return cols.map(t => ({ text: t, options: { bold: true, fontSize: 8, color: OVC.white, fill: { color: OVC.navyBg }, valign: "middle" } }));
+            return cols.map(t => ({ text: t, options: { bold: true, fontSize: 8, color: OVC.white, fill: { color: OVC.accent }, valign: "middle" } }));
         }
         function tRow(cells, i) {
-            const bg = i % 2 === 0 ? OVC.white : "f1f5f9";
+            const bg = i % 2 === 0 ? OVC.white : OVC.lightBg;
             return cells.map(c => ({ text: String(c.v != null ? c.v : "—"), options: { fontSize: 7.5, color: c.c || OVC.text, fill: { color: bg }, bold: !!c.b, valign: "middle" } }));
         }
         function foot(slide) {
             slide.addText(
-                "Data based on selected dashboard period and filters. Technician/Engineer verification required before action.  \xb7  Generated " + R.exportedAt,
-                { x: 0.18, y: 7.24, w: 13.0, h: 0.20, fontSize: 6.5, color: OVC.sub, fontFace: FF, italic: true }
+                "SATS Food Solutions Thailand  \xb7  Data reflects the selected dashboard scope  \xb7  Generated " + R.exportedAt,
+                { x: MX, y: 7.18, w: CW, h: 0.18, fontSize: 6.5, color: OVC.sub, fontFace: FF, italic: true, margin: 0 }
             );
         }
 
         // ─── Slide 1 — Maintenance Overview Summary ───────────────────────────
         const s1 = pptx.addSlide();
         hdr(s1, "Maintenance Overview Report", 1);
-        s1.addText(
-            "Period: " + R.filters.label + (R.filters.dateRange ? "  \xb7  " + R.filters.dateRange : "") +
-            "   |   Stage: " + stg + "   |   Year: " + R.filters.year,
-            { x: 0.18, y: 0.62, w: 13.0, h: 0.20, fontSize: 8.5, color: OVC.slate, fontFace: FF }
-        );
-        secLabel(s1, 0.18, 0.90, 8.0, "MR / Work Order Overview");
+        secLabel(s1, 0.18, 1.02, 8.0, "MR / Work Order Overview");
         const mrKw = 3.10, mrKg = 0.12;
         [
             { v: R.overviewKpis.mrRaised,   l: "MR Raised",          c: OVC.accent },
             { v: R.overviewKpis.mrOpen,      l: "Open / In Progress", c: OVC.amber  },
             { v: R.overviewKpis.mrCarryOver, l: "Carry-over Open MR", c: OVC.red    },
             { v: R.overviewKpis.closureRate != null ? _ovFmt(R.overviewKpis.closureRate) + "%" : null, l: "Closure Rate", c: OVC.green },
-        ].forEach((k, i) => kpiCard(s1, 0.18 + i * (mrKw + mrKg), 1.16, mrKw, 1.02, k.v, k.l, k.c));
+        ].forEach((k, i) => kpiCard(s1, 0.18 + i * (mrKw + mrKg), 1.28, mrKw, 1.02, k.v, k.l, k.c));
 
-        const col2Y = 2.30;
+        const col2Y = 2.42;
         secLabel(s1, 0.18, col2Y, 6.30, "PM Schedule Summary");
         secLabel(s1, 6.85, col2Y, 6.30, "Downtime / MR Summary");
         const cY = col2Y + 0.30, pmW = 2.95, pmG = 0.10, pmH = 0.48;
@@ -4489,9 +4566,9 @@
         const s2 = pptx.addSlide();
         hdr(s2, "Downtime & MR Action List", 2);
         s2.addText("Source: Downtime / MR data  \xb7  " + R.filters.label + "  \xb7  " + stg + "  \xb7  Unacknowledged = open with pending or no acknowledgement action",
-            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
+            { x: 0.18, y: 1.02, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
 
-        var s2NoteY = 0.88;
+        var s2NoteY = 1.27;
         if (R.mrFallbackNote) {
             s2.addText("⚠ " + R.mrFallbackNote, { x: 0.18, y: s2NoteY, w: 13.0, h: 0.18, fontSize: 7, color: OVC.amber, italic: true, fontFace: FF });
             s2NoteY += 0.20;
@@ -4547,13 +4624,13 @@
         // ─── Slide 3 — Recurring Machine Issue Forecast (3 categories) ───────
         const s3 = pptx.addSlide();
         hdr(s3, "Recurring Machine Issue Forecast", 3);
-        if (R.predKpiStrip) s3.addText(R.predKpiStrip, { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 8, color: OVC.slate, fontFace: FF });
+        if (R.predKpiStrip) s3.addText(R.predKpiStrip, { x: 0.18, y: 1.02, w: 13.0, h: 0.19, fontSize: 8, color: OVC.slate, fontFace: FF });
         s3.addText("Top risk-scored assets per category, ranked by calculated risk score. See Predictive Insights for full scoring detail.",
-            { x: 0.18, y: 0.82, w: 13.0, h: 0.16, fontSize: 7, color: OVC.slate, italic: true, fontFace: FF });
+            { x: 0.18, y: 1.22, w: 13.0, h: 0.16, fontSize: 7, color: OVC.slate, italic: true, fontFace: FF });
 
         const rfCols3 = [0.28, 1.15, 1.75, 2.10, 1.10, 2.30, 1.80, 2.52];
         const rfHdr3  = tHdr(["#", "Category", "Machine", "Latest Recurring Issue", "Risk", "Open WO Status", "Pattern Signal", "Suggested Action"]);
-        var s3Y = 1.02;
+        var s3Y = 1.44;
 
         (R.rfCategories || []).forEach(cat => {
             const catHasMachines = cat.machines && cat.machines.length > 0;
@@ -4611,253 +4688,178 @@
         }
         foot(s3);
 
-        // ─── Slide 4 — PM Schedule & Unfinished PM Tasks ─────────────────────
+        // ─── Slide 4 — PM Due This Week ─────────────────────────────────────
         const s4 = pptx.addSlide();
-        hdr(s4, "PM Schedule & Unfinished PM Tasks", 4);
-        s4.addText("Source: PM Schedule data  \xb7  " + R.filters.label + "  \xb7  " + stg + "  \xb7  Sorted: Overdue first, oldest due date",
-            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
-        secLabel(s4, 0.18, 0.88, 7.0, "PM Schedule Summary");
+        hdr(s4, "PM Due This Week", 4);
+        s4.addText("Upcoming scheduled PM only  \xb7  " + R.pmWeekStart + " to " + R.pmWeekEnd + "  \xb7  " + stg + "  \xb7  Overdue and backlog excluded",
+            { x: 0.18, y: 1.02, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
+        secLabel(s4, 0.18, 1.28, 13.0, "Next 7 Days");
         const pmKw = 3.10, pmKg = 0.12;
         [
-            { v: R.overviewKpis.pmDue,      l: "PM Due This Month", c: OVC.accent },
-            { v: R.overviewKpis.pmCompleted, l: "Completed",         c: OVC.green  },
-            { v: R.overviewKpis.pmOverdue,   l: "Overdue",           c: OVC.red    },
-            { v: R.overviewKpis.pmCompliance != null ? _ovFmt(R.overviewKpis.pmCompliance) + "%" : null, l: "PM Compliance", c: OVC.teal },
-        ].forEach((k, i) => kpiCard(s4, 0.18 + i * (pmKw + pmKg), 1.14, pmKw, 1.00, k.v, k.l, k.c));
+            { v: R.totalPmDueThisWeek,                                   l: "PM Tasks Due",       c: OVC.accent },
+            { v: R.pmWeekAssetCount,                                     l: "Assets Scheduled",   c: OVC.teal   },
+            { v: R.pmWeekAssignedCount,                                  l: "Assigned Tasks",     c: OVC.green  },
+            { v: Math.max(0, R.totalPmDueThisWeek - R.pmWeekAssignedCount), l: "Unassigned Tasks", c: OVC.amber  },
+        ].forEach((k, i) => kpiCard(s4, 0.18 + i * (pmKw + pmKg), 1.54, pmKw, 1.00, k.v, k.l, k.c));
 
-        var s4SecY = 2.26;
-        if (R.pmFallbackNote) {
-            s4.addText("⚠ " + R.pmFallbackNote, { x: 0.18, y: s4SecY, w: 13.0, h: 0.18, fontSize: 7, color: OVC.amber, italic: true, fontFace: FF });
-            s4SecY += 0.20;
-        }
-        secLabel(s4, 0.18, s4SecY, 10.0, "Unfinished / Overdue PM Tasks", R.totalUnfinishedPm || 0);
-        var s4TableY = s4SecY + 0.26;
-        const pmCols = [1.8, 3.5, 2.2, 1.2, 1.0, 1.8, 1.5];
-        const pmHdr  = tHdr(["PM Task ID", "Asset / Machine", "Functional Location", "Due Date", "Days OD", "Status", "Assigned To"]);
-        const pmData  = R.unfinishedPm.map((t, i) => tRow([
+        const s4SecY = 2.68;
+        secLabel(s4, 0.18, s4SecY, 13.0, "Scheduled PM Tasks", R.totalPmDueThisWeek || 0);
+        const s4TableY = s4SecY + 0.26;
+        const pmCols = [1.55, 2.25, 1.70, 3.15, 1.15, 1.05, 2.15];
+        const pmHdr  = tHdr(["PM Task ID", "Asset / Machine", "Functional Location", "PM Activity", "Due Date", "Due In", "Assigned To"]);
+        const pmData  = R.pmDueThisWeek.map((t, i) => tRow([
             { v: t.id },
             { v: t.asset },
             { v: t.location },
+            { v: t.activity },
             { v: t.dueDate },
-            { v: t.isOverdue ? t.daysOverdue : "—", c: t.isOverdue ? OVC.red : OVC.slate, b: t.isOverdue },
-            { v: t.status, c: t.isOverdue ? OVC.red : t.status === "Backlog" ? OVC.amber : OVC.text },
+            { v: t.daysUntilDue === 0 ? "Today" : t.daysUntilDue + "d", c: t.daysUntilDue <= 1 ? OVC.amber : OVC.slate, b: t.daysUntilDue <= 1 },
             { v: t.assignedTo },
         ], i));
         if (pmData.length) {
             s4.addTable([pmHdr, ...pmData], { x: 0.18, y: s4TableY, w: 13.0, fontFace: FF, colW: pmCols, border: { color: OVC.border }, rowH: 0.27 });
         } else {
-            s4.addText("No unfinished PM tasks for the selected period.", { x: 0.28, y: s4TableY, w: 13.0, h: 0.28, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+            s4.addText("No PM tasks are due in the next seven days for the selected stage.", { x: 0.28, y: s4TableY, w: 13.0, h: 0.28, fontSize: 8.5, color: OVC.sub, fontFace: FF });
         }
-        if (R.totalUnfinishedPm > 10) {
+        if (R.totalPmDueThisWeek > 12) {
             const pmMoreY = s4TableY + 0.30 + (pmData.length ? pmData.length * 0.27 : 0.28);
-            s4.addText("+" + (R.totalUnfinishedPm - 10) + " more unfinished PM tasks — see PM Schedule page for full list.",
+            s4.addText("+" + (R.totalPmDueThisWeek - 12) + " more PM tasks due this week — see PM Schedule for the full list.",
                 { x: 0.28, y: pmMoreY + 0.06, w: 13.0, h: 0.20, fontSize: 7.5, color: OVC.slate, italic: true, fontFace: FF });
         }
         foot(s4);
 
-        // ─── Slide 5 — Performance Summary ───────────────────────────────────
+        // ─── Slide 5 — Performance Summary: MTTR & MTBF ─────────────────────
         const s5 = pptx.addSlide();
-        hdr(s5, "Performance Summary", 5);
-        s5.addText("Computed from MR / WO records  \xb7  " + R.filters.label + "  \xb7  " + stg,
-            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
+        hdr(s5, "Performance Summary — MTTR & MTBF", 5);
+        s5.addText("Overall totals and top five machine groups  \xb7  " + R.filters.label + "  \xb7  " + stg + "  \xb7  MTTR lower is better; MTBF higher is better",
+            { x: 0.18, y: 1.02, w: 13.0, h: 0.19, fontSize: 7.5, color: OVC.slate, fontFace: FF, italic: true });
 
         const ps = R.perfSummary;
-        secLabel(s5, 0.18, 0.88, 13.0, "Key Performance Indicators");
-        const pfW = 2.50, pfG = 0.12, pfH = 1.10;
-        [
-            { v: ps.mttrAvgDays != null ? ps.mttrAvgDays + "d" : "N/A", l: "Avg MTTR (Overall)",    c: OVC.accent },
-            { v: ps.mtbfAvgDays != null ? ps.mtbfAvgDays + "d" : "N/A", l: "Avg MTBF (Overall)",    c: OVC.teal  },
-            { v: ps.validWoCount,                                         l: "WOs with Valid Dates",  c: OVC.slate },
-            { v: ps.openMrCount,                                          l: "Open MR",               c: OVC.amber },
-            { v: ps.unackMrCount,                                         l: "Unacknowledged MR",     c: OVC.red   },
-        ].forEach((k, i) => kpiCard(s5, 0.18 + i * (pfW + pfG), 1.14, pfW, pfH, k.v, k.l, k.c));
+        secLabel(s5, 0.18, 1.28, 13.0, "Overall Performance");
+        kpiCard(s5, 0.18, 1.54, 6.44, 1.06,
+            ps.mttrAvgDays != null ? ps.mttrAvgDays + "d" : "N/A",
+            "Overall MTTR  ·  " + ps.validWoCount + " valid repairs", OVC.accent);
+        kpiCard(s5, 6.80, 1.54, 6.34, 1.06,
+            ps.mtbfAvgDays != null ? ps.mtbfAvgDays + "d" : "N/A",
+            "Overall MTBF  ·  " + ps.validMtbfGapCount + " valid failure gaps", OVC.teal);
 
-        const ps2Y = 1.14 + pfH + 0.22;
-        secLabel(s5, 0.18, ps2Y, 6.30, "Highest MTTR Machine Group");
-        s5.addShape(pptx.ShapeType.roundRect, { x: 0.18, y: ps2Y + 0.28, w: 6.30, h: 1.30, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
-        const wmt = ps.worstMttrGroup;
-        if (wmt) {
-            s5.addText(wmt.mg, { x: 0.32, y: ps2Y + 0.38, w: 6.0, h: 0.30, fontSize: 11, bold: true, color: OVC.accent, fontFace: FF });
-            s5.addText("Avg MTTR: " + wmt.avgMttr.toFixed(1) + " days  \xb7  " + wmt.woCount + " WOs",
-                { x: 0.32, y: ps2Y + 0.72, w: 6.0, h: 0.22, fontSize: 8.5, color: OVC.text, fontFace: FF });
-            s5.addText("Top issue: " + wmt.topIssue + "  \xb7  Worst machine: " + wmt.worstAsset,
-                { x: 0.32, y: ps2Y + 0.96, w: 6.0, h: 0.22, fontSize: 8, color: OVC.slate, fontFace: FF });
+        const mttrTop5 = [...R.mttrByGroup].sort((a, b) => b.avgMttr - a.avgMttr).slice(0, 5);
+        const mtbfTop5 = [...R.mtbfByGroup].sort((a, b) => a.avgMtbf - b.avgMtbf).slice(0, 5);
+        const tblY5 = 2.98;
+        secLabel(s5, 0.18, 2.72, 6.44, "Top 5 Highest MTTR Machine Groups", mttrTop5.length);
+        const mttrHdr5 = tHdr(["#", "Machine Group", "Avg MTTR", "WOs", "Worst Machine"]);
+        const mttrRows5 = mttrTop5.map((group, index) => tRow([
+            { v: index + 1, c: OVC.slate },
+            { v: _ovTrunc(group.mg, 28), b: index === 0 },
+            { v: group.avgMttr.toFixed(1) + "d", c: group.avgMttr > 7 ? OVC.red : group.avgMttr > 3 ? OVC.amber : OVC.green, b: true },
+            { v: group.woCount, c: OVC.slate },
+            { v: _ovTrunc(group.worstAsset, 24) },
+        ], index));
+        if (mttrRows5.length) {
+            s5.addTable([mttrHdr5, ...mttrRows5], { x: 0.18, y: tblY5, w: 6.44, fontFace: FF, colW: [0.34, 2.20, 0.92, 0.56, 2.42], border: { color: OVC.border }, rowH: 0.48 });
         } else {
-            s5.addText("Insufficient data.", { x: 0.32, y: ps2Y + 0.60, w: 6.0, h: 0.24, fontSize: 8.5, color: OVC.sub, fontFace: FF });
-        }
-        secLabel(s5, 6.85, ps2Y, 6.30, "Lowest MTBF Machine Group  (most frequent breakdown)");
-        s5.addShape(pptx.ShapeType.roundRect, { x: 6.85, y: ps2Y + 0.28, w: 6.30, h: 1.30, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
-        const wmbf = ps.worstMtbfGroup;
-        if (wmbf) {
-            s5.addText(wmbf.mg, { x: 6.99, y: ps2Y + 0.38, w: 6.0, h: 0.30, fontSize: 11, bold: true, color: OVC.teal, fontFace: FF });
-            s5.addText("Avg MTBF: " + wmbf.avgMtbf.toFixed(1) + " days  \xb7  " + wmbf.recurrences + " recurrences",
-                { x: 6.99, y: ps2Y + 0.72, w: 6.0, h: 0.22, fontSize: 8.5, color: OVC.text, fontFace: FF });
-            s5.addText("Top issue: " + wmbf.topIssue + "  \xb7  Worst machine: " + wmbf.worstAsset,
-                { x: 6.99, y: ps2Y + 0.96, w: 6.0, h: 0.22, fontSize: 8, color: OVC.slate, fontFace: FF });
-        } else {
-            s5.addText("Insufficient data.", { x: 6.99, y: ps2Y + 0.60, w: 6.0, h: 0.24, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+            s5.addText("No valid MTTR records for this stage.", { x: 0.28, y: tblY5, w: 6.20, h: 0.30, fontSize: 8.5, color: OVC.sub, fontFace: FF });
         }
 
-        const ps3Y = ps2Y + 1.30 + 0.30;
-        secLabel(s5, 0.18, ps3Y, 13.0, "Top Recurring Issue  &  Data Coverage");
-        s5.addShape(pptx.ShapeType.roundRect, { x: 0.18, y: ps3Y + 0.28, w: 6.30, h: 1.00, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
-        s5.addText("Top Recurring Issue:", { x: 0.32, y: ps3Y + 0.36, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
-        s5.addText(ps.recurringIssue, { x: 0.32, y: ps3Y + 0.58, w: 6.0, h: 0.30, fontSize: 10, bold: true, color: OVC.accent, fontFace: FF });
-        const topRf = R.recurringForecast[0];
-        const psRfMachine = topRf ? topRf.machine + (topRf.nextLikely ? "  \xb7  " + topRf.nextLikely : "") : "";
-        if (psRfMachine) s5.addText(psRfMachine, { x: 0.32, y: ps3Y + 0.88, w: 6.0, h: 0.20, fontSize: 7.5, color: OVC.slate, fontFace: FF });
-        s5.addShape(pptx.ShapeType.roundRect, { x: 6.85, y: ps3Y + 0.28, w: 6.30, h: 1.00, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
-        s5.addText("MTTR / MTBF Data Coverage:", { x: 6.99, y: ps3Y + 0.36, w: 6.0, h: 0.20, fontSize: 8, color: OVC.slate, fontFace: FF });
-        const pctCov = ps.totalMrCount ? Math.round(ps.validWoCount / ps.totalMrCount * 100) : 0;
-        s5.addText(ps.validWoCount + " of " + ps.totalMrCount + " records have valid start / end dates  (" + pctCov + "%)",
-            { x: 6.99, y: ps3Y + 0.58, w: 6.0, h: 0.50, fontSize: 9, color: pctCov < 50 ? OVC.amber : OVC.text, fontFace: FF, wrap: true });
+        secLabel(s5, 6.80, 2.72, 6.34, "Top 5 Lowest MTBF Machine Groups", mtbfTop5.length);
+        const mtbfHdr5 = tHdr(["#", "Machine Group", "Avg MTBF", "Gaps", "Worst Machine"]);
+        const mtbfRows5 = mtbfTop5.map((group, index) => tRow([
+            { v: index + 1, c: OVC.slate },
+            { v: _ovTrunc(group.mg, 28), b: index === 0 },
+            { v: group.avgMtbf.toFixed(1) + "d", c: group.avgMtbf < 30 ? OVC.red : group.avgMtbf < 60 ? OVC.amber : OVC.green, b: true },
+            { v: group.recurrences, c: OVC.slate },
+            { v: _ovTrunc(group.worstAsset, 24) },
+        ], index));
+        if (mtbfRows5.length) {
+            s5.addTable([mtbfHdr5, ...mtbfRows5], { x: 6.80, y: tblY5, w: 6.34, fontFace: FF, colW: [0.34, 2.16, 0.94, 0.58, 2.32], border: { color: OVC.border }, rowH: 0.48 });
+        } else {
+            s5.addText("No valid MTBF gaps for this stage.", { x: 6.90, y: tblY5, w: 6.10, h: 0.30, fontSize: 8.5, color: OVC.sub, fontFace: FF });
+        }
+
+        s5.addText("MTTR uses valid Actual Start–Actual End repair durations. MTBF uses valid gaps between consecutive failures on the same asset.",
+            { x: 0.18, y: 6.15, w: 13.0, h: 0.22, fontSize: 7.5, color: OVC.slate, italic: true, fontFace: FF, align: "center" });
         foot(s5);
 
-        // ─── Slide 6 — MTTR & MTBF Performance — Top Machine Groups ─────────
-        const s6 = pptx.addSlide();
-        hdr(s6, "MTTR & MTBF Performance — Top Machine Groups", 6);
-
-        // Subtitle
-        const todayStr6 = new Date().toISOString().slice(0, 10);
-        s6.addText(
-            "Avg MTTR = actual end − actual start (completed WOs, valid dates only) · " +
-            "Avg MTBF = gap between consecutive failures on same asset · " +
-            R.filters.label + (R.filters.dateRange ? " · " + R.filters.dateRange : " · YTD 2026 · " + todayStr6) +
-            " · " + stg,
-            { x: 0.18, y: 0.62, w: 13.0, h: 0.19, fontSize: 7, color: OVC.slate, fontFace: FF, italic: true }
-        );
-
-        // ── KPI chips row ─────────────────────────────────────────────────────
-        const ps6 = R.perfSummary;
-        const s6MgCount = new Set([...R.mttrByGroup.map(g => g.mg), ...R.mtbfByGroup.map(g => g.mg)]).size;
-        const chips6 = [
-            { label: "Overall Avg MTTR",        val: ps6.mttrAvgDays != null ? ps6.mttrAvgDays + "d"  : "—", tone: ps6.mttrAvgDays > 7 ? OVC.red : ps6.mttrAvgDays > 3 ? OVC.amber : OVC.green },
-            { label: "Overall Avg MTBF",        val: ps6.mtbfAvgDays != null ? ps6.mtbfAvgDays + "d"  : "—", tone: ps6.mtbfAvgDays != null && ps6.mtbfAvgDays < 30 ? OVC.red : ps6.mtbfAvgDays < 60 ? OVC.amber : OVC.green },
-            { label: "Completed WOs Analysed",  val: ps6.validWoCount != null ? String(ps6.validWoCount) : "—", tone: OVC.teal },
-            { label: "Machine Groups Reviewed",  val: String(s6MgCount),  tone: OVC.accent },
-        ];
-        const chipW = 3.08, chipX0 = 0.18, chipY = 0.86, chipH = 0.44;
-        chips6.forEach((c, i) => {
-            const cx = chipX0 + i * (chipW + 0.12);
-            s6.addShape(pptx.ShapeType.roundRect, { x: cx, y: chipY, w: chipW, h: chipH, fill: { color: OVC.lightBg }, line: { color: OVC.border }, rectRadius: 0.05 });
-            s6.addText(c.val,   { x: cx + 0.08, y: chipY + 0.03, w: chipW - 0.16, h: 0.24, fontSize: 13, bold: true, color: c.tone, fontFace: FF, align: "center" });
-            s6.addText(c.label, { x: cx + 0.08, y: chipY + 0.27, w: chipW - 0.16, h: 0.14, fontSize: 7, color: OVC.slate, fontFace: FF, align: "center" });
-        });
-
-        // ── Combined priority for each machine group ───────────────────────────
-        const _s6Priority = (mg, mttrMap, mtbfMap) => {
-            const mt = mttrMap[mg]; const mb = mtbfMap[mg];
-            let score = 0;
-            if (mt && mt.avgMttr > 7) score += 2;
-            if (mb && mb.avgMtbf < 30) score += 2;
-            if ((mt && mt.woCount >= 3) || (mb && mb.recurrences >= 2)) score += 1;
-            return score >= 4 ? "High" : score >= 2 ? "Med" : "Low";
-        };
-        const _mttrMap = Object.fromEntries(R.mttrByGroup.map(g => [g.mg, g]));
-        const _mtbfMap = Object.fromEntries(R.mtbfByGroup.map(g => [g.mg, g]));
-
-        // ── Left table: Top 5 MTTR (sorted by priority desc, then avgMttr desc) ─
-        const tblY = 1.38, tblH_rows = 5;
-        const mttrTop5 = [...R.mttrByGroup]
-            .map(g => ({ ...g, _pri: _s6Priority(g.mg, _mttrMap, _mtbfMap) }))
-            .sort((a, b) => { const ps = {"High":3,"Med":2,"Low":1}; return (ps[b._pri]-ps[a._pri]) || b.avgMttr - a.avgMttr; })
-            .slice(0, tblH_rows);
-
-        secLabel(s6, 0.18, tblY - 0.24, 6.44, "Highest Avg MTTR — Slowest to Repair", mttrTop5.length);
-        const mCols1 = [0.28, 1.80, 0.70, 0.52, 1.60, 1.30, 0.24];  // total 6.44"
-        const mHdr1 = tHdr(["#", "Machine Group", "Avg MTTR", "WOs", "Top Issue", "Worst Machine", "!"]);
-        const mData1 = mttrTop5.map((g, i) => tRow([
-            { v: i + 1, c: OVC.slate },
-            { v: _ovTrunc(g.mg, 22), b: i === 0 },
-            { v: g.avgMttr.toFixed(1) + "d", c: g.avgMttr > 7 ? OVC.red : g.avgMttr > 3 ? OVC.amber : OVC.green, b: true },
-            { v: g.woCount, c: OVC.slate },
-            { v: _ovTrunc(g.topIssue, 20), c: OVC.accent },
-            { v: _ovTrunc(g.worstAsset, 18), c: g.worstMttr > 7 ? OVC.red : OVC.text },
-            { v: g._pri, c: g._pri === "High" ? OVC.red : g._pri === "Med" ? OVC.amber : OVC.green },
-        ], i));
-        if (mData1.length) {
-            s6.addTable([mHdr1, ...mData1], { x: 0.18, y: tblY, w: 6.44, fontFace: FF, colW: mCols1, border: { color: OVC.border }, rowH: 0.36 });
-        } else {
-            s6.addText("No MTTR data available.", { x: 0.18, y: tblY, w: 6.44, h: 0.30, fontSize: 8, color: OVC.sub, fontFace: FF });
-        }
-
-        // ── Right table: Top 5 MTBF (sorted by priority desc, then avgMtbf asc) ─
-        const mtbfTop5 = [...R.mtbfByGroup]
-            .map(g => ({ ...g, _pri: _s6Priority(g.mg, _mttrMap, _mtbfMap) }))
-            .sort((a, b) => { const ps = {"High":3,"Med":2,"Low":1}; return (ps[b._pri]-ps[a._pri]) || a.avgMtbf - b.avgMtbf; })
-            .slice(0, tblH_rows);
-
-        const tbl2X = 6.80;
-        secLabel(s6, tbl2X, tblY - 0.24, 6.34, "Lowest Avg MTBF — Most Frequent Breakdowns", mtbfTop5.length);
-        const mCols2 = [0.28, 1.72, 0.72, 0.62, 1.54, 1.22, 0.24];  // total 6.34"
-        const mHdr2 = tHdr(["#", "Machine Group", "Avg MTBF", "Gaps", "Top Issue", "Worst Machine", "!"]);
-        const mData2 = mtbfTop5.map((g, i) => tRow([
-            { v: i + 1, c: OVC.slate },
-            { v: _ovTrunc(g.mg, 22), b: i === 0 },
-            { v: g.avgMtbf.toFixed(1) + "d", c: g.avgMtbf < 30 ? OVC.red : g.avgMtbf < 60 ? OVC.amber : OVC.green, b: true },
-            { v: g.recurrences, c: OVC.slate },
-            { v: _ovTrunc(g.topIssue, 20), c: OVC.accent },
-            { v: _ovTrunc(g.worstAsset, 18), c: g.worstMtbf != null && g.worstMtbf < 30 ? OVC.red : OVC.text },
-            { v: g._pri, c: g._pri === "High" ? OVC.red : g._pri === "Med" ? OVC.amber : OVC.green },
-        ], i));
-        if (mData2.length) {
-            s6.addTable([mHdr2, ...mData2], { x: tbl2X, y: tblY, w: 6.34, fontFace: FF, colW: mCols2, border: { color: OVC.border }, rowH: 0.36 });
-        } else {
-            s6.addText("No MTBF data available (requires multiple closed WOs per machine).", { x: tbl2X, y: tblY, w: 6.34, h: 0.30, fontSize: 8, color: OVC.sub, fontFace: FF });
-        }
-
-        // Priority legend (centred between tables)
-        s6.addText("! = Priority:  High · Med · Low  (High = MTTR > 7d + MTBF < 30d + ≥3 WOs)",
-            { x: 0.18, y: tblY + 0.36 * (tblH_rows + 1) + 0.04, w: 13.0, h: 0.16, fontSize: 6.5, color: OVC.sub, italic: true, fontFace: FF });
-
-        // ── Management Focus insights ─────────────────────────────────────────
-        const insightY = tblY + 0.36 * (tblH_rows + 1) + 0.26;
-        secLabel(s6, 0.18, insightY, 13.0, "Management Focus");
-        const _genInsights = () => {
-            const ins = [];
-            const highPri = mttrTop5.filter(g => g._pri === "High").map(g => g.mg);
-            const highMttrOnly = mttrTop5.filter(g => g._pri === "Med" && g.avgMttr > 7 && !_mtbfMap[g.mg]).map(g => g.mg);
-            const highFreqOnly = mtbfTop5.filter(g => g._pri === "Med" && g.avgMtbf < 30 && !_mttrMap[g.mg]).map(g => g.mg);
-            if (highPri.length) ins.push(highPri.slice(0, 2).join(" and ") + " ha" + (highPri.length === 1 ? "s" : "ve") + " both high MTTR and frequent recurrence — priority for root cause review and PM effectiveness assessment.");
-            if (highMttrOnly.length) ins.push(highMttrOnly.slice(0, 2).join(" and ") + " show" + (highMttrOnly.length === 1 ? "s" : "") + " high repair duration with lower recurrence, indicating repair complexity rather than repeated breakdown — review spare parts availability and technician skill gap.");
-            if (highFreqOnly.length) ins.push(highFreqOnly.slice(0, 2).join(" and ") + " ha" + (highFreqOnly.length === 1 ? "s" : "ve") + " frequent repeated failures — review preventive maintenance frequency and trigger conditions.");
-            if (!ins.length && mttrTop5.length) ins.push((mttrTop5[0].mg || "Top machine group") + " has the highest average MTTR at " + mttrTop5[0].avgMttr.toFixed(1) + "d — review repair process and spare parts stocking.");
-            if (!ins.length) ins.push("Insufficient MTTR/MTBF history to generate insights. Ensure WOs have valid actual start and end dates.");
-            return ins.slice(0, 3);
-        };
-        const insights = _genInsights();
-        insights.forEach((txt, i) => {
-            s6.addText("• " + txt, {
-                x: 0.18, y: insightY + 0.22 + i * 0.24, w: 13.0, h: 0.22,
-                fontSize: 8, color: OVC.text, fontFace: FF, wrap: true,
-            });
-        });
-
-        foot(s6);
-
-        const fileName = "Maintenance_Overview_Report_" + (R.filters.label || "YTD").replace(/[\s/]/g, "_") + ".pptx";
+        const fileName = "Maintenance_Overview_Report_"
+            + (R.filters.label || "YTD").replace(/[\s/]/g, "_")
+            + "_" + stg.replace(/\s+/g, "_") + ".pptx";
         return pptx.writeFile({ fileName });
+    }
+
+    function _waitForCurrentPptScope(timeoutMs) {
+        const targetSignature = filtersSignature();
+        const overviewReady = () => lastOverview && lastLoadSignature === targetSignature;
+        const predictiveReady = () => predictiveScopeSignature === targetSignature;
+        if (overviewReady() && predictiveReady()) return Promise.resolve({ predictiveReady: true });
+        if (inFlightSignature !== targetSignature) loadOverview({ force: true });
+
+        return new Promise((resolve, reject) => {
+            const startedAt = Date.now();
+            const poll = () => {
+                if (filtersSignature() !== targetSignature) {
+                    reject(new Error("The report scope changed while the PowerPoint was being prepared. Please try again."));
+                    return;
+                }
+                if (overviewReady() && predictiveReady()) {
+                    resolve({ predictiveReady: true });
+                    return;
+                }
+                if (Date.now() - startedAt > timeoutMs) {
+                    // Never reuse predictive content from another stage. The first
+                    // three slides can still render with an empty predictive set.
+                    if (overviewReady()) {
+                        predictiveLatestPayload = null;
+                        resolve({ predictiveReady: false });
+                    } else {
+                        reject(new Error("Timed out waiting for the selected stage data."));
+                    }
+                    return;
+                }
+                window.setTimeout(poll, 250);
+            };
+            poll();
+        });
+    }
+
+    async function _generateOverviewPptForCurrentScope() {
+        if (!window.PptxGenJS) throw new Error("PPT library is still loading. Please try again in a moment.");
+        await _waitForCurrentPptScope(45000);
+        if (!lastOverview) throw new Error("Overview data has not loaded yet.");
+        const report = await buildPptReportData();
+        return generateOvPpt(report);
     }
 
     // ── PPT export entry point ─────────────────────────────────────────────────
     async function exportOverviewPPT() {
-        if (!window.PptxGenJS) { alert("PPT library is still loading. Please try again in a moment."); return; }
-        if (!lastOverview) { alert("Overview data hasn’t loaded yet. Please wait and try again."); return; }
         _ovAllBtns(true);
-        const TO = window.setTimeout(() => {
-            _ovAllBtns(false);
-            alert("PPT generation timed out after 30 seconds. Please try again.");
-        }, 30000);
         try {
-            const R = await buildPptReportData();
-            await generateOvPpt(R);
+            await _generateOverviewPptForCurrentScope();
         } catch (e) {
             alert("PPT export error: " + (e && e.message || "Unknown error."));
         } finally {
             _ovAllBtns(false);
-            window.clearTimeout(TO);
         }
     }
+
+    // Public export hook used by the Downtime page. It mounts the existing
+    // overview exporter into a hidden host, applies the requested scope, and
+    // generates the same five-slide report without navigating away.
+    window.exportMiraOverviewPPT = async function exportMiraOverviewPPT(options = {}) {
+        const root = document.getElementById("mira-overview-root");
+        if (!root) throw new Error("The overview report host is unavailable.");
+        if (!mounted) {
+            renderShell(root);
+            mounted = true;
+        }
+        state.stage = _normalizeOverviewStage(options.stage != null ? options.stage : state.stage);
+        if (options.year != null) state.year = String(options.year);
+        if (options.month != null) state.month = String(options.month);
+        if (["ytd", "monthly", "full_year", "financial_year"].includes(options.periodMode)) {
+            state.periodMode = options.periodMode;
+        }
+        loadOverview({ force: true });
+        return _generateOverviewPptForCurrentScope();
+    };
 
     // Waits for a fresh loadOverview({force:true}) round-trip to actually land
     // (both the overview payload and the predictive cards it kicks off) rather
@@ -5081,6 +5083,7 @@ ${machHtml}
     function shouldAutoRender() {
         const root = document.getElementById("mira-overview-root");
         if (!root) return false;
+        if (root.dataset.autoRender === "false") return false;
         const view = (new URLSearchParams(window.location.search).get("view") || "mira_overview").toLowerCase();
         if (view !== "mira_overview") return false;
         const host = document.getElementById("mira-overview-view");

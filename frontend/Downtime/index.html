@@ -11,13 +11,14 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260724-dropzone-1">
+    <link rel="stylesheet" href="style.css?v=20260813-machine-explorer-period-1">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
 </head>
 <body data-sync-page="downtime">
     <div id="navbar"></div>
@@ -64,6 +65,7 @@
                         <option value="Unclassified">Unclassified</option>
                     </select>
                 </div>
+                <button class="toggle-btn" type="button" id="downtime-export-ppt-btn" title="Generate the five-slide maintenance report for the selected stage">Export PPT</button>
                 <button class="toggle-btn" type="button" id="refresh-asset-mapping-btn" style="display:none">Refresh Asset Mapping</button>
                 <form class="filter-inline import-inline" id="work-order-import-form">
                     <label class="inline-label" for="work-order-import-file">Import WO (or drop file)</label>
@@ -155,15 +157,15 @@
                     <div class="kpi-value" id="kpi-data-reliability">--</div>
                     <div class="summary-stat-row stacked">
                         <div class="summary-stat">
-                            <span class="summary-stat-label">Invalid Work Orders</span>
+                            <span class="summary-stat-label">Data Reliability Issues</span>
                             <span class="summary-stat-value" id="kpi-invalid-work-orders">--</span>
                         </div>
                         <div class="summary-stat">
-                            <span class="summary-stat-label">Review Records</span>
+                            <span class="summary-stat-label">Open WOs (No End Date)</span>
                             <span class="summary-stat-value" id="kpi-data-review-count">--</span>
                         </div>
                     </div>
-                    <div class="kpi-trend" id="kpi-data-reliability-sub">Composite of 6 weighted quality dimensions, YTD.</div>
+                    <div class="kpi-trend" id="kpi-data-reliability-sub">Five weighted dimensions; open WOs are tracked separately.</div>
                 </div>
             </div>
         </section>
@@ -219,9 +221,19 @@
                     <div class="kdi-summary-sub">Valid MTBF gaps</div>
                 </div>
                 <div class="kdi-summary-card kdi-summary-card-note">
-                    <div class="kdi-summary-label">Missing / Invalid Records</div>
-                    <div class="kdi-summary-value" id="kdi-summary-missing-invalid">--</div>
-                    <div class="kdi-summary-sub">Excluded from MTTR</div>
+                    <div class="kdi-summary-label">Open WOs</div>
+                    <div class="kdi-summary-value" id="kdi-summary-open-wo">--</div>
+                    <div class="kdi-summary-sub">No end date; not a defect</div>
+                </div>
+                <div class="kdi-summary-card kdi-summary-card-note">
+                    <div class="kdi-summary-label">Invalid Date Records</div>
+                    <div class="kdi-summary-value" id="kdi-summary-invalid-date">--</div>
+                    <div class="kdi-summary-sub">Excluded and flagged</div>
+                </div>
+                <div class="kdi-summary-card kdi-summary-card-note">
+                    <div class="kdi-summary-label">Other MTTR Exclusions</div>
+                    <div class="kdi-summary-value" id="kdi-summary-other-excluded">--</div>
+                    <div class="kdi-summary-sub">No usable repair duration</div>
                 </div>
             </div>
             <details class="kdi-data-note">
@@ -251,8 +263,16 @@
                                 <span class="summary-stat-value strong" id="kdi-mttr-wo-count">--</span>
                             </div>
                             <div class="summary-stat">
-                                <span class="summary-stat-label" title="Work-order rows excluded from MTTR because TTR/start/end data is missing or invalid.">Missing / Invalid MTTR WOs</span>
-                                <span class="summary-stat-value strong" id="kdi-mttr-missing-count">--</span>
+                                <span class="summary-stat-label" title="Work orders without an Actual End date are still open, not invalid.">Open WOs (No End Date)</span>
+                                <span class="summary-stat-value strong" id="kdi-mttr-open-count">--</span>
+                            </div>
+                            <div class="summary-stat">
+                                <span class="summary-stat-label">Invalid Date Records</span>
+                                <span class="summary-stat-value strong" id="kdi-mttr-invalid-date-count">--</span>
+                            </div>
+                            <div class="summary-stat">
+                                <span class="summary-stat-label">Other MTTR Exclusions</span>
+                                <span class="summary-stat-value strong" id="kdi-mttr-other-excluded-count">--</span>
                             </div>
                             <div class="summary-stat">
                                 <span class="summary-stat-label">Median TTR</span>
@@ -313,11 +333,13 @@
                                                 <th>WO Count</th>
                                                 <th>Total Downtime</th>
                                                 <th>Assets Affected</th>
-                                                <th>Missing / Invalid</th>
+                                                <th>Open WO</th>
+                                                <th>Invalid Date</th>
+                                                <th>Other Excluded</th>
                                             </tr>
                                         </thead>
                                         <tbody id="kdi-mttr-group-table-body">
-                                            <tr><td colspan="6" class="empty-cell">Loading MTTR data&hellip;</td></tr>
+                                            <tr><td colspan="8" class="empty-cell">Loading MTTR data&hellip;</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -1266,7 +1288,7 @@
                             <span class="summary-stat-value strong" id="wo-sla-unclassified-count">--</span>
                         </div>
                         <div class="summary-stat">
-                            <span class="summary-stat-label">Missing Start / End</span>
+                            <span class="summary-stat-label">Missing Start</span>
                             <span class="summary-stat-value strong" id="wo-sla-missing-dates">--</span>
                         </div>
                     </div>
@@ -1580,28 +1602,22 @@
                 <div class="kpi-card compact-summary-card highlight-amber">
                     <div class="kpi-label">Data Reliability Index %</div>
                     <div class="kpi-value mini" id="topic-data-reliability-pct">--</div>
-                    <div class="kpi-trend" id="topic-data-reliability-sub">Composite of 6 weighted quality dimensions. Open View Analysis for the breakdown.</div>
+                    <div class="kpi-trend" id="topic-data-reliability-sub">Five weighted quality dimensions. Open WOs are separate.</div>
                 </div>
                 <div class="kpi-card compact-summary-card highlight-red">
-                    <div class="kpi-label">Invalid Work Orders</div>
+                    <div class="kpi-label">Data Reliability Issues</div>
                     <div class="kpi-value mini" id="topic-invalid-work-orders">--</div>
-                    <div class="kpi-trend">Rows with data-quality flags that need correction.</div>
+                    <div class="kpi-trend">Records with one or more listed reliability defects.</div>
                 </div>
                 <div class="kpi-card compact-summary-card highlight-purple">
-                    <div class="kpi-label">Review Records</div>
+                    <div class="kpi-label">Open WOs (No End Date)</div>
                     <div class="kpi-value mini" id="topic-data-review-count">--</div>
-                    <div class="kpi-trend">Records held for operational review.</div>
+                    <div class="kpi-trend">Operationally open; not counted as invalid.</div>
                 </div>
                 <div class="kpi-card compact-summary-card highlight-blue">
-                    <div class="kpi-label">Missing / Invalid SLA Data</div>
-                    <div class="kpi-value mini" data-topic-mirror="wo-sla-review-count">--</div>
-                    <div class="kpi-trend">Date, severity, or target data needed before SLA can be trusted.</div>
-                    <div class="summary-stat-row">
-                        <div class="summary-stat">
-                            <span class="summary-stat-label">Missing Start / End</span>
-                            <span class="summary-stat-value strong" data-topic-mirror="wo-sla-missing-dates">--</span>
-                        </div>
-                    </div>
+                    <div class="kpi-label">Invalid Date Records</div>
+                    <div class="kpi-value mini" id="topic-invalid-date-count">--</div>
+                    <div class="kpi-trend">Malformed, inverted, implausible, or future dates only.</div>
                 </div>
             </div>
             <button type="button" class="topic-analysis-toggle" data-analysis-toggle aria-expanded="false">View Analysis</button>
@@ -1609,8 +1625,8 @@
                 <div class="topic-analysis-stack">
                     <div class="card nested-card dq-breakdown" id="data-reliability-index-breakdown"></div>
                     <div class="card nested-card">
-                        <div class="card-title">Records Requiring Correction Before KPI Use</div>
-                        <p class="card-subtitle">Shows only records that affect KPI reliability: missing Asset ID / WO ID, missing ActualStart, Finished records with missing ActualEnd, or invalid date sequence (real ActualEnd before ActualStart). Open or incomplete records (New / Confirm / In Progress / Rejected / reWork) with a D365 placeholder ActualEnd (1900-01-01 or blank) are excluded from MTTR but are <strong>not</strong> treated as data errors. SLA fields are not checked for D365 exports. <button type="button" id="repair-pbi-flags-btn" class="inline-action-btn" title="Re-evaluate quality flags for D365 records imported before the lifecycle fix">Repair Import Flags</button></p>
+                        <div class="card-title">Records with Data Reliability Issues</div>
+                        <p class="card-subtitle">Lists every record in scope with an actual reliability defect, including unclassified assets or Machine Groups, missing identifiers, invalid dates, lifecycle contradictions, and CM records whose wording indicates preventive work. A blank or D365-placeholder Actual End is an Open WO, so it is excluded from MTTR but never listed as a date defect. <button type="button" id="repair-pbi-flags-btn" class="inline-action-btn" title="Re-evaluate quality flags for D365 records imported before the lifecycle fix">Repair Import Flags</button></p>
                         <div class="table-wrapper wo-response-table-wrapper">
                             <table>
                                 <thead>
@@ -1618,8 +1634,8 @@
                                         <th>MR / WO</th>
                                         <th>Asset / Machine</th>
                                         <th>Status</th>
-                                        <th>Data Quality Flag</th>
-                                        <th>SLA Data Issue</th>
+                                        <th>Reliability Issue(s)</th>
+                                        <th>Date Validation Issue</th>
                                         <th>Created / Raised</th>
                                         <th>Description</th>
                                         <th>Translated Description</th>
@@ -1722,58 +1738,6 @@
                         <div class="filter-toolbar machine-explorer-filter-toolbar machine-explorer-top-toolbar">
                             <div class="filter-group"><label for="machine-explorer-year">Year</label><select id="machine-explorer-year"><option value="">All Years</option></select></div>
                             <div class="filter-group"><label for="machine-explorer-month">Month</label><select id="machine-explorer-month"><option value="">All Months</option></select></div>
-                            <div class="filter-group">
-                                <label for="machine-explorer-sort">Sort</label>
-                                <select id="machine-explorer-sort">
-                                    <option value="most_wo_mr">Most WO/MR (Default)</option>
-                                    <option value="latest_wo_mr">Latest WO/MR</option>
-                                    <option value="least_closure_rate">Least Closure Rate</option>
-                                    <option value="highest_closure_rate">Highest Closure Rate</option>
-                                    <option value="oldest_open_age">Oldest Open MR Age</option>
-                                    <option value="most_invalid">Most Invalid/Missing Records</option>
-                                </select>
-                            </div>
-                            <div class="filter-group">
-                                <label for="machine-explorer-ack-filter">Acknowledgement Status</label>
-                                <select id="machine-explorer-ack-filter">
-                                    <option value="">All</option>
-                                    <option value="Acknowledged">Acknowledged</option>
-                                    <option value="Not Acknowledged">Not Acknowledged</option>
-                                </select>
-                            </div>
-                            <div class="filter-group">
-                                <label for="me-maint-type">Equip. Function</label>
-                                <select id="me-maint-type">
-                                    <option value="">All Types</option>
-                                </select>
-                            </div>
-                            <div class="filter-group">
-                                <label for="me-zone">Zone</label>
-                                <select id="me-zone">
-                                    <option value="">All Zones</option>
-                                </select>
-                            </div>
-                            <div class="filter-group">
-                                <label for="me-func-loc">Area / Line</label>
-                                <select id="me-func-loc">
-                                    <option value="">All Areas</option>
-                                </select>
-                            </div>
-                            <!-- Hidden filters retained so existing Machine Explorer logic keeps working. -->
-                            <select id="machine-explorer-group" class="hidden" hidden><option value="">All Groups</option></select>
-                            <select id="machine-explorer-criticality" class="hidden" hidden><option value="">All Criticalities</option></select>
-                            <select id="machine-explorer-status" class="hidden" hidden><option value="">All Statuses</option></select>
-                            <select id="machine-explorer-service-level" class="hidden" hidden><option value="">All Service Levels</option></select>
-                            <select id="machine-explorer-asset" class="hidden" hidden><option value="">All Assets</option></select>
-                            <select id="machine-explorer-machine" class="hidden" hidden><option value="">All Machines</option></select>
-                            <select id="machine-explorer-created-by" class="hidden" hidden><option value="">All Creators</option></select>
-                            <select id="machine-explorer-started-by" class="hidden" hidden><option value="">All Starters</option></select>
-                            <select id="machine-explorer-quality" class="hidden" hidden><option value="">All Quality Flags</option></select>
-                            <select id="machine-explorer-asset-criticality" class="hidden" hidden>
-                                <option value="">All</option>
-                                <option value="Critical">Critical</option>
-                                <option value="Non-Critical">Non-Critical</option>
-                            </select>
                         </div>
                         <div class="machine-drill-section machine-explorer-stage">
                             <div class="machine-drill-heading">
@@ -2140,8 +2104,11 @@
         </div>
     </aside>
 
+    <div id="mira-overview-root" data-auto-render="false" hidden></div>
+
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
-    <script src="script.js?v=20260724-mr-cols-noassetid-1" defer></script>
+    <script src="/shared/mira/mira-overview.js?v=20260813-sats-ppt-standard-1" defer></script>
+    <script src="script.js?v=20260813-inactive-critical-retry-1" defer></script>
 
 </body>
 </html>

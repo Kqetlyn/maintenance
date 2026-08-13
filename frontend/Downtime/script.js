@@ -339,6 +339,7 @@ let downtimeStageFilter = DOWNTIME_STAGE_ALL;
 let selectedDashboardTopic = "mr-tracking";
 let machineExplorerSelectedAssetId = "";
 let machineExplorerSelectedGroup = "All Groups";
+let machineExplorerFilterOptionsCache = { rows: null, year: null };
 let machineHistoryViewMode = "selected";        // "selected" = single asset, "all" = all assets in current filters
 let machineHistorySort = "latest_wo_mr";        // Step 3 WO/MR history table sort
 let machineHistoryYearFilter = "";
@@ -347,11 +348,6 @@ let machineHistoryDateFrom = "";
 let machineHistoryDateTo = "";
 let machineHistorySearch = "";
 let machineExplorerRefrigSubgroup = "";          // active subgroup key inside Refrigeration
-let machineExplorerAssetCriticalityFilter = "";
-let machineExplorerAckFilter = "";
-let meMainTypeFilter = "";   // Equip. Function / maint_type filter (e.g. "Cooking Equipment")
-let meZoneFilter = "";       // Zone filter (e.g. "ZN2")
-let meFuncLocFilter = "";    // Functional Location filter (e.g. "ZN2-CL1")
 // Spare part trend data cache (loaded once, reused on scope change)
 let cmcSpareTrendData = null;
 
@@ -830,6 +826,12 @@ const SLA_END_DATE_ALIASES = [
     "Completed Date",
     "completed_date",
 ];
+const OPEN_WO_END_PLACEHOLDER_DATES = new Set([
+    "0001-01-01",
+    "1899-12-30",
+    "1900-01-01",
+    "1970-01-01",
+]);
 const DEFAULT_WORK_ORDER_SLA_TARGETS = [
     { key: "S1", label: "S1 Critical", shortLabel: "S1", fallbackSeverity: "Critical", responseTargetHours: 1, completionTargetHours: null, rank: 1 },
     { key: "S2", label: "S2 High", shortLabel: "S2", fallbackSeverity: "High", responseTargetHours: 4, completionTargetHours: 72, rank: 2 },
@@ -1288,6 +1290,34 @@ function getAcknowledgementStatus(row) {
     return "Review";
 }
 
+function getActualEndState(row) {
+    const { value, field } = getRowFieldByAliases(row, SLA_END_DATE_ALIASES);
+    if (value === null || value === undefined || String(value).trim() === "") {
+        return { state: "open", date: null, field: "", raw: value };
+    }
+    const date = parseDateValue(value);
+    if (!date) return { state: "invalid", date: null, field, raw: value };
+    const dateKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    if (OPEN_WO_END_PLACEHOLDER_DATES.has(dateKey)) {
+        return { state: "open", date: null, field, raw: value, placeholder: true };
+    }
+    return { state: "closed", date, field, raw: value };
+}
+
+function isOpenWorkOrderWithoutEnd(row) {
+    return getActualEndState(row).state === "open";
+}
+
+function isOpenWoDateCompletenessFlag(flag) {
+    const normalized = normalizeClassification(flag);
+    return (
+        /missing.*(?:actual )?(?:start|end|finish)/.test(normalized)
+        || /(?:end|finish).*missing/.test(normalized)
+        || /placeholder.*(?:actual )?end/.test(normalized)
+        || /(?:actual end|finished date|finish date|end date).*before/.test(normalized)
+    );
+}
+
 function getDataQualityFlags(row) {
     // A confirmed correction (Data Review) makes the row count as valid for KPIs.
     if (dataReviewCorrectionResolvedFor(row)) return ["Valid"];
@@ -1299,13 +1329,22 @@ function getDataQualityFlags(row) {
     if (!flags.length && single) {
         flags.push(...single.split(";").map((flag) => flag.trim()).filter(Boolean));
     }
-    const actionableFlags = flags.filter((flag) => flag && flag !== "Valid");
-    // A New MR that has not become a work order yet has nothing to correct: the
-    // asset, dates and closure are attached when the WO is raised. Flagging it
-    // would report normal intake as a data error and make recent months look worse.
+    const openWithoutEnd = isOpenWorkOrderWithoutEnd(row);
+    const actionableFlags = flags.filter((flag) => (
+        flag
+        && flag !== "Valid"
+        && !(openWithoutEnd && isOpenWoDateCompletenessFlag(flag))
+    ));
+    // A New MR waiting for a work order is not a date/closure defect. Keep the
+    // legacy Missing Asset ID flag deferred, then add the more precise
+    // unclassified-asset reliability flag below so it is still visible for review.
     if (rowHasMissingAssetId(row) && !isPendingWorkOrderAssignment(row)
         && !actionableFlags.some((flag) => flag.toLowerCase() === "missing asset id")) {
         actionableFlags.push("Missing Asset ID");
+    }
+    const classificationIssue = getAssetClassificationIssue(row);
+    if (classificationIssue && !actionableFlags.some((flag) => String(flag).startsWith(DQ_UNCLASSIFIED_ASSET_FLAG))) {
+        actionableFlags.push(classificationIssue);
     }
     return actionableFlags.length ? actionableFlags : ["Valid"];
 }
@@ -2560,14 +2599,28 @@ function renderMrCarryoverTable(model) {
     }).join("");
 }
 
+const mrRaisedDateCache = new WeakMap();
+const mrFinishedDateCache = new WeakMap();
 function getMrRaisedDate(row) {
-    return parseMrDateField(row, MR_RAISED_DATE_ALIASES);
+    if (!row || typeof row !== "object") return parseMrDateField(row, MR_RAISED_DATE_ALIASES);
+    if (mrRaisedDateCache.has(row)) return mrRaisedDateCache.get(row);
+    const parsed = parseMrDateField(row, MR_RAISED_DATE_ALIASES);
+    mrRaisedDateCache.set(row, parsed);
+    return parsed;
 }
 
 function getMrFinishedDate(row) {
-    return isMrFinishedStatus(getMrStatus(row))
+    if (!row || typeof row !== "object") {
+        return isMrFinishedStatus(getMrStatus(row))
+            ? parseMrDateField(row, MR_FINISHED_DATE_ALIASES)
+            : { date: null, field: "", invalid: false, missing: true };
+    }
+    if (mrFinishedDateCache.has(row)) return mrFinishedDateCache.get(row);
+    const parsed = isMrFinishedStatus(getMrStatus(row))
         ? parseMrDateField(row, MR_FINISHED_DATE_ALIASES)
         : { date: null, field: "", invalid: false, missing: true };
+    mrFinishedDateCache.set(row, parsed);
+    return parsed;
 }
 
 function getAgeDaysFrom(date, end = new Date()) {
@@ -2754,6 +2807,7 @@ function renderDowntimeOverviewFromRows(rows = []) {
         setText("kpi-work-order-count-sub", "--");
         setHtml("kpi-open-severity-breakdown", `<span class="sl-empty">--</span>`);
         setHtml("kpi-open-severity-critical-breakdown", `<span class="sl-trend-label">Critical open MR by Service level.</span>`);
+        setText("kpi-invalid-work-orders", "--");
         setText("kpi-data-review-count", "--");
         renderTopicDataReliabilityPanel();
         syncTopicMirrors();
@@ -2772,17 +2826,10 @@ function renderDowntimeOverviewFromRows(rows = []) {
         severityMap.set(severity, (severityMap.get(severity) || 0) + 1);
         if (isProductionCritical(row)) criticalSeverityMap.set(severity, (criticalSeverityMap.get(severity) || 0) + 1);
     });
-    const qualityValid = kpiRows.filter(isDataQualityValid).length;
-    const invalidCount = kpiRows.length - qualityValid;
-    const reviewCount = kpiRows.filter((row) => {
-        // For PBI imports, only count rows with actual data-quality flags as "review".
-        // Confirm and reWork are valid operational statuses, not data reliability issues.
-        const srcType = String(row?.source_type || "").toLowerCase();
-        if (srcType === "powerbi_full" || srcType === "powerbi") {
-            return getDataQualityFlags(row).some((flag) => flag !== "Valid");
-        }
-        return getDataQualityFlags(row).some((flag) => flag === "Review status") || getAcknowledgementStatus(row) === "Review";
-    }).length;
+    const reliabilityReferenceDate = getWorkOrderSlaReferenceDate();
+    const reliabilityIssueCount = kpiRows.filter((row) => getDataReliabilityIssues(row, reliabilityReferenceDate).length).length;
+    const openWoCount = kpiRows.filter(isOpenWorkOrderWithoutEnd).length;
+    const qualityValid = kpiRows.length - reliabilityIssueCount;
 
     setText("kpi-maintenance-resolution-time", fmtNumber(openRows.length));
     setText("kpi-maintenance-resolution-sub", `${fmtNumber(newRows.length)} New MR + ${fmtNumber(inProgressRows.length)} In progress MR`);
@@ -2796,21 +2843,21 @@ function renderDowntimeOverviewFromRows(rows = []) {
     const ytdIndex = buildDataQualityIndex(kpiRows);
     const ytdYear = getOverviewYtdYear(rows);
     setText("kpi-data-reliability", fmtPercent(ytdIndex?.index));
-    setText("kpi-invalid-work-orders", fmtNumber(invalidCount));
-    setText("kpi-data-review-count", fmtNumber(reviewCount));
-    setText("kpi-data-reliability-sub", `Composite index${ytdYear ? ` — YTD ${ytdYear}` : ""}. ${fmtNumber(qualityValid)} of ${fmtNumber(kpiRows.length)} records carry no import quality flag.`);
+    setText("kpi-invalid-work-orders", fmtNumber(reliabilityIssueCount));
+    setText("kpi-data-review-count", fmtNumber(openWoCount));
+    setText("kpi-data-reliability-sub", `Five-dimension composite${ytdYear ? ` — YTD ${ytdYear}` : ""}. ${fmtNumber(qualityValid)} of ${fmtNumber(kpiRows.length)} records have no reliability issue; open WOs are excluded from date defects.`);
 
     renderTopicDataReliabilityPanel();
     syncTopicMirrors();
 }
 
 // ─── Composite Data Quality Index ───────────────────────────────────────────
-// The Data Reliability % on the topic panel is a weighted composite of six
+// The Data Reliability % on the topic panel is a weighted composite of five
 // quality dimensions rather than the source quality flag alone. The flag on its
 // own misses the reliability problems the maintenance team actually hits:
 // records booked to a general area asset instead of the machine that failed,
-// PM work logged as corrective, odd start/finish timestamps, and a service
-// level scale that is not being segregated. Every dimension scores 0-100 over
+// PM work logged as corrective, odd start/finish timestamps, and lifecycle
+// contradictions or duplicates. Every dimension scores 0-100 over
 // the rows in the selected period and reports the evidence behind its score, so
 // the footnote under the card can show exactly what moved the number.
 
@@ -2818,28 +2865,17 @@ function renderDowntimeOverviewFromRows(rows = []) {
 // unidentified asset breaks every downstream per-machine KPI (MTBF, MTTR,
 // spare consumption); the source flag is second because it gates MTTR.
 const DQ_INDEX_WEIGHTS = {
-    validity: 20,
-    asset: 25,
-    workType: 15,
-    timeline: 20,
-    serviceLevel: 12,
-    lifecycle: 8,
+    validity: 22,
+    asset: 28,
+    workType: 17,
+    timeline: 23,
+    lifecycle: 10,
 };
-
-// Expected shape of a healthy service-level mix (% of records per level).
-// S1 is meant to be the exception; the bulk of logged work should sit in S3/S4
-// with a real S2 band. Deviation from this profile is what "not segregated"
-// means in practice — everything dumped into one or two levels.
-const DQ_EXPECTED_SERVICE_MIX = { S1: 5, S2: 15, S3: 40, S4: 40 };
-
-// Share of records that should carry a Preventive label before PM labelling is
-// considered trustworthy. Below this the PM/CM split cannot be read.
-const DQ_PREVENTIVE_TARGET_SHARE = 15;
 
 const DQ_MAX_PLAUSIBLE_REPAIR_HOURS = 24 * 30;
 const DQ_MIN_PLAUSIBLE_REPAIR_MINUTES = 1;
 const DQ_START_BEFORE_RAISED_TOLERANCE_HOURS = 1;
-const DQ_STALE_OPEN_DAYS = 90;
+const DQ_UNCLASSIFIED_ASSET_FLAG = "Unclassified asset / machine group";
 
 // Asset names that describe an area / risk zone rather than a machine.
 const DQ_GENERAL_AREA_PATTERNS = [
@@ -2867,10 +2903,38 @@ function getRowFunctionalLocationText(row) {
     return String(row?.raw_functional_location || row?.func_loc || row?.functional_location || "").trim();
 }
 
+// Explain the same bucket labelled "Unclassified" in MTTR/MTBF. Placeholder
+// IDs such as WO-ASSET cannot join to Asset_Master, so neither an asset name nor
+// a specific Machine Group can be assigned. Keep this as a reliability issue
+// even while a New MR is waiting for its eventual work-order assignment.
+function getAssetClassificationIssue(row) {
+    const mappingSource = String(row?.classification_source || row?.mapping_source || "").trim().toLowerCase();
+    const broadGroup = normalizeClassification(
+        row?.machine_group || row?.mappedMainAssetGroup || row?.mapped_main_asset_group || row?.equipment_category
+    );
+    const unknownGroup = ["", "unknown review", "unclassified", "unmapped", "unmapped asset"].includes(broadGroup);
+    const missingAssetId = rowHasMissingAssetId(row);
+    const noMasterMatch = row?.has_assetlist_classification === false
+        || row?.has_asset_master_mapping === false
+        || mappingSource === "fallback";
+
+    if (!missingAssetId && !unknownGroup && !noMasterMatch) return "";
+    if (missingAssetId) {
+        return `${DQ_UNCLASSIFIED_ASSET_FLAG} — placeholder Asset ID has no Asset Master match`;
+    }
+    if (noMasterMatch) {
+        return `${DQ_UNCLASSIFIED_ASSET_FLAG} — Asset ID has no Asset Master match`;
+    }
+    return `${DQ_UNCLASSIFIED_ASSET_FLAG} — no usable Machine Group is assigned`;
+}
+
 // Source quality flags with the injected Missing Asset ID flag removed — asset
 // identification is scored as its own dimension and must not count twice.
 function getSourceQualityFlags(row) {
-    return getDataQualityFlags(row).filter((flag) => normalizeClassification(flag) !== "missing asset id");
+    return getDataQualityFlags(row).filter((flag) => (
+        normalizeClassification(flag) !== "missing asset id"
+        && !String(flag).startsWith(DQ_UNCLASSIFIED_ASSET_FLAG)
+    ));
 }
 
 function hasSourceQualityFlag(row) {
@@ -2881,11 +2945,8 @@ function hasSourceQualityFlag(row) {
 // "Assets mixed into general asset IDs" — the record names an area or risk zone
 // instead of the machine that actually failed.
 function getAssetIdentificationIssue(row) {
-    // The asset is attached when the MR becomes a WO — a New MR still in the
-    // queue is pending, not defective.
-    if (rowHasMissingAssetId(row)) {
-        return isPendingWorkOrderAssignment(row) ? "" : "Missing / placeholder asset ID";
-    }
+    const classificationIssue = getAssetClassificationIssue(row);
+    if (classificationIssue) return classificationIssue;
     const category = normalizeClassification(row?.equipment_category || row?.machine_group);
     if (!DQ_EQUIPMENT_CATEGORIES.has(category)) return "";
     const assetName = getMachineEquipmentName(row);
@@ -2898,8 +2959,8 @@ function getAssetIdentificationIssue(row) {
 // while its own wording describes planned/preventive work.
 function getWorkTypeClassificationIssue(row) {
     const typeText = getPreventiveCorrectiveTypeText(row);
-    if (!typeText) return "No work type recorded";
-    if (matchPmCmPatterns(typeText, PM_CM_PREVENTIVE_PATTERNS).length) return "";
+    const correctiveMatches = matchPmCmPatterns(typeText, PM_CM_EXPLICIT_CORRECTIVE_PATTERNS);
+    if (!correctiveMatches.length) return "";
     const narrativeMatches = matchPmCmPatterns(getPreventiveCorrectiveNarrativeText(row), PM_CM_PREVENTIVE_PATTERNS);
     return narrativeMatches.length ? "Corrective record with preventive wording" : "";
 }
@@ -2908,19 +2969,31 @@ function isRowLoggedPreventive(row) {
     return matchPmCmPatterns(getPreventiveCorrectiveTypeText(row), PM_CM_PREVENTIVE_PATTERNS).length > 0;
 }
 
+function isRowLoggedCorrective(row) {
+    return matchPmCmPatterns(getPreventiveCorrectiveTypeText(row), PM_CM_EXPLICIT_CORRECTIVE_PATTERNS).length > 0;
+}
+
 // "Start and finish date are wrong / odd" — every timestamp contradiction that
 // makes a record unusable for TTR / SLA.
 function getTimelineIntegrityIssues(row, referenceDate) {
-    // New MRs carry only the intake timestamp; there is no repair timeline to judge.
-    if (isMrNewStatus(getMrStatus(row))) return { issues: [], checked: false };
-    const created = getWorkOrderSlaCreatedDate(row).date;
-    const start = getWorkOrderSlaStartDate(row).date;
-    const end = getWorkOrderSlaEndDate(row).date;
+    const createdField = getWorkOrderSlaCreatedDate(row);
+    const startField = getWorkOrderSlaStartDate(row);
+    const endState = getActualEndState(row);
+    const created = createdField.date;
+    const start = startField.date;
+    const end = endState.date;
     const finished = isWorkOrderSlaFinished(getMrStatus(row), row);
     const issues = [];
-    if (!start && !end && !finished) return { issues, checked: false };
+
+    if (createdField.invalid) issues.push("Invalid created date format");
+    if (startField.invalid) issues.push("Invalid start date format");
+    if (endState.state === "invalid") issues.push("Invalid finish date format");
+
+    // Blank and D365-placeholder Actual End values are operationally open WOs.
+    // They are excluded from MTTR but are not data-reliability defects.
+    if (endState.state === "open") return { issues, checked: issues.length > 0, openWo: true };
+
     if (finished && !start) issues.push("Finished without a start time");
-    if (finished && !end) issues.push("Finished without a finish time");
     if (start && end && end < start) issues.push("Finish before start");
     if (created && end && end < created) issues.push("Finish before the request was raised");
     if (created && start && start < new Date(created.getTime() - DQ_START_BEFORE_RAISED_TOLERANCE_HOURS * 3600000)) {
@@ -2935,40 +3008,38 @@ function getTimelineIntegrityIssues(row, referenceDate) {
         if (start && start > referenceDate) issues.push("Start time in the future");
         if (end && end > referenceDate) issues.push("Finish time in the future");
     }
-    return { issues, checked: true };
+    return { issues, checked: Boolean(start || end || finished || issues.length) };
 }
 
-function getLifecycleConsistencyIssue(row, referenceDate) {
+function getInvalidDateIssues(row, referenceDate = getWorkOrderSlaReferenceDate()) {
+    return getTimelineIntegrityIssues(row, referenceDate).issues || [];
+}
+
+function getDataReliabilityIssues(row, referenceDate = getWorkOrderSlaReferenceDate()) {
+    const issues = getDataQualityFlags(row).filter((flag) => flag && flag !== "Valid");
+    const workTypeIssue = getWorkTypeClassificationIssue(row);
+    if (workTypeIssue) issues.push(workTypeIssue);
+    getInvalidDateIssues(row, referenceDate).forEach((issue) => issues.push(`Invalid date — ${issue}`));
+    const lifecycleIssue = getLifecycleConsistencyIssue(row);
+    if (lifecycleIssue) issues.push(lifecycleIssue);
+    const seen = new Set();
+    return issues.filter((issue) => {
+        const key = normalizeClassification(issue);
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    });
+}
+
+function getLifecycleConsistencyIssue(row) {
     const status = getMrStatus(row);
-    // New MRs are waiting to be picked up — closure hygiene applies once work started.
-    if (isMrNewStatus(status)) return "";
     const open = isNormalOpenMrStatus(status);
-    if (open && getWorkOrderSlaEndDate(row).date) return "Open record carrying a finish time";
-    if (open && referenceDate instanceof Date) {
-        const raised = getWorkOrderSlaCreatedDate(row).date || getMrRaisedDate(row).date;
-        if (raised && (referenceDate - raised) / 86400000 > DQ_STALE_OPEN_DAYS) {
-            return `Open for more than ${DQ_STALE_OPEN_DAYS} days`;
-        }
-    }
+    if (open && getActualEndState(row).state === "closed") return "Open record carrying a finish time";
     return "";
 }
 
 function toIndexScore(good, total) {
     return total > 0 ? (good / total) * 100 : null;
-}
-
-// Total-variation distance between the observed service-level mix and the
-// expected profile, expressed as a 0-100 score.
-function scoreServiceLevelBalance(mixCounts, gradedTotal) {
-    if (!gradedTotal) return { score: null, shares: {} };
-    const shares = {};
-    let deviation = 0;
-    Object.entries(DQ_EXPECTED_SERVICE_MIX).forEach(([key, expected]) => {
-        const share = ((mixCounts[key] || 0) / gradedTotal) * 100;
-        shares[key] = share;
-        deviation += Math.abs(share - expected);
-    });
-    return { score: Math.max(0, 100 - deviation / 2), shares };
 }
 
 // Builds the composite index for a set of rows. Returns the weighted index plus
@@ -2980,17 +3051,14 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
     let flagged = 0;
     let assetIssues = 0;
     let missingAssetId = 0;
+    let unclassifiedAssetIssues = 0;
     let generalAreaAsset = 0;
     let workTypeIssues = 0;
-    let missingWorkType = 0;
-    let preventiveLogged = 0;
+    let correctiveLogged = 0;
     let timelineChecked = 0;
     let timelineIssues = 0;
     const timelineReasons = new Map();
-    let severityUnclassified = 0;
-    const severityMix = {};
     let lifecycleIssues = 0;
-    let staleOpen = 0;
     let openWithFinish = 0;
     let newMrRecords = 0;
 
@@ -3001,16 +3069,19 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
         const assetIssue = getAssetIdentificationIssue(row);
         if (assetIssue) {
             assetIssues += 1;
-            if (assetIssue === "Missing / placeholder asset ID") missingAssetId += 1;
-            else generalAreaAsset += 1;
+            if (String(assetIssue).startsWith(DQ_UNCLASSIFIED_ASSET_FLAG)) {
+                unclassifiedAssetIssues += 1;
+                if (rowHasMissingAssetId(row)) missingAssetId += 1;
+            } else if (assetIssue === "Missing / placeholder asset ID") {
+                missingAssetId += 1;
+            } else {
+                generalAreaAsset += 1;
+            }
         }
 
         const workTypeIssue = getWorkTypeClassificationIssue(row);
-        if (workTypeIssue) {
-            workTypeIssues += 1;
-            if (workTypeIssue === "No work type recorded") missingWorkType += 1;
-        }
-        if (isRowLoggedPreventive(row)) preventiveLogged += 1;
+        if (workTypeIssue) workTypeIssues += 1;
+        if (isRowLoggedCorrective(row)) correctiveLogged += 1;
 
         const timeline = getTimelineIntegrityIssues(row, referenceDate);
         if (timeline.checked) {
@@ -3021,32 +3092,19 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
             }
         }
 
-        const severity = getWorkOrderSlaSeverity(row);
-        if (!severity || severity.key === WORK_ORDER_SLA_UNCLASSIFIED.key) severityUnclassified += 1;
-        else severityMix[severity.key] = (severityMix[severity.key] || 0) + 1;
-
         const lifecycleIssue = getLifecycleConsistencyIssue(row, referenceDate);
         if (lifecycleIssue) {
             lifecycleIssues += 1;
             if (lifecycleIssue === "Open record carrying a finish time") openWithFinish += 1;
-            else staleOpen += 1;
         }
     });
 
     const duplicateRows = detectDuplicateWorkOrders(rows).sameDayGroups
         .reduce((sum, group) => sum + Math.max(0, group.length - 1), 0);
 
-    const gradedTotal = total - severityUnclassified;
-    const balance = scoreServiceLevelBalance(severityMix, gradedTotal);
-    const preventiveShare = (preventiveLogged / total) * 100;
-    const preventiveCoverage = Math.min(100, (preventiveShare / DQ_PREVENTIVE_TARGET_SHARE) * 100);
-    const workTypeLabelScore = toIndexScore(total - workTypeIssues, total);
-    const severityGradedScore = toIndexScore(gradedTotal, total);
+    const workTypeScore = toIndexScore(correctiveLogged - workTypeIssues, correctiveLogged);
     const lifecycleDefects = Math.min(total, lifecycleIssues + duplicateRows);
 
-    const mixText = Object.keys(DQ_EXPECTED_SERVICE_MIX)
-        .map((key) => `${key} ${fmtPercent(balance.shares[key] ?? 0)}`)
-        .join(" · ");
     const topTimelineReasons = [...timelineReasons.entries()]
         .sort((a, b) => b[1] - a[1])
         .slice(0, 3)
@@ -3061,7 +3119,7 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
             score: toIndexScore(total - flagged, total),
             basis: `${fmtNumber(total - flagged)} of ${fmtNumber(total)} records`,
             detail: flagged
-                ? `${fmtNumber(flagged)} record${flagged === 1 ? "" : "s"} carry an import data-quality flag. Missing asset IDs are scored under Asset identification instead of here, so this count is lower than the Invalid Work Orders card.`
+                ? `${fmtNumber(flagged)} record${flagged === 1 ? "" : "s"} carry an import data-quality flag. Missing or unclassified assets are scored under Asset identification instead of here to avoid double counting.`
                 : "No record carries an import data-quality flag.",
         },
         {
@@ -3071,18 +3129,18 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
             score: toIndexScore(total - assetIssues, total),
             basis: `${fmtNumber(total - assetIssues)} of ${fmtNumber(total)} records`,
             detail: assetIssues
-                ? `${fmtNumber(generalAreaAsset)} booked to a general area / risk-zone asset instead of a dedicated asset ID, ${fmtNumber(missingAssetId)} with a missing or placeholder asset ID.`
+                ? `${fmtNumber(unclassifiedAssetIssues)} unclassified because the Asset ID is a placeholder, has no Asset Master match, or has no usable Machine Group; ${fmtNumber(generalAreaAsset)} booked to a general area / risk-zone asset. ${fmtNumber(missingAssetId)} of the unclassified records use a missing or placeholder Asset ID.`
                 : "Every record is booked to a dedicated asset ID.",
         },
         {
             key: "workType",
-            label: "Work-type classification (PM vs CM)",
+            label: "CM records with PM indicators",
             weight: DQ_INDEX_WEIGHTS.workType,
-            // Half the score is per-record labelling, half is whether PM work is
-            // being labelled at all — a month with no PM label is not credible.
-            score: workTypeLabelScore === null ? null : (workTypeLabelScore * 0.5) + (preventiveCoverage * 0.5),
-            basis: `${fmtNumber(preventiveLogged)} preventive of ${fmtNumber(total)} records`,
-            detail: `${fmtPercent(preventiveShare)} logged preventive against a ${fmtPercent(DQ_PREVENTIVE_TARGET_SHARE)} expectation; ${fmtNumber(workTypeIssues - missingWorkType)} corrective record${workTypeIssues - missingWorkType === 1 ? "" : "s"} use preventive wording, ${fmtNumber(missingWorkType)} carry no work type.`,
+            score: workTypeScore,
+            basis: `${fmtNumber(workTypeIssues)} flagged of ${fmtNumber(correctiveLogged)} CM records`,
+            detail: workTypeIssues
+                ? `${fmtNumber(workTypeIssues)} record${workTypeIssues === 1 ? " is" : "s are"} explicitly logged Corrective but contain PM/preventive wording and should be reviewed. No target PM/CM ratio is used.`
+                : "No explicitly logged Corrective record contains PM/preventive wording. No target PM/CM ratio is used.",
         },
         {
             key: "timeline",
@@ -3092,20 +3150,7 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
             basis: `${fmtNumber(timelineChecked - timelineIssues)} of ${fmtNumber(timelineChecked)} dated records`,
             detail: timelineIssues
                 ? `${fmtNumber(timelineIssues)} record${timelineIssues === 1 ? "" : "s"} with an odd timeline — ${topTimelineReasons}.`
-                : "No inverted, missing, or implausible start/finish times.",
-        },
-        {
-            key: "serviceLevel",
-            label: "Service-level segregation",
-            weight: DQ_INDEX_WEIGHTS.serviceLevel,
-            // 40% for grading the record at all, 60% for using the scale properly.
-            score: balance.score === null
-                ? severityGradedScore
-                : (severityGradedScore * 0.4) + (balance.score * 0.6),
-            basis: `${fmtNumber(gradedTotal)} of ${fmtNumber(total)} records graded`,
-            detail: gradedTotal
-                ? `Logged mix ${mixText} against an expected ${Object.entries(DQ_EXPECTED_SERVICE_MIX).map(([key, value]) => `${key} ${fmtPercent(value)}`).join(" · ")}. ${fmtNumber(severityUnclassified)} unclassified.`
-                : `No record carries a usable service level.`,
+                : "No malformed, inverted, implausible, or future start/finish times.",
         },
         {
             key: "lifecycle",
@@ -3114,7 +3159,7 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
             score: toIndexScore(total - lifecycleDefects, total),
             basis: `${fmtNumber(total - lifecycleDefects)} of ${fmtNumber(total)} records`,
             detail: lifecycleDefects
-                ? `${fmtNumber(duplicateRows)} duplicate entr${duplicateRows === 1 ? "y" : "ies"}, ${fmtNumber(openWithFinish)} open record${openWithFinish === 1 ? "" : "s"} carrying a finish time, ${fmtNumber(staleOpen)} open beyond ${DQ_STALE_OPEN_DAYS} days.`
+                ? `${fmtNumber(duplicateRows)} duplicate entr${duplicateRows === 1 ? "y" : "ies"} and ${fmtNumber(openWithFinish)} open record${openWithFinish === 1 ? "" : "s"} carrying a finish time.`
                 : "No duplicates or open/closed contradictions.",
         },
     ];
@@ -3135,11 +3180,11 @@ function buildDataQualityIndex(rows = [], referenceDate = getWorkOrderSlaReferen
             assetIssues,
             generalAreaAsset,
             missingAssetId,
+            unclassifiedAssetIssues,
             workTypeIssues,
-            preventiveLogged,
+            correctiveLogged,
             timelineChecked,
             timelineIssues,
-            severityUnclassified,
             duplicateRows,
             lifecycleIssues,
         },
@@ -3217,7 +3262,7 @@ function renderDataQualityIndexBreakdown(model, periodLabel, previous) {
         <div class="card-title">Data Reliability Index Breakdown</div>
         <p class="dq-breakdown-lead">
             <strong>${escapeHtml(periodLabel)}</strong> — ${escapeHtml(fmtNumber(model.total))} work order record${model.total === 1 ? "" : "s"} raised in this period.
-            The index is the weighted average of the six dimensions below, not the import flag alone. ${deltaHtml}
+            The index is the weighted average of the five dimensions below, not the import flag alone. ${deltaHtml}
         </p>
         <div class="table-wrapper dq-breakdown-table-wrap">
             <table class="dq-breakdown-table">
@@ -3229,12 +3274,11 @@ function renderDataQualityIndexBreakdown(model, periodLabel, previous) {
         </div>
         <p class="dq-breakdown-note">
             New MRs still awaiting a work order (${escapeHtml(fmtNumber(model.counts.newMrRecords))} in this period) are not counted as
-            defects for asset assignment, repair timeline, or closure — those are attached when the WO is raised — but they are still
-            scored on how they were raised (service level, work type, area vs dedicated asset, double entries).
-            Timeline integrity is otherwise scored over records that carry a start, finish, or closed status, so a period with many still-open
-            records is judged on fewer dated records than its total. Service-level segregation compares the logged S1–S4 mix with an
-            expected ${escapeHtml(Object.entries(DQ_EXPECTED_SERVICE_MIX).map(([key, value]) => `${key} ${value}%`).join(" · "))} profile;
-            work-type classification expects at least ${escapeHtml(fmtPercent(DQ_PREVENTIVE_TARGET_SHARE))} of records to be labelled preventive.
+            missing-WO, repair-timeline, or closure defects. A missing/placeholder Asset ID or absent Machine Group is still flagged as
+            unclassified because MTTR, MTBF, and other per-machine KPIs cannot assign that record reliably.
+            A blank or placeholder Actual End means Open WO and is not a reliability defect. Timeline integrity scores only malformed,
+            contradictory, implausible, or future dates. PM/CM classification flags only records explicitly logged CM whose wording indicates
+            preventive work; it does not apply a target PM/CM ratio. Severity is not part of this index.
         </p>`;
 }
 
@@ -3251,6 +3295,7 @@ function renderTopicDataReliabilityPanel() {
         setText("topic-data-reliability-sub", "No work order records in the selected scope.");
         setText("topic-invalid-work-orders", "--");
         setText("topic-data-review-count", "--");
+        setText("topic-invalid-date-count", "--");
         renderDataQualityIndexBreakdown(null, getTopicReliabilityPeriodLabel(scope));
         renderDataReliabilityActionList([]);
         renderAliasMappingReview();
@@ -3258,16 +3303,11 @@ function renderTopicDataReliabilityPanel() {
         renderDataReviewHistoryPanel();
         return;
     }
-    const qualityValid = scoped.filter(isDataQualityValid).length;
-    const invalidCount = scoped.length - qualityValid;
-    const reviewCount = scoped.filter((row) => {
-        const srcType = String(row?.source_type || "").toLowerCase();
-        if (srcType === "powerbi_full" || srcType === "powerbi") {
-            return getDataQualityFlags(row).some((flag) => flag !== "Valid");
-        }
-        return getDataQualityFlags(row).some((flag) => flag === "Review status") || getAcknowledgementStatus(row) === "Review";
-    }).length;
     const referenceDate = getWorkOrderSlaReferenceDate();
+    const reliabilityIssueCount = scoped.filter((row) => getDataReliabilityIssues(row, referenceDate).length).length;
+    const openWoCount = scoped.filter(isOpenWorkOrderWithoutEnd).length;
+    const invalidDateCount = scoped.filter((row) => getInvalidDateIssues(row, referenceDate).length).length;
+    const qualityValid = scoped.length - reliabilityIssueCount;
     const indexModel = buildDataQualityIndex(scoped, referenceDate);
     const periodLabel = getTopicReliabilityPeriodLabel(scope);
     const previousScope = getTopicReliabilityPreviousScope(scope);
@@ -3276,9 +3316,10 @@ function renderTopicDataReliabilityPanel() {
         : null;
 
     setText("topic-data-reliability-pct", fmtPercent(indexModel?.index));
-    setText("topic-invalid-work-orders", fmtNumber(invalidCount));
-    setText("topic-data-review-count", fmtNumber(reviewCount));
-    setText("topic-data-reliability-sub", `Composite of 6 weighted dimensions for ${periodLabel}. ${fmtNumber(qualityValid)} of ${fmtNumber(scoped.length)} records carry no import quality flag.`);
+    setText("topic-invalid-work-orders", fmtNumber(reliabilityIssueCount));
+    setText("topic-data-review-count", fmtNumber(openWoCount));
+    setText("topic-invalid-date-count", fmtNumber(invalidDateCount));
+    setText("topic-data-reliability-sub", `Five-dimension composite for ${periodLabel}. ${fmtNumber(qualityValid)} of ${fmtNumber(scoped.length)} records have no reliability issue; open WOs are tracked separately.`);
     renderDataQualityIndexBreakdown(
         indexModel,
         periodLabel,
@@ -4347,6 +4388,9 @@ const PM_CM_CORRECTIVE_PATTERNS = [
     { pattern: /\balarm\b|\btrip(?:ped)?\b|\babnormal\b/i, label: "alarm / abnormal" },
     { pattern: /\burgent\b|\bemergency\b/i, label: "urgent / emergency" },
 ];
+const PM_CM_EXPLICIT_CORRECTIVE_PATTERNS = [
+    { pattern: /\bcorrective\b|\bcm\b/i, label: "logged Corrective / CM" },
+];
 
 function matchPmCmPatterns(text, patterns) {
     const value = String(text || "");
@@ -4485,10 +4529,14 @@ function classifyPreventiveCorrectiveRow(row, index) {
     const narrativeText = getPreventiveCorrectiveNarrativeText(row);
     const typePreventiveMatches = matchPmCmPatterns(typeText, PM_CM_PREVENTIVE_PATTERNS);
     const typeCorrectiveMatches = matchPmCmPatterns(typeText, PM_CM_CORRECTIVE_PATTERNS);
+    const explicitCorrectiveMatches = matchPmCmPatterns(typeText, PM_CM_EXPLICIT_CORRECTIVE_PATTERNS);
     const narrativePreventiveMatches = matchPmCmPatterns(narrativeText, PM_CM_PREVENTIVE_PATTERNS);
+    const explicitlyCorrective = explicitCorrectiveMatches.length > 0;
     const loggedType = typePreventiveMatches.length ? "preventive" : "corrective";
     const originalType = loggedType === "preventive" ? "Preventive" : "Corrective";
-    const reviewMatches = originalType === "Corrective" ? [...new Set([...typePreventiveMatches, ...narrativePreventiveMatches])] : [];
+    const reviewMatches = originalType === "Corrective" && explicitlyCorrective
+        ? [...new Set(narrativePreventiveMatches)]
+        : [];
     const id = getPreventiveCorrectiveReviewKey(row, index);
     const savedDecision = getPreventiveCorrectiveReviewDecision(id);
     const reviewDecision = savedDecision?.reviewDecision || "";
@@ -4514,8 +4562,8 @@ function classifyPreventiveCorrectiveRow(row, index) {
         reviewedAt: savedDecision?.reviewedAt || "",
         reviewNote: savedDecision?.reviewNote || "",
         typeText: typeText || (loggedType === "preventive" ? "Preventive" : "No preventive marker found"),
-        reviewNeeded: originalType === "Corrective" && reviewMatches.length > 0 && reviewStatus !== "Reviewed",
-        hasPreventiveSignal: originalType === "Corrective" && reviewMatches.length > 0,
+        reviewNeeded: explicitlyCorrective && reviewMatches.length > 0 && reviewStatus !== "Reviewed",
+        hasPreventiveSignal: explicitlyCorrective && reviewMatches.length > 0,
         reviewReason: reviewMatches.length ? `Preventive signal: ${reviewMatches.slice(0, 3).join(", ")}` : "No preventive signal detected",
         correctiveReason: typeCorrectiveMatches.length ? typeCorrectiveMatches.slice(0, 3).join(", ") : "Logged/assumed corrective",
         createdDate: created.date || raised.date || null,
@@ -5210,9 +5258,15 @@ function classifyWorkOrderSlaRow(row, index, referenceDate) {
     const severity = getWorkOrderSlaSeverity(row);
     const created = getWorkOrderSlaCreatedDate(row);
     const actualStart = getWorkOrderSlaStartDate(row);
-    const actualEnd = getWorkOrderSlaEndDate(row);
+    const actualEndField = getWorkOrderSlaEndDate(row);
+    const actualEndState = getActualEndState(row);
+    const actualEnd = actualEndState.state === "closed"
+        ? actualEndField
+        : { ...actualEndField, date: null, invalid: actualEndState.state === "invalid" };
     const statusText = getMrStatus(row);
-    const isFinished = isWorkOrderSlaFinished(statusText, row);
+    // Status may say Finished before D365 has an Actual End. Until an end is
+    // present, keep it operationally open instead of inventing a date defect.
+    const isFinished = actualEndState.state === "closed" && isWorkOrderSlaFinished(statusText, row);
     const normalizedStartDate = created.date && actualStart.date && actualStart.date < created.date ? created.date : actualStart.date;
     const responseHoursRaw = created.date && normalizedStartDate ? getDurationHours(created.date, normalizedStartDate) : null;
     const completionHoursRaw = created.date && actualEnd.date ? getDurationHours(created.date, actualEnd.date) : null;
@@ -5250,9 +5304,6 @@ function classifyWorkOrderSlaRow(row, index, referenceDate) {
     } else if (isFinished && !actualStart.date) {
         slaStatus = "Missing Start Date";
         delayLines.push("Completed record missing Actual Start Date");
-    } else if (isFinished && !actualEnd.date) {
-        slaStatus = "Missing End Date";
-        delayLines.push("Completed record missing Actual End Date");
     } else if (!created.date) {
         slaStatus = "Missing Data";
         delayLines.push("Missing Created Date");
@@ -6271,7 +6322,7 @@ function renderWorkOrderResponseSection(rows = []) {
     );
     setText(
         "wo-sla-missing-dates",
-        fmtNumber(model.entries.filter((entry) => entry.slaStatus === "Missing Start Date" || entry.slaStatus === "Missing End Date").length)
+        fmtNumber(model.entries.filter((entry) => entry.slaStatus === "Missing Start Date").length)
     );
     renderWorkOrderSlaSummaryTable(model);
     renderWorkOrderSlaAverageTable("wo-sla-response-body", model.severityRows, "response");
@@ -6291,24 +6342,17 @@ function renderDataReliabilityActionList(entries = []) {
     const body = document.getElementById("data-quality-action-body");
     if (!body) return;
     dataReviewActionSnapshots = {};
-    const actionRows = (entries || []).filter((entry) => {
-        const qualityFlags = getDataQualityFlags(entry.row).filter((flag) => flag !== "Valid");
-        if (qualityFlags.length) return true;
-        // Power BI exports have no SLA data — skip SLA check for all PBI source types.
-        const srcType = String(entry.row?.source_type || "").toLowerCase();
-        if (srcType === "powerbi" || srcType === "powerbi_full") return false;
-        return isWorkOrderSlaMissingStatus(entry.slaStatus);
-    }).slice(0, 250);
+    const referenceDate = getWorkOrderSlaReferenceDate();
+    const actionRows = (entries || []).filter((entry) => getDataReliabilityIssues(entry.row, referenceDate).length);
     if (!actionRows.length) {
-        body.innerHTML = `<tr><td colspan="9" class="empty-cell">No data-quality action records in the current scope. Confirmed rows now count toward KPIs.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="9" class="empty-cell">No data-reliability issues in the current scope. Open WOs without an end date are tracked separately and do not appear here.</td></tr>`;
         return;
     }
     body.innerHTML = actionRows.map((entry, index) => {
         const row = entry.row;
-        const qualityFlags = getDataQualityFlags(row).filter((flag) => flag !== "Valid");
-        const slaIssue = isWorkOrderSlaMissingStatus(entry.slaStatus)
-            ? [entry.slaStatus, ...(entry.delayLines || []).filter((line) => line !== "Within target")].join(" | ")
-            : "--";
+        const reliabilityIssues = getDataReliabilityIssues(row, referenceDate);
+        const invalidDateIssues = getInvalidDateIssues(row, referenceDate);
+        const dateIssue = invalidDateIssues.length ? invalidDateIssues.join(" | ") : "--";
         const originalCreated = entry.created?.date || getMrRaisedDate(row).date;
         const translatedDescription = cleanMrValue(row?.translated_description);
         const mrId = getMrRequestId(row, index) || entry.id || "--";
@@ -6319,7 +6363,7 @@ function renderDataReliabilityActionList(entries = []) {
         dataReviewActionSnapshots[key] = {
             mrId, assetName, assetId,
             createdISO: originalCreated instanceof Date && !Number.isNaN(originalCreated.getTime()) ? originalCreated.toISOString().slice(0, 10) : "",
-            flags: qualityFlags,
+            flags: reliabilityIssues,
         };
         const correctedCreated = ov?.corrections?.createdDate ? new Date(ov.corrections.createdDate) : null;
         const displayCreated = (correctedCreated && !Number.isNaN(correctedCreated.getTime())) ? correctedCreated : originalCreated;
@@ -6335,8 +6379,8 @@ function renderDataReliabilityActionList(entries = []) {
                     <div class="cell-sub">${escapeHtml(ov?.corrections?.assetId || assetId)}</div>
                 </td>
                 <td>${renderBadgeCell("status", getMrStatus(row))}</td>
-                <td>${escapeHtml(qualityFlags.length ? qualityFlags.join("; ") : "Valid")}</td>
-                <td>${escapeHtml(slaIssue)}</td>
+                <td>${escapeHtml(reliabilityIssues.join("; "))}</td>
+                <td>${escapeHtml(dateIssue)}</td>
                 <td>${escapeHtml(displayCreated ? fmtDateOnly(displayCreated) : "--")}</td>
                 <td class="description-cell">${escapeHtml(getMrDescription(row) || "--")}</td>
                 <td class="description-cell">${escapeHtml(translatedDescription || "--")}</td>
@@ -6568,6 +6612,19 @@ function setSelectOptions(id, values, label) {
     if (unique.includes(current)) select.value = current;
 }
 
+function setMachineExplorerMonthOptions(values = []) {
+    const select = document.getElementById("machine-explorer-month");
+    if (!select) return;
+    const current = select.value;
+    const unique = [...new Set(values.filter(Boolean).map(String))].sort();
+    select.innerHTML = `<option value="">All Months</option>` + unique.map((value) => {
+        const index = Number.parseInt(value, 10) - 1;
+        const label = MR_MONTH_LABELS[index] || value;
+        return `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`;
+    }).join("");
+    select.value = unique.includes(current) ? current : "";
+}
+
 function formatDateInputValue(date) {
     if (!(date instanceof Date) || Number.isNaN(date.getTime())) return "";
     const year = date.getFullYear();
@@ -6607,107 +6664,49 @@ function getMachineExplorerFilterValue(id) {
 }
 
 function getMachineExplorerFilterState() {
-    const groupValue = normalizeMachineExplorerGroupLabel(getMachineExplorerFilterValue("machine-explorer-group") || machineExplorerSelectedGroup || MACHINE_EXPLORER_ALL_GROUP);
+    const groupValue = normalizeMachineExplorerGroupLabel(machineExplorerSelectedGroup || MACHINE_EXPLORER_ALL_GROUP);
     return {
         group: groupValue === "" ? MACHINE_EXPLORER_ALL_GROUP : groupValue,
-        asset: getMachineExplorerFilterValue("machine-explorer-asset"),
-        machine: getMachineExplorerFilterValue("machine-explorer-machine"),
-        criticality: getMachineExplorerFilterValue("machine-explorer-criticality"),
-        status: getMachineExplorerFilterValue("machine-explorer-status"),
-        serviceLevel: getMachineExplorerFilterValue("machine-explorer-service-level"),
+        asset: machineExplorerSelectedAssetId,
         year: getMachineExplorerFilterValue("machine-explorer-year"),
         month: getMachineExplorerFilterValue("machine-explorer-month"),
-        createdBy: getMachineExplorerFilterValue("machine-explorer-created-by"),
-        startedBy: getMachineExplorerFilterValue("machine-explorer-started-by"),
-        quality: getMachineExplorerFilterValue("machine-explorer-quality"),
-        assetCriticality: getMachineExplorerFilterValue("machine-explorer-asset-criticality") || machineExplorerAssetCriticalityFilter,
-        acknowledgement: getMachineExplorerFilterValue("machine-explorer-ack-filter") || machineExplorerAckFilter,
-        maintType: (document.getElementById("me-maint-type")?.value || meMainTypeFilter || ""),
-        zone: (document.getElementById("me-zone")?.value || meZoneFilter || ""),
-        funcLoc: (document.getElementById("me-func-loc")?.value || meFuncLocFilter || ""),
     };
 }
 
-function getMachineExplorerOptions(rows = []) {
-    const byAsset = new Map();
-    rows.forEach((row) => {
-        const assetId = getMachineAssetId(row);
-        if (!assetId) return;
-        const name = getMachineEquipmentName(row);
-        const existing = byAsset.get(assetId) || {
-            assetId,
-            name,
-            count: 0,
-            openCount: 0,
-        };
-        existing.count += 1;
-        existing.openCount += isNormalOpenMrStatus(getMrStatus(row)) ? 1 : 0;
-        if ((!existing.name || existing.name === "--") && name) existing.name = name;
-        byAsset.set(assetId, existing);
-    });
-    return [...byAsset.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name) || a.assetId.localeCompare(b.assetId));
-}
-
 function populateMachineExplorerFilters(rows = []) {
-    const groupSelect = document.getElementById("machine-explorer-group");
-    if (groupSelect) {
-        const requested = normalizeMachineExplorerGroupLabel(machineExplorerSelectedGroup || groupSelect.value || MACHINE_EXPLORER_ALL_GROUP);
-        groupSelect.innerHTML = MACHINE_EXPLORER_GROUPS.map((group) => (
-            `<option value="${escapeHtml(group)}">${escapeHtml(group)}</option>`
-        )).join("");
-        machineExplorerSelectedGroup = MACHINE_EXPLORER_GROUPS.includes(requested) ? requested : MACHINE_EXPLORER_ALL_GROUP;
-        groupSelect.value = machineExplorerSelectedGroup;
-    }
+    const currentYear = getMachineExplorerFilterValue("machine-explorer-year");
+    if (machineExplorerFilterOptionsCache.rows === rows && machineExplorerFilterOptionsCache.year === currentYear) return;
 
     const years = new Set();
-    const months = new Set();
+    const allMonths = new Set();
+    let minRaisedDate = null;
+    let maxRaisedDate = null;
     rows.forEach((row) => {
         const raised = getMrRaisedDate(row).date;
         if (!raised) return;
         years.add(String(raised.getFullYear()));
-        months.add(String(raised.getMonth() + 1).padStart(2, "0"));
+        allMonths.add(String(raised.getMonth() + 1).padStart(2, "0"));
+        if (!minRaisedDate || raised < minRaisedDate) minRaisedDate = raised;
+        if (!maxRaisedDate || raised > maxRaisedDate) maxRaisedDate = raised;
     });
-    setSelectOptions("machine-explorer-criticality", rows.map((row) => row.criticality || row.normalized_criticality), "All Criticalities");
-    setSelectOptions("machine-explorer-status", rows.map(getMrStatus), "All Statuses");
-    setSelectOptions("machine-explorer-service-level", rows.map(getMrServiceLevel), "All Service Levels");
-    setSelectOptions("machine-explorer-year", [...years].sort((a, b) => b.localeCompare(a)), "All Years");
-    setSelectOptions("machine-explorer-month", [...months].sort(), "All Months");
-    setSelectOptions("machine-history-year", [...years].sort((a, b) => b.localeCompare(a)), "All Years");
-    setSelectOptions("machine-history-month", [...months].sort(), "All Months");
-    setSelectOptions("machine-explorer-created-by", rows.map(getMrCreatedBy).filter((value) => value !== "--"), "All Creators");
-    setSelectOptions("machine-explorer-started-by", rows.map(getMrStartedBy).filter((value) => value !== "--"), "All Starters");
-    setSelectOptions("machine-explorer-quality", rows.flatMap(getDataQualityFlags), "All Quality Flags");
-
-    const selectorRows = filterMachineExplorerRows(rows, { includeAssetFilter: false });
-    const machineOptions = getMachineExplorerOptions(selectorRows);
-    const machineSelect = document.getElementById("machine-explorer-machine");
-    if (machineSelect) {
-        const previous = machineSelect.value;
-        machineSelect.innerHTML = `<option value="">All Machines</option>` + machineOptions.map((item) => (
-            `<option value="${escapeHtml(item.assetId)}">${escapeHtml(item.name)} | ${escapeHtml(item.assetId)}</option>`
-        )).join("");
-        machineSelect.value = machineOptions.some((item) => item.assetId === previous) ? previous : "";
+    const sortedYears = [...years].sort((a, b) => b.localeCompare(a));
+    setSelectOptions("machine-explorer-year", sortedYears, "All Years");
+    const selectedYear = getMachineExplorerFilterValue("machine-explorer-year");
+    const months = selectedYear ? new Set() : allMonths;
+    if (selectedYear) {
+        rows.forEach((row) => {
+            const raised = getMrRaisedDate(row).date;
+            if (raised && String(raised.getFullYear()) === selectedYear) {
+                months.add(String(raised.getMonth() + 1).padStart(2, "0"));
+            }
+        });
     }
+    setMachineExplorerMonthOptions([...months]);
+    setSelectOptions("machine-history-year", sortedYears, "All Years");
+    setSelectOptions("machine-history-month", [...allMonths].sort(), "All Months");
 
-    const assetSelect = document.getElementById("machine-explorer-asset");
-    if (assetSelect) {
-        const previous = machineExplorerSelectedAssetId || assetSelect.value;
-        let optionsHtml = `<option value="">All Assets</option>` + machineOptions.map((item) => (
-            `<option value="${escapeHtml(item.assetId)}">${escapeHtml(item.assetId)}</option>`
-        )).join("");
-        if (previous && assetProfiles?.[previous] && !machineOptions.some((item) => item.assetId === previous)) {
-            optionsHtml += `<option value="${escapeHtml(previous)}">${escapeHtml(previous)}</option>`;
-        }
-        assetSelect.innerHTML = optionsHtml;
-        assetSelect.value = Array.from(assetSelect.options).some((item) => item.value === previous) ? previous : "";
-    }
-
-    const raisedDates = rows
-        .map((row) => getMrRaisedDate(row).date)
-        .filter((date) => date instanceof Date && !Number.isNaN(date.getTime()))
-        .sort((a, b) => a.getTime() - b.getTime());
-    const minRaised = raisedDates.length ? formatDateInputValue(raisedDates[0]) : "";
-    const maxRaised = raisedDates.length ? formatDateInputValue(raisedDates[raisedDates.length - 1]) : "";
+    const minRaised = minRaisedDate ? formatDateInputValue(minRaisedDate) : "";
+    const maxRaised = maxRaisedDate ? formatDateInputValue(maxRaisedDate) : "";
     ["machine-history-date-from", "machine-history-date-to"].forEach((id) => {
         const input = document.getElementById(id);
         if (!input) return;
@@ -6715,78 +6714,7 @@ function populateMachineExplorerFilters(rows = []) {
         input.max = maxRaised;
     });
     syncMachineHistoryPeriodInputs();
-
-    // ── Maintenance Type (Equip. Function) — contextual to current Category scope ──
-    // We want all rows in the current category scope (not filtered by ME state), so
-    // the chip list shows every type that exists in scope — not just the filtered subset.
-    populateMeMainTypeSelect(rows);
-
-    // ── Zone + Area/Line — from all ME rows (orthogonal filter) ──
-    populateMeZoneSelect(rows);
-}
-
-function populateMeMainTypeSelect(rows) {
-    const sel = document.getElementById("me-maint-type");
-    if (!sel) return;
-    const prev = sel.value;
-    const types = new Map(); // maint_type → display label with count
-    rows.forEach((row) => {
-        const code = String(row.maint_type_code || "").trim();
-        const label = String(row.maint_type || "").trim();
-        if (!label || label === "Unassigned") return;
-        const display = label + (code && code !== "Unassigned" ? ` (${code})` : "");
-        if (!types.has(label)) types.set(label, display);
-    });
-    const sorted = [...types.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-    sel.innerHTML = `<option value="">All Types</option>` +
-        sorted.map(([val, disp]) => `<option value="${escapeHtml(val)}">${escapeHtml(disp)}</option>`).join("") +
-        (rows.some((r) => !r.maint_type || r.maint_type === "Unassigned")
-            ? `<option value="Unassigned">Unassigned</option>` : "");
-    sel.value = [...types.keys()].includes(prev) || prev === "Unassigned" ? prev : "";
-}
-
-const _ZONE_DISPLAY = {
-    ZN1: "ZN1 — Preparation",
-    ZN2: "ZN2 — Cooking",
-    ZN3: "ZN3 — Assembly",
-    ZN4: "ZN4 — Packing",
-};
-function populateMeZoneSelect(rows) {
-    const zoneSel = document.getElementById("me-zone");
-    if (!zoneSel) return;
-    const prevZone = zoneSel.value;
-    const zones = new Map(); // zone code → display label
-    rows.forEach((row) => {
-        const z = String(row.zone || "").trim();
-        if (!z || z === "Unassigned") return;
-        if (!zones.has(z)) zones.set(z, _ZONE_DISPLAY[z] || z);
-    });
-    const sortedZones = [...zones.entries()].sort((a, b) => a[0].localeCompare(b[0]));
-    const hasUnassigned = rows.some((r) => !r.zone || r.zone === "Unassigned");
-    zoneSel.innerHTML = `<option value="">All Zones</option>` +
-        sortedZones.map(([val, disp]) => `<option value="${escapeHtml(val)}">${escapeHtml(disp)}</option>`).join("") +
-        (hasUnassigned ? `<option value="Unassigned">Unassigned</option>` : "");
-    zoneSel.value = [...zones.keys()].includes(prevZone) || prevZone === "Unassigned" ? prevZone : "";
-    populateMeFuncLocSelect(rows, zoneSel.value);
-}
-
-function populateMeFuncLocSelect(rows, zoneValue) {
-    const flSel = document.getElementById("me-func-loc");
-    if (!flSel) return;
-    const prev = flSel.value;
-    const locs = new Map(); // func_loc code → display (func_loc_name or code)
-    rows.forEach((row) => {
-        const z = String(row.zone || "").trim();
-        if (zoneValue && z !== zoneValue) return;
-        const code = String(row.func_loc || "").trim();
-        const name = String(row.func_loc_name || "").trim();
-        if (!code || code === "Unassigned") return;
-        if (!locs.has(code)) locs.set(code, name ? `${name} (${code})` : code);
-    });
-    const sorted = [...locs.entries()].sort((a, b) => a[1].localeCompare(b[1]));
-    flSel.innerHTML = `<option value="">All Areas</option>` +
-        sorted.map(([val, disp]) => `<option value="${escapeHtml(val)}">${escapeHtml(disp)}</option>`).join("");
-    flSel.value = [...locs.keys()].includes(prev) ? prev : "";
+    machineExplorerFilterOptionsCache = { rows, year: selectedYear };
 }
 
 function rowIsCritical(row) {
@@ -6811,95 +6739,90 @@ function isUnknownMachineExplorerGroup(row) {
         || normalizedRaw.includes("review");
 }
 
-function rowMatchesMachineExplorerCriticality(row, value) {
-    if (!value) return true;
-    if (value === "Critical") return rowIsCritical(row);
-    if (value === "Non-Critical") return !rowIsCritical(row);
-    return true;
-}
-
-function rowMatchesMachineExplorerAcknowledgement(row, value) {
-    if (!value) return true;
-    const ackStatus = normalizeClassification(getAcknowledgementStatus(row));
-    if (value === "Not Acknowledged") return ackStatus === "not acknowledged";
-    if (value === "Acknowledged") return ackStatus === "acknowledged in progress" || ackStatus === "closed" || ackStatus === "acknowledged";
-    return true;
-}
-
 function filterMachineExplorerRows(rows = [], options = {}) {
     const {
         includeGroupFilter = true,
         includeAssetFilter = true,
+        includePeriodFilter = true,
         selectedAssetId = "",
     } = options;
     const state = getMachineExplorerFilterState();
-    const assetFilter = selectedAssetId || (includeAssetFilter ? (state.asset || state.machine) : "");
+    const assetFilter = selectedAssetId || (includeAssetFilter ? state.asset : "");
     return rows.filter((row) => {
         const rowAssetId = getMachineAssetId(row);
-        const raised = getMrRaisedDate(row).date;
-        if (state.year && (!raised || String(raised.getFullYear()) !== state.year)) return false;
-        if (state.month && (!raised || String(raised.getMonth() + 1).padStart(2, "0") !== state.month)) return false;
+        if (includePeriodFilter && (state.year || state.month)) {
+            const raised = getMrRaisedDate(row).date;
+            if (state.year && (!raised || String(raised.getFullYear()) !== state.year)) return false;
+            if (state.month && (!raised || String(raised.getMonth() + 1).padStart(2, "0") !== state.month)) return false;
+        }
         if (includeGroupFilter && !rowMatchesMachineExplorerGroup(row, state.group)) return false;
         if (assetFilter && rowAssetId !== assetFilter) return false;
-        if (state.status && getMrStatus(row) !== state.status) return false;
-        if (state.criticality && String(row.criticality || row.normalized_criticality || "") !== state.criticality) return false;
-        if (!rowMatchesMachineExplorerCriticality(row, state.assetCriticality)) return false;
-        if (!rowMatchesMachineExplorerAcknowledgement(row, state.acknowledgement)) return false;
-        if (state.serviceLevel && getMrServiceLevel(row) !== state.serviceLevel) return false;
-        if (state.startedBy && getMrStartedBy(row) !== state.startedBy) return false;
-        if (state.createdBy && getMrCreatedBy(row) !== state.createdBy) return false;
-        if (state.quality && !getDataQualityFlags(row).includes(state.quality)) return false;
-        if (state.maintType) {
-            const rowMt = String(row.maint_type || "").trim();
-            if (rowMt !== state.maintType) return false;
-        }
-        if (state.zone) {
-            const rowZone = String(row.zone || "").trim();
-            if (rowZone !== state.zone) return false;
-        }
-        if (state.funcLoc) {
-            const rowFl = String(row.func_loc || "").trim();
-            if (rowFl !== state.funcLoc) return false;
-        }
         return true;
     });
 }
 
+const latestMrDateCache = new WeakMap();
 function getLatestMrDate(row) {
-    return [
+    if (row && typeof row === "object" && latestMrDateCache.has(row)) return latestMrDateCache.get(row);
+    const latest = [
         getMrRaisedDate(row).date,
         getMrFinishedDate(row).date,
         parseDateValue(row?.latest_event_time),
         parseDateValue(row?.actual_end_time || row?.maintenance_end_time),
         parseDateValue(row?.actual_start_time || row?.maintenance_start_time),
-    ].filter(Boolean).sort((a, b) => b - a)[0] || null;
+    ].filter(Boolean).reduce((current, date) => (!current || date > current ? date : current), null);
+    if (row && typeof row === "object") latestMrDateCache.set(row, latest);
+    return latest;
 }
 
 function summarizeMachineExplorerRows(rows = []) {
-    const openRows = rows.filter((row) => isNormalOpenMrStatus(getMrStatus(row)));
-    const notAckRows = rows.filter((row) => isMrNewStatus(getMrStatus(row)) && !getMrWorkOrderOnlyId(row));
-    const inProgressRows = rows.filter((row) => isMrInProgressStatus(getMrStatus(row)));
-    const finishedRows = rows.filter((row) => isMrFinishedStatus(getMrStatus(row)));
-    const validTtr = finishedRows.map(getTtrHours).filter((value) => value !== null);
-    const oldestOpenAge = Math.max(
-        -1,
-        ...openRows.map((row) => getAgeDaysFrom(getMrRaisedDate(row).date)).filter((days) => days !== null)
-    );
-    const latestDate = rows.map(getLatestMrDate).filter(Boolean).sort((a, b) => b - a)[0] || null;
-    const assetIds = new Set(rows.map(getMachineAssetId).filter(Boolean));
-    const invalidRows = rows.filter((row) => !isDataQualityValid(row));
+    const assetIds = new Set();
+    const now = new Date();
+    let open = 0;
+    let notAcknowledged = 0;
+    let inProgress = 0;
+    let finished = 0;
+    let validTtrCount = 0;
+    let totalTtr = 0;
+    let oldestOpenAge = null;
+    let latestDate = null;
+    let invalid = 0;
+    rows.forEach((row) => {
+        const status = getMrStatus(row);
+        const isOpen = isNormalOpenMrStatus(status);
+        if (isOpen) {
+            open += 1;
+            const age = getAgeDaysFrom(getMrRaisedDate(row).date, now);
+            if (age !== null && (oldestOpenAge === null || age > oldestOpenAge)) oldestOpenAge = age;
+        }
+        if (isMrNewStatus(status) && !getMrWorkOrderOnlyId(row)) notAcknowledged += 1;
+        if (isMrInProgressStatus(status)) inProgress += 1;
+        if (isMrFinishedStatus(status)) {
+            finished += 1;
+            const ttr = getTtrHours(row);
+            if (ttr !== null) {
+                totalTtr += ttr;
+                validTtrCount += 1;
+            }
+        }
+        const latest = getLatestMrDate(row);
+        if (latest && (!latestDate || latest > latestDate)) latestDate = latest;
+        const assetId = getMachineAssetId(row);
+        if (assetId) assetIds.add(assetId);
+        if (!isDataQualityValid(row)) invalid += 1;
+    });
     return {
         total: rows.length,
         assetCount: assetIds.size,
-        open: openRows.length,
-        notAcknowledged: notAckRows.length,
-        inProgress: inProgressRows.length,
-        finished: finishedRows.length,
-        closureRate: rows.length ? (finishedRows.length / rows.length) * 100 : null,
-        averageTtr: validTtr.length ? validTtr.reduce((sum, value) => sum + value, 0) / validTtr.length : null,
-        oldestOpenAge: oldestOpenAge >= 0 ? oldestOpenAge : null,
+        open,
+        notAcknowledged,
+        inProgress,
+        finished,
+        closureRate: rows.length ? (finished / rows.length) * 100 : null,
+        averageTtr: validTtrCount ? totalTtr / validTtrCount : null,
+        oldestOpenAge,
         latestDate,
-        invalid: invalidRows.length,
+        invalid,
     };
 }
 
@@ -6974,10 +6897,15 @@ function renderMachineExplorerKpis(filteredRows = []) {
 }
 
 function buildMachineExplorerGroupRows(rows = []) {
+    const rowsByGroup = new Map(MACHINE_EXPLORER_GROUPS.map((group) => [group, []]));
+    rows.forEach((row) => {
+        const group = normalizeMachineExplorerGroupLabel(getPerformanceMachineGroup(row));
+        if (rowsByGroup.has(group) && group !== MACHINE_EXPLORER_ALL_GROUP) rowsByGroup.get(group).push(row);
+    });
     return MACHINE_EXPLORER_GROUPS.map((group) => {
         const groupRows = group === MACHINE_EXPLORER_ALL_GROUP
             ? rows
-            : rows.filter((row) => rowMatchesMachineExplorerGroup(row, group));
+            : rowsByGroup.get(group);
         return { group, rows: groupRows, ...summarizeMachineExplorerRows(groupRows) };
     });
 }
@@ -7015,8 +6943,6 @@ function renderMachineExplorerGroupCards(rows = []) {
             machineExplorerRefrigSubgroup = "";
             machineExplorerRefrigCondenserGroupId = "";
             machineExplorerRefrigExpandedCondensers = new Set();
-            const groupSelect = document.getElementById("machine-explorer-group");
-            if (groupSelect) groupSelect.value = machineExplorerSelectedGroup;
             renderMachineExplorer(getCategoryScopedAllRows());
         });
     });
@@ -7582,7 +7508,10 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
     });
 
     if (viewAll) {
-        const filtered = _applyHistorySearch(filterMachineHistoryPeriodRows(filterMachineExplorerRows(rows, { includeAssetFilter: false })).sort(compareMachineHistoryRows));
+        const filtered = _applyHistorySearch(filterMachineHistoryPeriodRows(filterMachineExplorerRows(rows, {
+            includeAssetFilter: false,
+            includePeriodFilter: false,
+        })).sort(compareMachineHistoryRows));
         renderMachineExplorerKpis(filtered);
         const groupLabel = machineExplorerSelectedGroup && machineExplorerSelectedGroup !== MACHINE_EXPLORER_ALL_GROUP
             ? machineExplorerSelectedGroup
@@ -7664,11 +7593,15 @@ function getSelectedAssetMatchedRows(rows, assetId) {
     if (profile && window.AssetMatcher) {
         // Apply every non-asset, non-group filter (period/status/etc.), then smart
         // match so records mis-coded under a general area are still found.
-        const base = filterMachineExplorerRows(rows, { includeAssetFilter: false, includeGroupFilter: false });
+        const base = filterMachineExplorerRows(rows, {
+            includeAssetFilter: false,
+            includeGroupFilter: false,
+            includePeriodFilter: false,
+        });
         return window.AssetMatcher.filterRecordsForSelectedAsset(base, profile, { includeRelated: includeRelatedMatches });
     }
     // Fallback (profile not loaded yet): strict Asset ID match.
-    return filterMachineExplorerRows(rows, { selectedAssetId: assetId });
+    return filterMachineExplorerRows(rows, { selectedAssetId: assetId, includePeriodFilter: false });
 }
 
 function exportMachineExplorerData() {
@@ -7927,13 +7860,17 @@ function renderMachineExplorer(rows = []) {
     // 4-level drill-down: 1. Group → 2. Sub Machine Group (Refrigeration) → 3. Machine/Asset → 4. WO/MR History.
     // "Condenser / Evaporator" subgroup replaces step 2+3 with a compact tree + detail split panel.
     populateMachineExplorerFilters(rows);
-    const groupRows = filterMachineExplorerRows(rows, { includeGroupFilter: false });
-    renderMachineExplorerGroupCards(groupRows);
-    renderRefrigSubgroupSection(rows);    // step 2: subgroup buttons (Refrigeration only)
-    renderRefrigCdeSection(rows);         // step 3: CDE split panel (Condenser/Evaporator subgroup only)
+    // Apply Year/Month once, then reuse the smaller period set throughout the explorer.
+    const periodRows = filterMachineExplorerRows(rows, {
+        includeGroupFilter: false,
+        includeAssetFilter: false,
+    });
+    renderMachineExplorerGroupCards(periodRows);
+    renderRefrigSubgroupSection(periodRows);    // step 2: subgroup buttons (Refrigeration only)
+    renderRefrigCdeSection(periodRows);         // step 3: CDE split panel (Condenser/Evaporator subgroup only)
 
     // Standard step-2 asset table uses rows filtered by the active refrigeration subgroup when applicable.
-    let standardRows = filterMachineExplorerRows(rows);
+    let standardRows = filterMachineExplorerRows(periodRows, { includePeriodFilter: false });
     if (machineExplorerSelectedGroup === "Refrigeration" && machineExplorerRefrigSubgroup
         && machineExplorerRefrigSubgroup !== "all" && machineExplorerRefrigSubgroup !== "condenser-evaporator") {
         standardRows = filterRowsByRefrigSubgroup(standardRows, machineExplorerRefrigSubgroup);
@@ -7971,7 +7908,7 @@ function renderMachineExplorer(rows = []) {
         machineExplorerSelectedAssetId = "";
     }
     renderMachineExplorerAssetSummary(assetRows);
-    renderMachineExplorerHistory(rows, allAssetRows);
+    renderMachineExplorerHistory(periodRows, allAssetRows);
 }
 
 function renderDynamicsWorkOrderSections(rows = []) {
@@ -10450,6 +10387,37 @@ function setPerformanceView(view) {
     if (view === "utilities") renderMachineExplorer(getCategoryScopedAllRows());
 }
 
+async function exportMaintenancePptFromDowntime() {
+    const button = document.getElementById("downtime-export-ppt-btn");
+    const selectedStage = getSelectedDowntimeStage();
+    const overviewStage = selectedStage === "Stage 1" ? "stage1" : selectedStage === "Stage 2" ? "stage2" : "all";
+    const stageLabel = overviewStage === "stage1" ? "Stage 1" : overviewStage === "stage2" ? "Stage 2" : "All Stages";
+    if (typeof window.exportMiraOverviewPPT !== "function") {
+        alert("The PowerPoint exporter is still loading. Please try again in a moment.");
+        return;
+    }
+    if (button) {
+        button.disabled = true;
+        button.textContent = `Generating ${stageLabel}…`;
+    }
+    try {
+        const reportYear = getOverviewYtdYear(downtimeOverviewRowsCache || []) || new Date().getFullYear();
+        await window.exportMiraOverviewPPT({ stage: overviewStage, year: reportYear, periodMode: "ytd" });
+        if (button) button.textContent = "PPT Downloaded";
+    } catch (error) {
+        console.error("Downtime PPT export failed:", error);
+        alert("PPT export error: " + (error?.message || "Unknown error."));
+        if (button) button.textContent = "Export PPT";
+    } finally {
+        if (button) {
+            window.setTimeout(() => {
+                button.disabled = false;
+                button.textContent = "Export PPT";
+            }, 1200);
+        }
+    }
+}
+
 function wireFilters() {
     [
         "group-criticality-filter",
@@ -10479,24 +10447,8 @@ function wireFilters() {
     document.getElementById("custom-end")?.addEventListener("change", handlePeriodChange);
     document.getElementById("downtime-stage-filter")?.addEventListener("change", handleDowntimeStageChange);
     document.getElementById("downtime-category-filter")?.addEventListener("change", handleEquipmentCategoryChange);
+    document.getElementById("downtime-export-ppt-btn")?.addEventListener("click", exportMaintenancePptFromDowntime);
 
-    // ── Machine Explorer: Maintenance Type + Zone + Area/Line filters ──
-    document.getElementById("me-maint-type")?.addEventListener("change", (e) => {
-        meMainTypeFilter = e.target.value || "";
-        renderMachineExplorer(getCategoryScopedAllRows());
-    });
-    document.getElementById("me-zone")?.addEventListener("change", (e) => {
-        meZoneFilter = e.target.value || "";
-        meFuncLocFilter = "";
-        const flSel = document.getElementById("me-func-loc");
-        if (flSel) flSel.value = "";
-        populateMeFuncLocSelect(getCategoryScopedAllRows(), meZoneFilter);
-        renderMachineExplorer(getCategoryScopedAllRows());
-    });
-    document.getElementById("me-func-loc")?.addEventListener("change", (e) => {
-        meFuncLocFilter = e.target.value || "";
-        renderMachineExplorer(getCategoryScopedAllRows());
-    });
     document.getElementById("refresh-asset-mapping-btn")?.addEventListener("click", handleAssetMappingRefresh);
 
     // Topic-panel scoped filters — only the dedicated panels respect these.
@@ -10722,56 +10674,18 @@ function wireFilters() {
     document.getElementById("machine-history-export-btn")?.addEventListener("click", () => {
         exportMachineExplorerData();
     });
-    document.getElementById("machine-explorer-machine")?.addEventListener("change", (event) => {
-        machineExplorerSelectedAssetId = event.target.value || "";
-        const assetSelect = document.getElementById("machine-explorer-asset");
-        if (assetSelect) assetSelect.value = machineExplorerSelectedAssetId;
-        renderMachineExplorer(getCategoryScopedAllRows());
-    });
-    document.getElementById("machine-explorer-asset")?.addEventListener("change", (event) => {
-        machineExplorerSelectedAssetId = event.target.value || "";
-        const machineSelect = document.getElementById("machine-explorer-machine");
-        if (machineSelect) machineSelect.value = machineExplorerSelectedAssetId;
-        renderMachineExplorer(getCategoryScopedAllRows());
-    });
-    document.getElementById("machine-explorer-group")?.addEventListener("change", (event) => {
-        machineExplorerSelectedGroup = normalizeMachineExplorerGroupLabel(event.target.value || MACHINE_EXPLORER_ALL_GROUP);
-        machineExplorerSelectedAssetId = "";
-        machineExplorerRefrigSubgroup = "";
-        machineExplorerRefrigCondenserGroupId = "";
-        machineExplorerRefrigExpandedCondensers = new Set();
-        renderMachineExplorer(getCategoryScopedAllRows());
-    });
-    document.getElementById("machine-explorer-sort")?.addEventListener("change", (event) => {
-        machineExplorerSort = event.target.value || "most_wo_mr";
-        renderMachineExplorer(getCategoryScopedAllRows());
-    });
-    document.getElementById("machine-explorer-asset-criticality")?.addEventListener("change", (event) => {
-        machineExplorerAssetCriticalityFilter = event.target.value || "";
+    document.getElementById("machine-explorer-year")?.addEventListener("change", () => {
+        const monthSelect = document.getElementById("machine-explorer-month");
+        if (monthSelect) monthSelect.value = "";
         machineExplorerSelectedAssetId = "";
         renderMachineExplorer(getCategoryScopedAllRows());
     });
-    document.getElementById("machine-explorer-ack-filter")?.addEventListener("change", (event) => {
-        machineExplorerAckFilter = event.target.value || "";
+    document.getElementById("machine-explorer-month")?.addEventListener("change", () => {
         machineExplorerSelectedAssetId = "";
         renderMachineExplorer(getCategoryScopedAllRows());
     });
     document.getElementById("refrig-tree-search")?.addEventListener("input", () => {
         renderRefrigCdeTree(getCategoryScopedAllRows());
-    });
-    [
-        "machine-explorer-criticality",
-        "machine-explorer-status",
-        "machine-explorer-service-level",
-        "machine-explorer-year",
-        "machine-explorer-month",
-        "machine-explorer-created-by",
-        "machine-explorer-started-by",
-        "machine-explorer-quality",
-    ].forEach((id) => {
-        document.getElementById(id)?.addEventListener("change", () => {
-            renderMachineExplorer(getCategoryScopedAllRows());
-        });
     });
     document.getElementById("mtbf-year-filter")?.addEventListener("change", () => {
         // Reset month when year changes, then repopulate months for that year
@@ -10868,6 +10782,43 @@ function buildInactiveCriticalMachineApiUrl() {
     return `/api/maintenance/critical-machines/inactive?${query.toString()}`;
 }
 
+async function fetchInactiveCriticalMachinePayload() {
+    const url = buildInactiveCriticalMachineApiUrl();
+    let lastNetworkError = null;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+        let response;
+        try {
+            response = await fetch(url, { cache: "no-store" });
+        } catch (error) {
+            lastNetworkError = error;
+            if (attempt === 0) {
+                await new Promise((resolve) => window.setTimeout(resolve, 400));
+                continue;
+            }
+            throw error;
+        }
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.ok === false) {
+            throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
+        }
+        return payload;
+    }
+    throw lastNetworkError || new Error("Network request failed");
+}
+
+function flattenInactiveCriticalMachineIssues(rows = []) {
+    return rows.flatMap((machine) => {
+        const issues = Array.isArray(machine.issues) && machine.issues.length ? machine.issues : [machine];
+        return issues.map((issue) => ({
+            ...issue,
+            asset_id: issue.asset_id || machine.asset_id,
+            asset_name: issue.machine_name || machine.machine_name || machine.display_machine,
+            request_state: issue.request_state || issue.status || machine.status,
+            actual_start: issue.actual_start || machine.actual_start,
+        }));
+    });
+}
+
 function formatCriticalMachineCategoryCounts(map = {}) {
     const parts = [];
     const prod = Number(map["Production Equipment"] || 0);
@@ -10898,7 +10849,7 @@ function renderCriticalMachineStatusCardFromState() {
         return;
     }
 
-    if (inactiveCriticalMachineState.error) {
+    if (inactiveCriticalMachineState.error && !inactiveCriticalMachineState.loaded) {
         setText("act-count-active", "--");
         setText("act-count-maintenance", "--");
         setText("act-count-total", total ? fmtNumber(total) : "--");
@@ -10921,7 +10872,9 @@ function renderCriticalMachineStatusCardFromState() {
     }));
     setText(
         "critical-status-card-note",
-        inactive
+        inactiveCriticalMachineState.error
+            ? `Live refresh failed; showing the last successful result for this scope. ${inactiveCriticalMachineState.error}`
+            : inactive
             ? `${fmtNumber(inactive)} inactive critical machine row${inactive === 1 ? "" : "s"} found from ${fmtNumber(inactiveIssues)} open issue${inactiveIssues === 1 ? "" : "s"}.`
             : "All critical machines in scope are active; no open MR/WO is keeping a critical machine inactive."
     );
@@ -10929,6 +10882,11 @@ function renderCriticalMachineStatusCardFromState() {
 
 async function refreshInactiveCriticalMachines({ force = false } = {}) {
     const scopeKey = getInactiveCriticalMachineScopeKey();
+    if (inactiveCriticalMachineState.loading && inactiveCriticalMachineState.scopeKey === scopeKey) {
+        renderCriticalMachineStatusCardFromState();
+        renderInactiveCriticalDrawer();
+        return inactiveCriticalMachineState;
+    }
     if (!force && inactiveCriticalMachineState.loaded && inactiveCriticalMachineState.scopeKey === scopeKey) {
         renderCriticalMachineStatusCardFromState();
         renderInactiveCriticalDrawer();
@@ -10936,8 +10894,12 @@ async function refreshInactiveCriticalMachines({ force = false } = {}) {
     }
 
     const token = ++inactiveCriticalMachineRequestToken;
+    const previousState = inactiveCriticalMachineState;
+    const hasSameScopeSnapshot = previousState.loaded
+        && previousState.scopeKey === scopeKey
+        && Array.isArray(previousState.rows);
     inactiveCriticalMachineState = {
-        ...inactiveCriticalMachineState,
+        ...previousState,
         loading: true,
         loaded: false,
         error: "",
@@ -10947,30 +10909,30 @@ async function refreshInactiveCriticalMachines({ force = false } = {}) {
     renderInactiveCriticalDrawer();
 
     try {
-        const response = await fetch(buildInactiveCriticalMachineApiUrl(), { cache: "no-store" });
-        const payload = await response.json().catch(() => ({}));
-        if (!response.ok || payload.ok === false) {
-            throw new Error(payload.message || payload.error || `HTTP ${response.status}`);
-        }
+        const payload = await fetchInactiveCriticalMachinePayload();
         if (token !== inactiveCriticalMachineRequestToken) return inactiveCriticalMachineState;
+        const rows = Array.isArray(payload.machines) ? payload.machines : [];
         inactiveCriticalMachineState = {
             loading: false,
             loaded: true,
             error: "",
             scopeKey,
-            rows: Array.isArray(payload.machines) ? payload.machines : [],
+            rows,
             meta: payload.meta || {},
             counts: payload.counts || { active: {}, inactive: {} },
         };
+        openWorkOrdersData = flattenInactiveCriticalMachineIssues(rows);
+        openWorkOrdersLoaded = true;
     } catch (error) {
         if (token !== inactiveCriticalMachineRequestToken) return inactiveCriticalMachineState;
         inactiveCriticalMachineState = {
-            ...inactiveCriticalMachineState,
             loading: false,
-            loaded: true,
+            loaded: hasSameScopeSnapshot,
             error: error.message || String(error),
-            rows: [],
-            counts: { active: {}, inactive: {} },
+            scopeKey,
+            rows: hasSameScopeSnapshot ? previousState.rows : [],
+            meta: hasSameScopeSnapshot ? previousState.meta : {},
+            counts: hasSameScopeSnapshot ? previousState.counts : { active: {}, inactive: {} },
         };
     }
 
@@ -11182,12 +11144,16 @@ function renderInactiveCriticalDrawer() {
     }
 
     if (inactiveCriticalMachineState.error) {
-        message.textContent = `Unable to load inactive critical machines: ${inactiveCriticalMachineState.error}`;
-        body.innerHTML = `<tr><td colspan="21" class="critical-drawer-empty">No rows available while the API request is failing.</td></tr>`;
-        return;
+        message.textContent = inactiveCriticalMachineState.loaded
+            ? `Live refresh failed; showing the last successful result. ${inactiveCriticalMachineState.error}`
+            : `Unable to load inactive critical machines: ${inactiveCriticalMachineState.error}. The drawer will retry when reopened, or click Refresh.`;
+        if (!inactiveCriticalMachineState.loaded) {
+            body.innerHTML = `<tr><td colspan="21" class="critical-drawer-empty">The live request was interrupted. Close and reopen this drawer, or click Refresh to retry.</td></tr>`;
+            return;
+        }
+    } else {
+        message.textContent = meta.logic_note || "Inactive machines are based on open statuses or missing/placeholder Actual End dates, evaluated outside the visible date window.";
     }
-
-    message.textContent = meta.logic_note || "Inactive machines are based on open statuses or missing/placeholder Actual End dates, evaluated outside the visible date window.";
 
     if (!rows.length) {
         body.innerHTML = `<tr><td colspan="21" class="critical-drawer-empty">No inactive critical machines found for the selected stage/category.</td></tr>`;
@@ -11268,11 +11234,7 @@ function drillIntoInactiveCriticalMachine(assetId) {
     machineExplorerRefrigCondenserGroupId = "";
     machineExplorerRefrigExpandedCondensers = new Set();
     machineExplorerSelectedAssetId = normalizedAssetId;
-    const groupSelect = document.getElementById("machine-explorer-group");
-    const assetSelect = document.getElementById("machine-explorer-asset");
     const machineSelect = document.getElementById("machine-name-select");
-    if (groupSelect) groupSelect.value = MACHINE_EXPLORER_ALL_GROUP;
-    if (assetSelect) assetSelect.value = normalizedAssetId;
     if (machineSelect) machineSelect.value = normalizedAssetId;
     renderMachineExplorer(getCategoryScopedAllRows());
     const section = document.querySelector(".machine-explorer-module, .machine-performance-card");
@@ -11532,8 +11494,6 @@ function renderMachineNameList(filter = machineExplorerSearch) {
     const lowerFilter = machineExplorerSearch.trim().toLowerCase();
     const searchInput = document.getElementById("machine-explorer-search");
     if (searchInput && searchInput.value !== machineExplorerSearch) searchInput.value = machineExplorerSearch;
-    const sortSelect = document.getElementById("machine-explorer-sort");
-    if (sortSelect && sortSelect.value !== machineExplorerSort) sortSelect.value = machineExplorerSort;
     const filtered = lowerFilter
         ? assetListData.filter((m) => machineMatchesExplorerSearch(m, lowerFilter))
         : [...assetListData];
@@ -11642,24 +11602,9 @@ function renderOpenWoKpi() {
 
 async function loadOpenWorkOrders() {
     try {
-        const response = await fetch(buildInactiveCriticalMachineApiUrl(), { cache: "no-store" });
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const data = await response.json();
-        if (Array.isArray(data.open_work_orders)) {
-            openWorkOrdersData = data.open_work_orders;
-        } else {
-            const machines = Array.isArray(data.machines) ? data.machines : [];
-            openWorkOrdersData = machines.flatMap((machine) => {
-                const issues = Array.isArray(machine.issues) && machine.issues.length ? machine.issues : [machine];
-                return issues.map((issue) => ({
-                    ...issue,
-                    asset_id: issue.asset_id || machine.asset_id,
-                    asset_name: issue.machine_name || machine.machine_name || machine.display_machine,
-                    request_state: issue.request_state || issue.status || machine.status,
-                    actual_start: issue.actual_start || machine.actual_start,
-                }));
-            });
-        }
+        const state = await refreshInactiveCriticalMachines({ force: true });
+        if (state.error && !state.rows.length) throw new Error(state.error);
+        openWorkOrdersData = flattenInactiveCriticalMachineIssues(state.rows);
         openWorkOrdersLoaded = true;
         renderCurrentDowntimeKpi();
         if (assetListLoaded || assetListLoadFailed) renderActivityStatusCharts();
@@ -12011,9 +11956,11 @@ async function _runOrganizedDowntimeExport(btn) {
         const entries = buildOrganizedExportEntries(rows, assetLookup);
         const machineRows = buildExportMachineRows(entries);
         const mtbfIntervals = buildExportMtbfIntervals(entries);
-        const validEntries = entries.filter((entry) => isDataQualityValid(entry.row));
-        const invalidEntries = entries.filter((entry) => !isDataQualityValid(entry.row));
-        const reviewEntries = entries.filter((entry) => entry.dataQualityFlags.includes("Review status") || entry.acknowledgement === "Review");
+        const reliabilityReferenceDate = getWorkOrderSlaReferenceDate();
+        const reliabilityIssueEntries = entries.filter((entry) => getDataReliabilityIssues(entry.row, reliabilityReferenceDate).length);
+        const validEntries = entries.filter((entry) => !getDataReliabilityIssues(entry.row, reliabilityReferenceDate).length);
+        const openWoEntries = entries.filter((entry) => isOpenWorkOrderWithoutEnd(entry.row));
+        const invalidDateEntries = entries.filter((entry) => getInvalidDateIssues(entry.row, reliabilityReferenceDate).length);
         const openEntries = entries.filter((entry) => isNormalOpenMrStatus(entry.status));
         const notAckEntries = entries.filter((entry) => isMrNewStatus(entry.status) && !entry.workOrder);
         const finishedEntries = entries.filter((entry) => isMrFinishedStatus(entry.status));
@@ -12042,9 +11989,10 @@ async function _runOrganizedDowntimeExport(btn) {
             ["New / Not Acknowledged MR", notAckEntries.length, "Status New and blank Work Order"],
             ["In Progress MR", entries.filter((entry) => isMrInProgressStatus(entry.status)).length, "Acknowledged but not completed"],
             ["Finished MR", finishedEntries.length, "Status Finished"],
-            ["Valid Data Records", validEntries.length, "Data Quality Flag is Valid"],
-            ["Invalid / Missing Date Records", invalidEntries.length, "Any Data Quality Flag other than Valid"],
-            ["Review Records", reviewEntries.length, "Review status or Review acknowledgement"],
+            ["Records Without Reliability Issues", validEntries.length, "No listed data-reliability defect"],
+            ["Data Reliability Issue Records", reliabilityIssueEntries.length, "Listed under Data Reliability"],
+            ["Open WOs Without End Date", openWoEntries.length, "Operationally open; not a reliability defect"],
+            ["Invalid Date Records", invalidDateEntries.length, "Malformed, contradictory, implausible, or future dates"],
             ["Average TTR Hours", ttrValues.length ? exportRound2(ttrValues.reduce((sum, value) => sum + value, 0) / ttrValues.length) : "", "Finished valid records only"],
             ["Median TTR Hours", medianTtr !== null ? exportRound2(medianTtr) : "", "Finished valid records only"],
             ["MTBF Interval Count", mtbfIntervals.length, "Finished valid records by Asset ID"],
@@ -12959,14 +12907,7 @@ function applyEquipmentLoadingDeepLink(context) {
     if (context.assetId && accessible) {
         machineExplorerSelectedGroup = MACHINE_EXPLORER_ALL_GROUP;
         machineExplorerSelectedAssetId = context.assetId;
-        const assetSelect = document.getElementById("machine-explorer-asset");
         const machineSelect = document.getElementById("machine-name-select");
-        if (assetSelect && !Array.from(assetSelect.options).some((option) => option.value === context.assetId)) {
-            assetSelect.add(new Option(context.assetId, context.assetId));
-        }
-        if (assetSelect) {
-            assetSelect.value = context.assetId;
-        }
         if (machineSelect && !Array.from(machineSelect.options).some((option) => option.value === context.assetId)) {
             machineSelect.add(new Option(context.assetId, context.assetId));
         }
@@ -12995,10 +12936,6 @@ async function init() {
     if (stageSelect) downtimeStageFilter = stageSelect.value || DOWNTIME_STAGE_ALL;
     toggleCustomDateFilter(period);
 
-    const machineExplorerSortEl = document.getElementById("machine-explorer-sort");
-    if (machineExplorerSortEl) {
-        machineExplorerSortEl.value = machineExplorerSort;
-    }
     const machineHistorySortEl = document.getElementById("machine-history-sort");
     if (machineHistorySortEl) {
         machineHistorySortEl.value = machineHistorySort;
@@ -13068,45 +13005,6 @@ async function init() {
         });
     }
 
-    // Apply D365 lens URL params: maintType, zone, funcLoc
-    _applyMeLensUrlParams();
-
-}
-
-function _applyMeLensUrlParams() {
-    const params = new URLSearchParams(window.location.search);
-    const maintType = params.get("maintType") || "";
-    const zone      = params.get("zone")      || "";
-    const funcLoc   = params.get("funcLoc")   || "";
-    if (!maintType && !zone && !funcLoc) return;
-
-    const mtSel = document.getElementById("me-maint-type");
-    const zoneSel = document.getElementById("me-zone");
-    const flSel = document.getElementById("me-func-loc");
-
-    if (maintType && mtSel) {
-        // maint_type is the full label (e.g. "Cooking Equipment"); maintType param uses the code (CE).
-        // Try code match first, then label match.
-        const opt = Array.from(mtSel.options).find(
-            (o) => o.value === maintType || (o.text && o.text.includes(`(${maintType})`))
-        );
-        if (opt) { mtSel.value = opt.value; meMainTypeFilter = opt.value; }
-    }
-    if (zone && zoneSel) {
-        const opt = Array.from(zoneSel.options).find((o) => o.value === zone);
-        if (opt) {
-            zoneSel.value = zone;
-            meZoneFilter = zone;
-            populateMeFuncLocSelect(getCategoryScopedAllRows(), zone);
-        }
-    }
-    if (funcLoc && flSel) {
-        const opt = Array.from(flSel.options).find((o) => o.value === funcLoc);
-        if (opt) { flSel.value = funcLoc; meFuncLocFilter = funcLoc; }
-    }
-    if (maintType || zone || funcLoc) {
-        renderMachineExplorer(getCategoryScopedAllRows());
-    }
 }
 
 function refreshCurrentView(options = {}) {
@@ -13914,6 +13812,18 @@ function kdiCanonicalMachineGroup(wo, meta) {
     return String(meta?.asset_machine_group || wo?.asset_machine_group || "").trim();
 }
 
+function kdiMachineGroupClassificationReason(wo, meta, machineGroup) {
+    if (String(machineGroup || "").trim()) return "";
+    const sourceAssetId = String(wo?.asset_id || wo?.equipment_id || "").trim() || "Missing Asset ID";
+    if (rowHasMissingAssetId({ asset_id: sourceAssetId })) {
+        return `${sourceAssetId} is a placeholder Asset ID with no asset name or Asset Master match, so no Machine Group can be assigned. Flagged under Data Reliability.`;
+    }
+    if (!meta || wo?.has_assetlist_classification === false || wo?.has_asset_master_mapping === false) {
+        return `${sourceAssetId} has no Asset Master match, so no Machine Group can be assigned. Flagged under Data Reliability.`;
+    }
+    return `Machine Group is missing from the Asset Master classification for ${sourceAssetId}. Flagged under Data Reliability.`;
+}
+
 function mixerMappingBadge(row) {
     const status = String(row?.aliasMappingStatus || row?.alias_mapping_status || "").trim();
     if (!status) return "";
@@ -13984,10 +13894,22 @@ function kdiGetAssetCriticality(wo, assetLookup) {
 
 // ── MTTR ─────────────────────────────────────────────────────────────────────
 
+function kdiGetMttrExclusionType(wo) {
+    const endState = getActualEndState(wo);
+    const startField = getWorkOrderSlaStartDate(wo);
+    if (endState.state === "invalid" || startField.invalid || getInvalidDateIssues(wo).length) return "invalidDate";
+    if (endState.state === "open") return "open";
+    if (!startField.date || !endState.date) return "other";
+    return "";
+}
+
 function kdiComputeMttrMetrics(wos, assetLookup) {
     let totalHours = 0;
     let validCount = 0;
     let missingCount = 0;
+    let openCount = 0;
+    let invalidDateCount = 0;
+    let otherExcludedCount = 0;
     const validHours = [];
     const assetMap = new Map();
 
@@ -13996,6 +13918,7 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
         const assetId = kdiCanonicalAssetId(wo, sourceAssetId) || "Missing Asset";
         if (!assetMap.has(assetId)) {
             const meta = getAssetMetaFromLookup(assetLookup, sourceAssetId);
+            const assetMachineGroup = kdiCanonicalMachineGroup(wo, meta);
             // Prefer the per-asset friendly name from Asset_Master.xlsx,
             // then the machine-group name, then whatever the work-order export
             // carried, and only finally the asset ID. machine_name (group) is
@@ -14006,7 +13929,8 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
                 sourceAssetName: String(wo.source_asset_name || wo.asset_name || "").trim(),
                 assetName: kdiCanonicalAssetName(wo, meta, assetId),
                 group: kdiCanonicalGroup(wo, meta),
-                assetMachineGroup: kdiCanonicalMachineGroup(wo, meta),
+                assetMachineGroup,
+                classificationReason: kdiMachineGroupClassificationReason(wo, meta, assetMachineGroup),
                 mixerAlias: String(wo.mixer_alias || "").trim(),
                 aliasMappingStatus: String(wo.alias_mapping_status || "").trim(),
                 mappingNote: String(wo.mapping_note || "").trim(),
@@ -14017,6 +13941,9 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
                 workOrderCount: 0,
                 lastFailureDate: null,
                 missingCount: 0,
+                openCount: 0,
+                invalidDateCount: 0,
+                otherExcludedCount: 0,
             });
         }
         const entry = assetMap.get(assetId);
@@ -14025,7 +13952,8 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
         if (failureDate && (!entry.lastFailureDate || failureDate > entry.lastFailureDate)) {
             entry.lastFailureDate = failureDate;
         }
-        const h = getTtrHours(wo);
+        const exclusionType = kdiGetMttrExclusionType(wo);
+        const h = exclusionType ? null : getTtrHours(wo);
         if (h !== null && Number.isFinite(h) && h >= 0) {
             totalHours += h;
             validCount++;
@@ -14035,6 +13963,17 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
         } else {
             missingCount++;
             entry.missingCount++;
+            const type = exclusionType || "other";
+            if (type === "open") {
+                openCount++;
+                entry.openCount++;
+            } else if (type === "invalidDate") {
+                invalidDateCount++;
+                entry.invalidDateCount++;
+            } else {
+                otherExcludedCount++;
+                entry.otherExcludedCount++;
+            }
         }
     });
 
@@ -14043,6 +13982,9 @@ function kdiComputeMttrMetrics(wos, assetLookup) {
         medianMttr: median(validHours),
         validCount,
         missingCount,
+        openCount,
+        invalidDateCount,
+        otherExcludedCount,
         totalDowntimeHours: totalHours,
         assetMap,
     };
@@ -14059,6 +14001,7 @@ function kdiBuildMttrAssetRows(assetMap, critFilter, selectedGroup = "") {
             mixerAlias: entry.mixerAlias,
             aliasMappingStatus: entry.aliasMappingStatus,
             mappingNote: entry.mappingNote,
+            classificationReason: entry.classificationReason || "",
             group: entry.group,
             assetMachineGroup: entry.assetMachineGroup || "",
             criticality: entry.criticality,
@@ -14069,6 +14012,9 @@ function kdiBuildMttrAssetRows(assetMap, critFilter, selectedGroup = "") {
             totalDowntimeHours: entry.totalDowntimeHours || 0,
             lastFailureDate: entry.lastFailureDate || null,
             missingCount: entry.missingCount,
+            openCount: entry.openCount,
+            invalidDateCount: entry.invalidDateCount,
+            otherExcludedCount: entry.otherExcludedCount,
         }))
         .filter((entry) => entry.woCount > 0 || entry.missingCount > 0)
         .sort((a, b) => (b.avgMttr || 0) - (a.avgMttr || 0));
@@ -14080,18 +14026,23 @@ function kdiGroupMttrByMachineGroup(assetMap, critFilter) {
         if (critFilter && entry.criticality !== critFilter) return;
         const key = entry.group;
         if (!groups.has(key)) {
-            groups.set(key, { machineName: key, criticality: entry.criticality, hours: [], assetIds: new Set(), missingCount: 0, totalDowntimeHours: 0 });
+            groups.set(key, { machineName: key, criticality: entry.criticality, hours: [], assetIds: new Set(), classificationReasons: new Set(), missingCount: 0, openCount: 0, invalidDateCount: 0, otherExcludedCount: 0, totalDowntimeHours: 0 });
         }
         const g = groups.get(key);
         g.assetIds.add(entry.assetId);
+        if (entry.classificationReason) g.classificationReasons.add(entry.classificationReason);
         g.hours.push(...entry.hours);
         g.missingCount += entry.missingCount;
+        g.openCount += entry.openCount;
+        g.invalidDateCount += entry.invalidDateCount;
+        g.otherExcludedCount += entry.otherExcludedCount;
         g.totalDowntimeHours += entry.totalDowntimeHours || 0;
         if (!g.criticality || g.criticality === "Unclassified") g.criticality = entry.criticality;
     });
     return [...groups.values()]
         .map((g) => ({
             machineName: g.machineName,
+            classificationReason: [...g.classificationReasons].join(" "),
             criticality: g.criticality || "Unclassified",
             woCount: g.hours.length,
             assetCount: g.assetIds.size,
@@ -14100,6 +14051,9 @@ function kdiGroupMttrByMachineGroup(assetMap, critFilter) {
             highestMttr: g.hours.length > 0 ? Math.max(...g.hours) : null,
             totalDowntimeHours: g.totalDowntimeHours,
             missingCount: g.missingCount,
+            openCount: g.openCount,
+            invalidDateCount: g.invalidDateCount,
+            otherExcludedCount: g.otherExcludedCount,
         }))
         .filter((g) => g.woCount > 0 || g.missingCount > 0)
         .sort((a, b) => (b.avgMttr || 0) - (a.avgMttr || 0));
@@ -14112,18 +14066,23 @@ function kdiGroupMttrByMachineGroupLabel(assetMap, critFilter, categoryFilter = 
         if (categoryFilter && entry.group !== categoryFilter) return;
         const key = entry.assetMachineGroup || "Unclassified";
         if (!groups.has(key)) {
-            groups.set(key, { machineName: key, category: entry.group, criticality: entry.criticality, hours: [], assetIds: new Set(), missingCount: 0, totalDowntimeHours: 0 });
+            groups.set(key, { machineName: key, category: entry.group, criticality: entry.criticality, hours: [], assetIds: new Set(), classificationReasons: new Set(), missingCount: 0, openCount: 0, invalidDateCount: 0, otherExcludedCount: 0, totalDowntimeHours: 0 });
         }
         const g = groups.get(key);
         g.assetIds.add(entry.assetId);
+        if (entry.classificationReason) g.classificationReasons.add(entry.classificationReason);
         g.hours.push(...entry.hours);
         g.missingCount += entry.missingCount;
+        g.openCount += entry.openCount;
+        g.invalidDateCount += entry.invalidDateCount;
+        g.otherExcludedCount += entry.otherExcludedCount;
         g.totalDowntimeHours += entry.totalDowntimeHours || 0;
         if (!g.criticality || g.criticality === "Unclassified") g.criticality = entry.criticality;
     });
     return [...groups.values()]
         .map((g) => ({
             machineName: g.machineName,
+            classificationReason: [...g.classificationReasons].join(" "),
             criticality: g.criticality || "Unclassified",
             woCount: g.hours.length,
             assetCount: g.assetIds.size,
@@ -14132,6 +14091,9 @@ function kdiGroupMttrByMachineGroupLabel(assetMap, critFilter, categoryFilter = 
             highestMttr: g.hours.length > 0 ? Math.max(...g.hours) : null,
             totalDowntimeHours: g.totalDowntimeHours,
             missingCount: g.missingCount,
+            openCount: g.openCount,
+            invalidDateCount: g.invalidDateCount,
+            otherExcludedCount: g.otherExcludedCount,
         }))
         .filter((g) => g.woCount > 0 || g.missingCount > 0)
         .sort((a, b) => (b.avgMttr || 0) - (a.avgMttr || 0));
@@ -14217,9 +14179,14 @@ function kdiRenderMttrGroupChart(groups, assetRows = [], selectedGroup = "", ran
                 tooltip: {
                     callbacks: {
                         label: (ctx) => `Avg MTTR: ${fmtHours(ctx.raw)}`,
-                        afterLabel: (ctx) => usingAssets
-                            ? `${valid[ctx.dataIndex].assetId || "--"} | ${valid[ctx.dataIndex].woCount} WO(s)`
-                            : `${valid[ctx.dataIndex].woCount} WO(s)`,
+                        afterLabel: (ctx) => {
+                            const row = valid[ctx.dataIndex];
+                            const lines = [usingAssets
+                                ? `${row.assetId || "--"} | ${row.woCount} WO(s)`
+                                : `${row.woCount} WO(s)`];
+                            if (row.classificationReason) lines.push(row.classificationReason);
+                            return lines;
+                        },
                     },
                 },
             },
@@ -14264,8 +14231,8 @@ function kdiRenderMttrSummaryTable(groups, assetRows = [], selectedGroup = "", r
     const dimLabel = usingMachineGroup ? "Machine Group" : "Machine Category";
     if (head) {
         head.innerHTML = usingAssets
-            ? "<th>Asset Name</th><th>Asset ID</th><th>Criticality</th><th>WO Count</th><th>Avg MTTR</th><th>Total Downtime</th><th>Missing / Invalid</th>"
-            : `<th>${dimLabel}</th><th>MTTR</th><th>WO Count</th><th>Total Downtime</th><th>Assets Affected</th><th>Missing / Invalid</th>`;
+            ? "<th>Asset Name</th><th>Asset ID</th><th>Criticality</th><th>WO Count</th><th>Avg MTTR</th><th>Total Downtime</th><th>Open WO</th><th>Invalid Date</th><th>Other Excluded</th>"
+            : `<th>${dimLabel}</th><th>MTTR</th><th>WO Count</th><th>Total Downtime</th><th>Assets Affected</th><th>Open WO</th><th>Invalid Date</th><th>Other Excluded</th>`;
     }
     if (searchInput) {
         searchInput.placeholder = usingAssets ? "Search assets..." : `Search ${dimLabel.toLowerCase()}s…`;
@@ -14279,29 +14246,38 @@ function kdiRenderMttrSummaryTable(groups, assetRows = [], selectedGroup = "", r
             ? groupRows.filter((row) => kdiNormalizeSearchTerm(row.machineName).includes(search) || kdiNormalizeSearchTerm(row.criticality).includes(search))
             : groupRows);
     if (!visible.length) {
-        tbody.innerHTML = `<tr><td colspan="${usingAssets ? 7 : 6}" class="empty-cell">${search ? `No ${usingAssets ? "assets" : "groups"} match the search.` : "No MTTR data for the selected filters."}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="${usingAssets ? 9 : 8}" class="empty-cell">${search ? `No ${usingAssets ? "assets" : "groups"} match the search.` : "No MTTR data for the selected filters."}</td></tr>`;
         return;
     }
     tbody.innerHTML = usingAssets
         ? visible.map((row) => `
             <tr>
-                <td>${escapeHtml(row.assetName || "--")}</td>
+                <td>
+                    <div class="cell-title">${escapeHtml(row.assetName || "--")}</div>
+                    ${row.classificationReason ? `<div class="cell-sub">${escapeHtml(row.classificationReason)}</div>` : ""}
+                </td>
                 <td>${escapeHtml(row.assetId || "--")}</td>
                 <td>${escapeHtml(row.criticality)}</td>
                 <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
                 <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
                 <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
-                <td class="kdi-number-cell">${fmtNumber(row.missingCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.openCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.invalidDateCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.otherExcludedCount)}</td>
             </tr>
         `).join("")
         : visible.map((row, index) => `
             <tr class="kdi-drill-row${index === 0 ? " kdi-attention-row" : ""}" data-kdi-group="${escapeHtml(row.machineName)}" tabindex="0" title="Click to view assets in ${escapeHtml(row.machineName)}">
-                <td>${escapeHtml(row.machineName)}</td>
+                <td>
+                    <div class="cell-title">${escapeHtml(row.machineName)}</div>
+                </td>
                 <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
                 <td class="kdi-number-cell">${fmtNumber(row.woCount)}</td>
                 <td class="kdi-number-cell">${row.totalDowntimeHours ? fmtDaysHours(row.totalDowntimeHours) : "--"}</td>
                 <td class="kdi-number-cell">${fmtNumber(row.assetCount)}</td>
-                <td class="kdi-number-cell">${fmtNumber(row.missingCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.openCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.invalidDateCount)}</td>
+                <td class="kdi-number-cell">${fmtNumber(row.otherExcludedCount)}</td>
             </tr>
         `).join("");
 }
@@ -14327,6 +14303,7 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
                 mixerAlias: entry?.mixerAlias || "",
                 aliasMappingStatus: entry?.aliasMappingStatus || "",
                 mappingNote: entry?.mappingNote || "",
+                classificationReason: entry?.classificationReason || "",
                 mtbfBaseline: entry?.mtbfBaseline || "",
                 criticality: entry?.criticality || "Unclassified",
                 woCount: 0,
@@ -14348,6 +14325,7 @@ function kdiBuildCombinedAssetRows(critFilter = "", selectedGroup = "", sortMode
         if (!row.mixerAlias && entry?.mixerAlias) row.mixerAlias = entry.mixerAlias;
         if (!row.aliasMappingStatus && entry?.aliasMappingStatus) row.aliasMappingStatus = entry.aliasMappingStatus;
         if (!row.mappingNote && entry?.mappingNote) row.mappingNote = entry.mappingNote;
+        if (!row.classificationReason && entry?.classificationReason) row.classificationReason = entry.classificationReason;
         if (!row.mtbfBaseline && entry?.mtbfBaseline) row.mtbfBaseline = entry.mtbfBaseline;
         if ((!row.criticality || row.criticality === "Unclassified") && entry?.criticality) row.criticality = entry.criticality;
         return row;
@@ -14427,6 +14405,7 @@ function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critF
             ? `<div class="cell-sub">Source asset: ${escapeHtml(row.sourceAssetId)}</div>`
             : "";
         const baselineLine = row.mtbfBaseline ? `<div class="cell-sub">${escapeHtml(row.mtbfBaseline)}</div>` : "";
+        const classificationLine = row.classificationReason ? `<div class="cell-sub">${escapeHtml(row.classificationReason)}</div>` : "";
         return `
             <tr>
                 <td>${escapeHtml(row.assetId || "--")}</td>
@@ -14434,6 +14413,7 @@ function kdiRenderCombinedAssetDrilldown(tbodyId, groupSelectId, searchId, critF
                     <div class="cell-title">${escapeHtml(row.assetName || "--")} ${mixerMappingBadge(row)}</div>
                     ${sourceLine}
                     ${baselineLine}
+                    ${classificationLine}
                 </td>
                 <td class="kdi-number-cell">${row.avgMttr !== null ? fmtHours(row.avgMttr) : "--"}</td>
                 <td class="kdi-number-cell">${row.avgMtbf !== null ? fmtDaysHours(row.avgMtbf) : "--"}</td>
@@ -14919,8 +14899,12 @@ function updateKdiSection() {
     }
     setText("kdi-mttr-wo-count", fmtNumber(mttrData.validCount));
     setText("kdi-summary-work-orders", fmtNumber(mttrData.validCount));
-    setText("kdi-mttr-missing-count", fmtNumber(mttrData.missingCount));
-    setText("kdi-summary-missing-invalid", fmtNumber(mttrData.missingCount));
+    setText("kdi-mttr-open-count", fmtNumber(mttrData.openCount));
+    setText("kdi-mttr-invalid-date-count", fmtNumber(mttrData.invalidDateCount));
+    setText("kdi-mttr-other-excluded-count", fmtNumber(mttrData.otherExcludedCount));
+    setText("kdi-summary-open-wo", fmtNumber(mttrData.openCount));
+    setText("kdi-summary-invalid-date", fmtNumber(mttrData.invalidDateCount));
+    setText("kdi-summary-other-excluded", fmtNumber(mttrData.otherExcludedCount));
     setText("kdi-mttr-median", mttrData.medianMttr !== null ? fmtHours(mttrData.medianMttr) : "--");
     setText("kdi-summary-mttr-median", mttrData.medianMttr !== null ? fmtHours(mttrData.medianMttr) : "--");
     setText("kdi-summary-total-downtime", mttrData.totalDowntimeHours ? fmtDaysHours(mttrData.totalDowntimeHours) : "--");

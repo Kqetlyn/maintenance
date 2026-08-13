@@ -2631,9 +2631,10 @@ canvas {
 }
 
 .machine-explorer-filter-toolbar {
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    grid-template-columns: repeat(2, minmax(180px, 220px));
     gap: 10px;
     margin: 14px 0;
+    justify-content: start;
 }
 
 .machine-explorer-kpi-grid {
@@ -3402,8 +3403,7 @@ tr:hover td {
     color: var(--text-muted);
 }
 
-.machine-explorer-search,
-.machine-explorer-sort {
+.machine-explorer-search {
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 10px 14px;
@@ -3414,13 +3414,7 @@ tr:hover td {
     font-size: 0.875rem;
 }
 
-.machine-explorer-sort {
-    width: 180px;
-    cursor: pointer;
-}
-
-.machine-explorer-search:focus,
-.machine-explorer-sort:focus {
+.machine-explorer-search:focus {
     outline: 2px solid rgba(15, 118, 110, 0.2);
     outline-offset: 1px;
 }
@@ -3995,8 +3989,7 @@ tr:hover td {
 }
 
 @media (max-width: 640px) {
-    .machine-explorer-search,
-    .machine-explorer-sort {
+    .machine-explorer-search {
         width: 100%;
     }
 

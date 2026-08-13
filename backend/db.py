@@ -1381,8 +1381,22 @@ def load_work_orders_from_sql(stage: str | None = None) -> list[dict]:
     params: list = []
     where_parts: list[str] = []
 
+    # Facility/building work orders keep the authoritative Asset Master stage.
+    # Their descriptions often mention a physical area such as "Stage 2"; that
+    # wording must not move a Stage 1 facility asset (notably Store Office) into
+    # the Stage 2 equipment scope. Other asset groups retain their resolved WO
+    # stage so explicit production-stage overrides continue to work.
+    effective_stage_sql = """
+        CASE
+            WHEN wo.machine_group = 'Facility / Building'
+                 AND am.stage IN ('Stage 1', 'Stage 2')
+            THEN am.stage
+            ELSE wo.stage
+        END
+    """
+
     if stage in ("Stage 1", "Stage 2"):
-        where_parts.append("wo.stage = ?")
+        where_parts.append(f"({effective_stage_sql}) = ?")
         params.append(stage)
     elif stage in ("Unmapped", "Missing Asset ID", "Needs Stage Review"):
         where_parts.append("wo.stage = ?")
@@ -1394,7 +1408,8 @@ def load_work_orders_from_sql(stage: str | None = None) -> list[dict]:
     sql = f"""
         SELECT
             wo.mr_number, wo.wo_number, wo.asset_id, wo.asset_name,
-            wo.functional_location, wo.stage, wo.category, wo.machine_group,
+            wo.functional_location, ({effective_stage_sql}) AS stage,
+            wo.category, wo.machine_group,
             wo.severity, wo.status, wo.description, wo.translated_description,
             wo.job_type, wo.trade,
             wo.actual_start, wo.actual_end, wo.created_date,
@@ -1429,6 +1444,7 @@ def repair_powerbi_quality_flags() -> dict:
 
     Sets Valid for:
       - Finished / Confirm records with both dates present and end >= start.
+      - Finished / Confirm records with no real end date (Open WO).
       - New / In Progress records (no date requirement for KPI inclusion).
     Leaves unchanged: Rejected / other review-status records.
 
@@ -1436,6 +1452,7 @@ def repair_powerbi_quality_flags() -> dict:
     """
     _FINISHED = frozenset({"finished", "confirm", "completed", "closed", "resolved", "done"})
     _OPEN     = frozenset({"new", "in progress", "inprogress"})
+    _OPEN_END_PLACEHOLDERS = frozenset({"0001-01-01", "1899-12-30", "1900-01-01", "1970-01-01"})
 
     def _parse(s: str):
         for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
@@ -1460,10 +1477,13 @@ def repair_powerbi_quality_flags() -> dict:
             start_iso = row["actual_start"] or ""
             end_iso   = row["actual_end"]   or ""
 
-            if status in _FINISHED and start_iso and end_iso:
+            if status in _FINISHED:
                 start_dt = _parse(start_iso)
                 end_dt   = _parse(end_iso)
-                if start_dt and end_dt and end_dt >= start_dt:
+                end_is_open = not str(end_iso).strip() or (
+                    end_dt is not None and end_dt.date().isoformat() in _OPEN_END_PLACEHOLDERS
+                )
+                if end_is_open or (start_dt and end_dt and end_dt >= start_dt):
                     conn.execute(
                         "UPDATE work_orders SET data_validity_status = 'Valid', review_reason = NULL"
                         " WHERE rowid = ?",

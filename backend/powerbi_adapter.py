@@ -373,21 +373,24 @@ def build_data_quality_flags(
     Flags (non-exclusive):
       Missing Asset        — Machine ID blank
       Missing WO ID        — WO ID blank
-      Missing ActualStart  — ActualStart blank
-      Missing ActualEnd    — ActualEnd blank
+      Missing ActualStart  — ActualStart blank while a real ActualEnd exists
       Invalid Date Sequence — ActualEnd < ActualStart
       Missing TTR          — TTR cannot be computed
+
+    A blank or D365-placeholder ActualEnd represents an Open WO and is not a
+    data-quality issue.
     """
     flags: list[str] = []
+    end_text = str(actual_end or "").strip()
+    end_date_key = end_text[:10]
+    end_is_open = not end_text or end_date_key in {"0001-01-01", "1899-12-30", "1900-01-01", "1970-01-01"}
     if not str(asset_id or "").strip():
         flags.append("Missing Asset")
     if not str(wo_id or "").strip():
         flags.append("Missing WO ID")
-    if not str(actual_start or "").strip():
+    if not end_is_open and not str(actual_start or "").strip():
         flags.append("Missing ActualStart")
-    if not str(actual_end or "").strip():
-        flags.append("Missing ActualEnd")
-    if ttr_flag and ttr_flag not in ("Missing ActualStart", "Missing ActualEnd"):
+    if not end_is_open and ttr_flag and ttr_flag not in ("Missing ActualStart", "Missing ActualEnd"):
         flags.append(ttr_flag)
     return flags or ["OK"]
 
