@@ -11,14 +11,14 @@
             document.documentElement.classList.add("downtime-embed");
         }
     </script>
-    <link rel="stylesheet" href="style.css?v=20260813-machine-explorer-period-1">
+    <link rel="stylesheet" href="style.css?v=20260814-monthly-ppt-3">
     <link rel="stylesheet" href="/shared/navbar.css?v=20260604-ai-note-1">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/xlsx-js-style@1.2.0/dist/xlsx.bundle.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+    <script src="/shared/vendor/pptxgen.bundle.js?v=3.12.0-local-1" onerror="this.onerror=null;this.src='https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js';"></script>
 </head>
 <body data-sync-page="downtime">
     <div id="navbar"></div>
@@ -65,7 +65,7 @@
                         <option value="Unclassified">Unclassified</option>
                     </select>
                 </div>
-                <button class="toggle-btn" type="button" id="downtime-export-ppt-btn" title="Generate the five-slide maintenance report for the selected stage">Export PPT</button>
+                <button class="toggle-btn" type="button" id="downtime-export-ppt-btn" title="Configure and generate the one-slide monthly maintenance report">Generate PPT</button>
                 <button class="toggle-btn" type="button" id="refresh-asset-mapping-btn" style="display:none">Refresh Asset Mapping</button>
                 <form class="filter-inline import-inline" id="work-order-import-form">
                     <label class="inline-label" for="work-order-import-file">Import WO (or drop file)</label>
@@ -98,7 +98,31 @@
 
         <section class="kpi-section" aria-labelledby="logged-maintenance-title">
             <div class="kpi-section-header">
-                <div class="card-title" id="logged-maintenance-title">Downtime Overview</div>
+                <div>
+                    <div class="card-title" id="logged-maintenance-title">Downtime Overview</div>
+                    <p class="card-subtitle" id="overview-scope-label">Year to date.</p>
+                </div>
+                <div class="overview-scope-controls">
+                    <div class="filter-inline">
+                        <label class="inline-label" for="overview-view-filter">View</label>
+                        <select id="overview-view-filter" class="inline-select">
+                            <option value="fy">Financial Year (YTD)</option>
+                            <option value="month">Month</option>
+                        </select>
+                    </div>
+                    <div class="filter-inline">
+                        <label class="inline-label" for="overview-fy-filter">Financial Year</label>
+                        <select id="overview-fy-filter" class="inline-select"></select>
+                    </div>
+                    <div class="filter-inline hidden" id="overview-month-field">
+                        <label class="inline-label" for="overview-month-filter">Month</label>
+                        <select id="overview-month-filter" class="inline-select"></select>
+                    </div>
+                    <div class="overview-history-loader">
+                        <button type="button" class="history-load-btn" id="load-history-btn" aria-describedby="history-load-status">Load Older Data</button>
+                        <span class="history-load-status" id="history-load-status" role="status" aria-live="polite">Current period loaded. Older years load only when requested.</span>
+                    </div>
+                </div>
             </div>
             <div class="kpi-grid logged-kpi-grid executive-kpi-grid" id="summary-kpis">
                 <div class="kpi-card highlight-red primary-kpi">
@@ -184,9 +208,15 @@
             <div class="card-title-block reliability-focus-header">
                 <div>
                     <div class="card-title" id="reliability-focus-title">Key Downtime Indicators</div>
-                    <p class="card-subtitle">MTTR and MTBF shown by machine group for management review. Individual asset details are available by drill-down.</p>
+                    <p class="card-subtitle">MTTR and MTBF shown by machine group for management review, scoped to the selected <strong>financial year (Apr&ndash;Mar)</strong>. Individual asset details are available by drill-down.</p>
                 </div>
-                <div class="kdi-ytd-pill" id="kdi-ytd-pill" aria-live="polite">YTD --</div>
+                <div class="kdi-header-controls">
+                    <div class="filter-inline">
+                        <label class="inline-label" for="kdi-financial-year">Financial Year</label>
+                        <select id="kdi-financial-year" class="inline-select"></select>
+                    </div>
+                    <div class="kdi-ytd-pill" id="kdi-ytd-pill" aria-live="polite">YTD --</div>
+                </div>
             </div>
 
             <div class="kdi-summary-grid" aria-label="Key downtime indicator summary">
@@ -791,6 +821,7 @@
             <div class="mr-movement-grid">
                 <div class="card nested-card mr-movement-chart-card">
                     <div class="card-title">Monthly MR Raised vs Finished (Financial Calendar Apr-Mar)</div>
+                    <p class="card-subtitle">One stacked bar per month &mdash; raised and finished shown in the same column. <strong>% Finished</strong> = MR finished that month &divide; MR raised that month; above 100% means carry-over MR from earlier months were also closed.</p>
                     <div class="chart-container compact-chart" data-chart-id="mrMovementChart"><canvas id="mrMovementChart"></canvas></div>
                     <div class="table-wrapper compact-table-wrapper mr-movement-table-wrapper">
                         <table>
@@ -901,8 +932,18 @@
                     <select id="cmc-mode" class="inline-select">
                         <option value="month">Month Comparison</option>
                         <option value="year">Year Comparison</option>
+                        <option value="financial_year">Financial Year Comparison (Apr-Mar)</option>
                         <option value="custom">Custom Date Range</option>
                     </select>
+                </div>
+                <!-- Financial-year mode controls -->
+                <div class="filter-group cmc-fy-controls hidden">
+                    <label for="cmc-fy-a">Financial Year A</label>
+                    <select id="cmc-fy-a" class="inline-select"><option value="">Loading&hellip;</option></select>
+                </div>
+                <div class="filter-group cmc-fy-controls hidden">
+                    <label for="cmc-fy-b">Financial Year B</label>
+                    <select id="cmc-fy-b" class="inline-select"><option value="">Loading&hellip;</option></select>
                 </div>
                 <!-- Year view toggle (year mode only) -->
                 <div class="filter-group cmc-year-controls hidden">
@@ -969,7 +1010,8 @@
                 <div class="cmc-trend-direction-row" id="cmc-trend-direction-row"></div>
             </div>
 
-            <!-- KPI comparison cards (Compare Two Years / Month / Custom modes) -->
+            <!-- KPI comparison cards (Compare Two Years / Month / Financial Year / Custom modes) -->
+            <p class="card-subtitle cmc-kpi-hint topic-analysis-only">Click any KPI box below to plot that metric on both charts. Click it again to go back to the default view.</p>
             <div class="cmc-kpi-grid topic-analysis-only" id="cmc-kpi-grid">
                 <p class="cmc-empty">Loading comparison data…</p>
             </div>
@@ -1299,7 +1341,7 @@
                 <div class="wo-response-main-stack">
                     <div class="card nested-card wo-response-table-card">
                         <div class="card-title">SLA Compliance by Severity</div>
-                        <p class="card-subtitle sla-summary-subtitle">SLA % is based on <strong>valid records only</strong> (Met + Late + Open Overdue). <strong>Data Completeness %</strong> = Valid SLA records / Total WO — a high SLA % can still hide incomplete data. Click a <strong>Missing Data</strong> count to review &amp; clean those records.</p>
+                        <p class="card-subtitle sla-summary-subtitle">SLA % is based on <strong>valid records only</strong> (Met + Late + Open Overdue). <strong>Data Completeness %</strong> = Valid SLA records / Total WO — a high SLA % can still hide incomplete data. <strong>Click any severity row or count</strong> to list those exact work orders in the drill-down below; click a <strong>Missing Data</strong> count to also open the cleansing review.</p>
                         <div class="table-wrapper compact-table-wrapper wo-response-table-wrapper">
                             <table>
                                 <thead>
@@ -1341,10 +1383,22 @@
                     </div>
                     <details class="card nested-card wo-response-drilldown-card topic-analysis-only" id="wo-sla-drilldown" open>
                         <summary class="wo-response-drilldown-summary">
-                            <span class="card-title">Late / Overdue Drill-down</span>
+                            <span class="card-title" id="wo-sla-drilldown-title">Late / Overdue Drill-down</span>
                             <span class="wo-response-drilldown-count" id="wo-sla-drilldown-count">--</span>
                         </summary>
-                        <p class="card-subtitle">Late, open overdue, and missing-data work orders only.</p>
+                        <div class="sla-drilldown-filter-row hidden" id="wo-sla-drilldown-filter-row">
+                            <span class="sla-drilldown-chip" id="wo-sla-drilldown-chip"></span>
+                            <button type="button" class="sla-drilldown-clear-btn" id="wo-sla-drilldown-clear">Clear selection</button>
+                        </div>
+                        <div class="sla-drilldown-record-filter">
+                            <label class="inline-label" for="wo-sla-record-filter">Record View</label>
+                            <select id="wo-sla-record-filter" class="inline-select">
+                                <option value="all">All drill-down records</option>
+                                <option value="invalid_dates">Invalid data (weird dates) only</option>
+                                <option value="open_wo">Open WO only</option>
+                            </select>
+                        </div>
+                        <p class="card-subtitle" id="wo-sla-drilldown-subtitle">Late, open overdue, and missing-data work orders only.</p>
                         <div class="table-wrapper wo-response-table-wrapper">
                             <table>
                                 <thead>
@@ -1352,17 +1406,14 @@
                                         <th>WO ID</th>
                                         <th>Equipment / Asset Name</th>
                                         <th>Severity / Priority</th>
-                                        <th>Created Date</th>
                                         <th>Actual Start Date</th>
                                         <th>Actual End Date</th>
-                                        <th>Target</th>
-                                        <th>Actual Duration</th>
                                         <th>Delay</th>
                                         <th>SLA Status</th>
                                     </tr>
                                 </thead>
                                 <tbody id="wo-sla-drilldown-body">
-                                    <tr><td colspan="10" class="empty-cell">Loading SLA exceptions.</td></tr>
+                                    <tr><td colspan="7" class="empty-cell">Loading SLA exceptions.</td></tr>
                                 </tbody>
                             </table>
                         </div>
@@ -1869,6 +1920,17 @@
                                         </select>
                                     </div>
                                     <div class="filter-inline">
+                                        <label class="inline-label" for="machine-history-severity">Severity / Service Level</label>
+                                        <select id="machine-history-severity" class="inline-select">
+                                            <option value="">All Severities</option>
+                                            <option value="S1">S1 Critical (Service 1)</option>
+                                            <option value="S2">S2 High (Service 2)</option>
+                                            <option value="S3">S3 Medium (Service 3)</option>
+                                            <option value="S4">S4 Low (Service 4)</option>
+                                            <option value="UNCLASSIFIED">Unclassified / No Service Level</option>
+                                        </select>
+                                    </div>
+                                    <div class="filter-inline">
                                         <label class="inline-label" for="machine-history-year">Year</label>
                                         <select id="machine-history-year" class="inline-select">
                                             <option value="">All Years</option>
@@ -1928,7 +1990,6 @@
                                             <tr>
                                                 <th>Maintenance Request</th>
                                                 <th>Work Order</th>
-                                                <th>Match</th>
                                                 <th>Status</th>
                                                 <th>Service Level</th>
                                                 <th>Type</th>
@@ -1944,7 +2005,7 @@
                                             </tr>
                                         </thead>
                                         <tbody id="machine-history-body">
-                                            <tr><td colspan="15" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
+                                            <tr><td colspan="14" class="empty-cell">Select an asset to view MR/WO history.</td></tr>
                                         </tbody>
                                     </table>
                                 </div>
@@ -2057,6 +2118,59 @@
 
     </main>
 
+    <dialog class="monthly-ppt-dialog" id="monthly-ppt-dialog" aria-labelledby="monthly-ppt-dialog-title">
+        <form class="monthly-ppt-form" id="monthly-ppt-form">
+            <div class="monthly-ppt-dialog-header">
+                <div>
+                    <div class="monthly-ppt-eyebrow">PowerPoint Report</div>
+                    <h2 id="monthly-ppt-dialog-title">Monthly Maintenance Report</h2>
+                    <p>Select each reporting scope. Monthly KPIs, financial-year indicators, and the daily action list are calculated separately.</p>
+                </div>
+                <button type="button" class="monthly-ppt-close" id="monthly-ppt-close" aria-label="Close report filters">&times;</button>
+            </div>
+            <div class="monthly-ppt-filter-grid">
+                <label class="monthly-ppt-field">
+                    <span>Report Month</span>
+                    <input type="month" id="monthly-ppt-month" required>
+                    <small>MR raised/finished, severity, and Data Reliability Index.</small>
+                </label>
+                <label class="monthly-ppt-field">
+                    <span>MTTR / MTBF Financial Year</span>
+                    <select id="monthly-ppt-fy" required></select>
+                    <small>April&ndash;March financial-year YTD.</small>
+                </label>
+                <label class="monthly-ppt-field">
+                    <span>Action-list Date</span>
+                    <input type="date" id="monthly-ppt-action-date" required>
+                    <small>Defaults to yesterday; shows up to 7 corrective S1/S2 production-machine MRs raised on that date.</small>
+                </label>
+                <label class="monthly-ppt-field">
+                    <span>Stage</span>
+                    <select id="monthly-ppt-stage" required>
+                        <option value="all">Both Stages</option>
+                        <option value="Stage 1">Stage 1</option>
+                        <option value="Stage 2">Stage 2</option>
+                    </select>
+                    <small>Applied to every metric and action-list row.</small>
+                </label>
+                <label class="monthly-ppt-field monthly-ppt-field-wide">
+                    <span>Machine Scope</span>
+                    <select id="monthly-ppt-scope" required>
+                        <option value="production" selected>Production machines only</option>
+                        <option value="all">All mapped machines</option>
+                    </select>
+                    <small>Applied to monthly and YTD metrics. The action list always uses corrective S1/S2 production machines only.</small>
+                </label>
+            </div>
+            <div class="monthly-ppt-scope-summary" id="monthly-ppt-scope-summary" aria-live="polite"></div>
+            <div class="monthly-ppt-status hidden" id="monthly-ppt-status" role="status" aria-live="polite"></div>
+            <div class="monthly-ppt-actions">
+                <button type="button" class="monthly-ppt-secondary-btn" id="monthly-ppt-cancel">Cancel</button>
+                <button type="submit" class="monthly-ppt-generate-btn" id="monthly-ppt-generate">Generate PPT</button>
+            </div>
+        </form>
+    </dialog>
+
     <div class="critical-drawer-backdrop" id="inactive-critical-backdrop" hidden></div>
     <aside class="critical-drawer" id="inactive-critical-drawer" aria-hidden="true" aria-labelledby="inactive-critical-title">
         <div class="critical-drawer-header">
@@ -2108,7 +2222,8 @@
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
     <script src="/shared/mira/mira-overview.js?v=20260813-sats-ppt-standard-1" defer></script>
-    <script src="script.js?v=20260813-inactive-critical-retry-1" defer></script>
+    <script src="script.js?v=20260814-monthly-ppt-3" defer></script>
+    <script src="monthly-ppt.js?v=20260814-monthly-ppt-7" defer></script>
 
 </body>
 </html>

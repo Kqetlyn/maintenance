@@ -141,6 +141,7 @@ function setDashboardTopic(topicKey) {
     syncTopicMirrors();
     resizeVisibleCharts();
     scheduleEmbeddedHeightPost();
+    scheduleSelectedDashboardTopicRender();
 }
 
 // Maps a MIRA Overview "Daily Action Alerts" navFocus key to the matching Downtime
@@ -251,8 +252,13 @@ let machineExplorerSort = "most_wo_mr";
 let mtbfHistoryPayload = null;
 let mtbfHistoryPromise = null;
 let selectedMttrCriticality = "";
+// Raw stage-scoped all-year rows. Category filtering is always applied at read
+// time so switching Production / Utilities never leaves this cache stuck on the
+// category that happened to be selected when the fetch completed.
 let allWorkOrderRowsCache = null;
 let allWorkOrderRowsPromise = null;
+let historicalDataLoadState = "idle";
+let historicalDataSpanCache = { rows: null, label: "" };
 // ── Page-level Production Equipment / Utilities / Unclassified category filter ──
 // Mirrors backend asset_mapping._GROUP_TO_CATEGORY so old cached rows (without an
 // equipment_category field) still classify correctly.
@@ -327,9 +333,29 @@ const MISSING_FIELD_TYPES = ["Missing Actual Start", "Missing Actual End", "Miss
 let dataCleansingReview = loadDataCleansingReview();
 let lastWorkOrderSlaModel = null;
 let missingDataFilters = { severity: "all", fieldType: "all", slaStatus: "all", machineGroup: "all", search: "", cleared: "all" };
+// SLA Compliance by Severity -> Late / Overdue Drill-down selection.
+// woSlaDrilldownSeverity "" = no selection (drill-down keeps its default
+// exceptions-only view); woSlaDrilldownStatus narrows it to the exact count
+// that was clicked.
+let woSlaDrilldownSeverity = "";
+let woSlaDrilldownStatus = "";
+let woSlaDrilldownRecordFilter = "all";
+const SLA_DRILLDOWN_STATUS_LABELS = {
+    all: "All work orders",
+    met: "Met Target",
+    late: "Late",
+    open_overdue: "Open Overdue",
+    missing: "Missing Data",
+};
+const SLA_MISSING_DATA_STATUSES = new Set(["Missing Data", "Missing Start Date", "Missing End Date", "No SLA Target"]);
+// The drill-down can now show "all work orders" for a severity (1,000+ rows on
+// S4), so cap the DOM rows the same way the other large tables do.
+const WO_SLA_DRILLDOWN_RENDER_LIMIT = 400;
 let deferredAllYearWorkOrderHandle = null;
 let deferredAllYearDynamicsHandle = null;
 let allYearWorkOrderRenderToken = 0;
+let deferredTopicRenderHandle = null;
+let selectedTopicRenderToken = 0;
 let duplicateWoAnalysisHandle = null;
 let duplicateWoAnalysisToken = 0;
 let duplicateWorkOrderGroupsCache = { pm: [], sameDay: [], recurring: [] };
@@ -347,6 +373,7 @@ let machineHistoryMonthFilter = "";
 let machineHistoryDateFrom = "";
 let machineHistoryDateTo = "";
 let machineHistorySearch = "";
+let machineHistorySeverity = "";                // "" = all | S1 | S2 | S3 | S4 | UNCLASSIFIED
 let machineExplorerRefrigSubgroup = "";          // active subgroup key inside Refrigeration
 // Spare part trend data cache (loaded once, reused on scope change)
 let cmcSpareTrendData = null;
@@ -363,6 +390,10 @@ let cmcCustomAStart = "";
 let cmcCustomAEnd = "";
 let cmcCustomBStart = "";
 let cmcCustomBEnd = "";
+let cmcFyA = "";           // financial-year mode: FY start year A
+let cmcFyB = "";           // financial-year mode: FY start year B
+let cmcSelectedMetric = ""; // "" = default charts; otherwise a CMC KPI key driving both charts
+let cmcLatestDataDate = null;
 let machineExplorerRefrigCondenserGroupId = "";   // condenser ID selected in CDE tree (group mode)
 let machineExplorerRefrigExpandedCondensers = new Set(); // condensers expanded in the CDE tree
 
@@ -422,6 +453,13 @@ function getMrFinancialYearLabel(financialYearStart) {
     const startYear = Number(financialYearStart);
     if (!Number.isFinite(startYear)) return "selected financial year";
     return `FY ${startYear}-${String(startYear + 1).slice(-2)}`;
+}
+// Spelled-out variant for dropdowns, so "FY 2026-27" is unambiguous about which
+// months it covers (April 2026 - March 2027).
+function getMrFinancialYearLongLabel(financialYearStart) {
+    const startYear = Number(financialYearStart);
+    if (!Number.isFinite(startYear)) return "Selected financial year";
+    return `${getMrFinancialYearLabel(startYear)} (Apr ${startYear} - Mar ${startYear + 1})`;
 }
 function getMrFinancialMonthLabelsWithYear(financialYearStart) {
     const startYear = Number(financialYearStart);
@@ -1104,10 +1142,13 @@ let _stageFetchGeneration = 0;
 
 function resetStageScopedCaches() {
     _stageFetchGeneration++;
+    window.DowntimeMonthlyPpt?.clearCache?.();
     allWorkOrderRowsCache = null;
     allWorkOrderRowsPromise = null;
+    historicalDataSpanCache = { rows: null, label: "" };
     mtbfHistoryPayload = null;
     mtbfHistoryPromise = null;
+    setHistoricalDataLoadUi("idle");
 }
 
 function getCurrentDowntimePeriodSelection() {
@@ -1167,10 +1208,22 @@ function normalizeFieldKey(value) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
-function getRowFieldByAliases(row, aliases) {
-    if (!row) return { value: null, field: "" };
+// Imported work-order objects are immutable for the lifetime of a payload. Cache
+// their normalised key map because date/severity helpers resolve aliased fields
+// many times during one all-year render.
+const rowFieldMapCache = typeof WeakMap === "function" ? new WeakMap() : null;
+function getNormalizedRowFieldMap(row) {
+    if (!row || typeof row !== "object") return new Map();
+    if (rowFieldMapCache?.has(row)) return rowFieldMapCache.get(row);
     const fieldMap = new Map();
     Object.keys(row).forEach((key) => fieldMap.set(normalizeFieldKey(key), key));
+    rowFieldMapCache?.set(row, fieldMap);
+    return fieldMap;
+}
+
+function getRowFieldByAliases(row, aliases) {
+    if (!row) return { value: null, field: "" };
+    const fieldMap = getNormalizedRowFieldMap(row);
     for (const alias of aliases) {
         const actualKey = fieldMap.get(normalizeFieldKey(alias));
         if (!actualKey) continue;
@@ -1185,8 +1238,7 @@ function getRowFieldByAliases(row, aliases) {
 
 function getRowFieldByAliasesRaw(row, aliases) {
     if (!row) return { value: null, field: "", hasField: false };
-    const fieldMap = new Map();
-    Object.keys(row).forEach((key) => fieldMap.set(normalizeFieldKey(key), key));
+    const fieldMap = getNormalizedRowFieldMap(row);
     for (const alias of aliases) {
         const actualKey = fieldMap.get(normalizeFieldKey(alias));
         if (!actualKey) continue;
@@ -1418,7 +1470,7 @@ function getMrAvailableYears(rows) {
 
 function getFallbackAllWorkOrderRows() {
     const rowMap = new Map();
-    getWorkOrderRows(getManagement()).forEach((row, index) => rowMap.set(getExportWorkOrderKey(row, index), row));
+    (getManagement()?.work_orders || []).forEach((row, index) => rowMap.set(getExportWorkOrderKey(row, index), row));
     if (getSelectedDowntimeStage() !== DOWNTIME_STAGE_ALL) {
         return [...rowMap.values()];
     }
@@ -1437,12 +1489,12 @@ async function loadAllWorkOrderRowsForMovement() {
     if (allWorkOrderRowsPromise) return allWorkOrderRowsPromise;
     // Capture generation so a stage change mid-flight does not pollute cache.
     const gen = _stageFetchGeneration;
-    allWorkOrderRowsPromise = fetch(buildDowntimeApiUrl({ period: "all_years", work_orders_only: "1" }), { cache: "no-store" })
+    const requestPromise = fetch(buildDowntimeApiUrl({ period: "all_years", work_orders_only: "1" }), { cache: "no-store" })
         .then(async (response) => {
             if (!response.ok) throw new Error(`HTTP ${response.status}`);
             const payload = await response.json();
             if (_stageFetchGeneration !== gen) throw new Error("stage-changed");
-            const rows = getWorkOrderRows(payload.management);
+            const rows = Array.isArray(payload?.management?.work_orders) ? payload.management.work_orders : [];
             if (!rows.length) throw new Error("No all-year work orders found");
             allWorkOrderRowsCache = rows;
             return rows;
@@ -1454,15 +1506,60 @@ async function loadAllWorkOrderRowsForMovement() {
                 allWorkOrderRowsCache = null;
                 return [];
             }
-            console.warn("All-year MR movement source unavailable, falling back to loaded rows:", error);
-            const rows = getFallbackAllWorkOrderRows();
-            if (_stageFetchGeneration === gen) allWorkOrderRowsCache = rows;
-            return rows;
+            console.warn("All-year MR movement source unavailable:", error);
+            throw error;
         })
         .finally(() => {
-            allWorkOrderRowsPromise = null;
+            if (allWorkOrderRowsPromise === requestPromise) allWorkOrderRowsPromise = null;
         });
-    return allWorkOrderRowsPromise;
+    allWorkOrderRowsPromise = requestPromise;
+    return requestPromise;
+}
+
+function getHistoricalDataSpanLabel(rows = []) {
+    if (historicalDataSpanCache.rows === rows) return historicalDataSpanCache.label;
+    let earliest = null;
+    let latest = null;
+    rows.forEach((row) => {
+        const candidates = [
+            getMrRaisedDate(row).date,
+            parseMrDateField(row, MR_FINISHED_DATE_ALIASES, { ignoreForOpenStatus: true }).date,
+        ];
+        candidates.forEach((date) => {
+            if (!date) return;
+            if (!earliest || date < earliest) earliest = date;
+            if (!latest || date > latest) latest = date;
+        });
+    });
+    const range = earliest && latest ? ` from ${fmtDateOnly(earliest)} to ${fmtDateOnly(latest)}` : "";
+    const label = `${fmtNumber(rows.length)} historical record${rows.length === 1 ? "" : "s"}${range}`;
+    historicalDataSpanCache = { rows, label };
+    return label;
+}
+
+function setHistoricalDataLoadUi(state = historicalDataLoadState, message = "") {
+    historicalDataLoadState = state;
+    const button = document.getElementById("load-history-btn");
+    const status = document.getElementById("history-load-status");
+    if (button) {
+        button.classList.toggle("is-loaded", state === "loaded");
+        button.classList.toggle("is-error", state === "error");
+        button.disabled = state === "loading" || state === "loaded";
+        button.setAttribute("aria-busy", state === "loading" ? "true" : "false");
+        button.textContent = state === "loading"
+            ? "Loading Older Data..."
+            : state === "loaded"
+                ? "History Loaded"
+                : state === "error"
+                    ? "Retry Older Data"
+                    : "Load Older Data";
+    }
+    if (!status) return;
+    if (message) status.textContent = message;
+    else if (state === "loading") status.textContent = "Loading the full work-order history once. The page remains available while this runs.";
+    else if (state === "loaded") status.textContent = "Historical data is cached for this stage and ready for comparisons.";
+    else if (state === "error") status.textContent = "Full history could not be loaded. Current-period values are still available.";
+    else status.textContent = "Current period loaded. Older years load only when requested.";
 }
 
 function syncMrMovementYearToPeriod(rows = []) {
@@ -1876,7 +1973,27 @@ function isMrOutstandingAcknowledgement(item) {
     return isMrNewStatus(item.status) && !getMrWorkOrderOnlyId(item.row) && !isMrAcknowledged(item);
 }
 
+// A single render pass normalises the same all-year row array up to seven times
+// (MR tracking, comparison scope, machine summaries, historical totals...), and
+// each pass re-parses every date and re-resolves every aliased column on ~5k
+// rows. The result only depends on the array identity, so cache it against that
+// array — a new fetch or a stage/category change produces a new array and
+// naturally invalidates the entry. WeakMap keeps this from pinning old payloads
+// in memory.
+const _mrTrackingNormalizeCache = typeof WeakMap === "function" ? new WeakMap() : null;
 function normalizeMrTrackingRows(rows = []) {
+    if (_mrTrackingNormalizeCache && Array.isArray(rows)) {
+        const cached = _mrTrackingNormalizeCache.get(rows);
+        if (cached) return cached;
+    }
+    const normalizedResult = _normalizeMrTrackingRowsUncached(rows);
+    if (_mrTrackingNormalizeCache && Array.isArray(rows)) {
+        _mrTrackingNormalizeCache.set(rows, normalizedResult);
+    }
+    return normalizedResult;
+}
+
+function _normalizeMrTrackingRowsUncached(rows = []) {
     const rowMap = new Map();
     let duplicateCount = 0;
     const hasAckStatusField = rows.some((row) => getRowFieldByAliasesRaw(row, MR_ACK_STATUS_ALIASES).hasField);
@@ -2453,6 +2570,17 @@ function renderMrMovementSection(rows = allWorkOrderRowsCache) {
     renderMrCarryoverTable(model);
 }
 
+// % Finished for a month = MR finished in that month / MR raised in that month.
+// It can exceed 100% when carry-over MR from earlier months are closed, which is
+// exactly the signal the maintenance team wants (catching up on backlog), so the
+// value is not capped — only tinted differently once it passes 100%.
+function getMrMonthlyFinishedPercent(raised, finished) {
+    const raisedCount = Number(raised || 0);
+    const finishedCount = Number(finished || 0);
+    if (!raisedCount) return null;
+    return (finishedCount / raisedCount) * 100;
+}
+
 function renderMrMovementTable(monthLabels, raisedByMonth, finishedByMonth) {
     const head = document.getElementById("mr-movement-table-head");
     const body = document.getElementById("mr-movement-table-body");
@@ -2471,7 +2599,17 @@ function renderMrMovementTable(monthLabels, raisedByMonth, finishedByMonth) {
                 <td>${escapeHtml(label)}</td>
                 ${values.map((value) => `<td>${escapeHtml(fmtNumber(value || 0))}</td>`).join("")}
             </tr>`;
-        body.innerHTML = rowFor("MR Raised", raisedByMonth) + rowFor("MR Finished", finishedByMonth);
+        const percentRow = `
+            <tr class="mr-movement-percent-row">
+                <td title="MR finished in the month / MR raised in the same month. Above 100% means carry-over MR from earlier months were also closed.">% Finished</td>
+                ${monthLabels.map((_, index) => {
+                    const percent = getMrMonthlyFinishedPercent(raisedByMonth[index], finishedByMonth[index]);
+                    if (percent === null) return `<td class="mr-percent-cell mr-percent-carryover" title="No MR raised this month; ${escapeHtml(fmtNumber(finishedByMonth[index] || 0))} carry-over MR finished.">--</td>`;
+                    const tone = percent >= 100 ? "mr-percent-good" : (percent >= 60 ? "mr-percent-ok" : (percent > 0 ? "mr-percent-low" : "mr-percent-none"));
+                    return `<td class="mr-percent-cell ${tone}">${escapeHtml(fmtPercent(percent))}</td>`;
+                }).join("")}
+            </tr>`;
+        body.innerHTML = rowFor("MR Raised", raisedByMonth) + rowFor("MR Finished", finishedByMonth) + percentRow;
     }
 }
 
@@ -2485,26 +2623,33 @@ function renderMrMovementChart(model) {
     }
     const raisedByFinancialMonth = MR_FINANCIAL_MONTH_ORDER.map((monthIndex) => model.monthlyRaised[monthIndex] || 0);
     const finishedByFinancialMonth = MR_FINANCIAL_MONTH_ORDER.map((monthIndex) => model.monthlyFinished[monthIndex] || 0);
-    renderMrMovementTable(getMrFinancialMonthLabelsWithYear(model.selectedYear), raisedByFinancialMonth, finishedByFinancialMonth);
+    const movementMonthLabels = getMrFinancialMonthLabelsWithYear(model.selectedYear);
+    renderMrMovementTable(movementMonthLabels, raisedByFinancialMonth, finishedByFinancialMonth);
     destroyChart("mrMovementChart");
+    // One stacked bar per month: raised and finished sit in the same column in
+    // different colours instead of two side-by-side bars. The stack height is
+    // total monthly MR activity, so the tooltip spells out each part plus the
+    // % finished to keep the reading unambiguous.
     chartRefs.mrMovementChart = new Chart(canvas.getContext("2d"), {
         type: "bar",
         data: {
-            labels: getMrFinancialMonthLabelsWithYear(model.selectedYear),
+            labels: movementMonthLabels,
             datasets: [
                 {
                     label: "MR Raised",
                     data: raisedByFinancialMonth,
                     backgroundColor: "#3b82f6",
-                    borderRadius: 8,
-                    maxBarThickness: 34,
+                    borderRadius: { topLeft: 0, topRight: 0, bottomLeft: 8, bottomRight: 8 },
+                    maxBarThickness: 44,
+                    stack: "mr",
                 },
                 {
                     label: "MR Finished",
                     data: finishedByFinancialMonth,
                     backgroundColor: "#10b981",
-                    borderRadius: 8,
-                    maxBarThickness: 34,
+                    borderRadius: { topLeft: 8, topRight: 8, bottomLeft: 0, bottomRight: 0 },
+                    maxBarThickness: 44,
+                    stack: "mr",
                 },
             ],
         },
@@ -2513,11 +2658,26 @@ function renderMrMovementChart(model) {
             maintainAspectRatio: false,
             plugins: {
                 legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 10 } },
-                tooltip: { callbacks: { label: (context) => `${context.dataset.label}: ${fmtNumber(context.parsed.y)}` } },
+                tooltip: {
+                    callbacks: {
+                        label: (context) => `${context.dataset.label}: ${fmtNumber(context.parsed.y)}`,
+                        footer: (items) => {
+                            const index = items[0]?.dataIndex;
+                            if (index === undefined) return "";
+                            const raised = raisedByFinancialMonth[index] || 0;
+                            const finished = finishedByFinancialMonth[index] || 0;
+                            const percent = getMrMonthlyFinishedPercent(raised, finished);
+                            return [
+                                `% Finished: ${percent === null ? "--" : fmtPercent(percent)}`,
+                                `Total monthly activity: ${fmtNumber(raised + finished)}`,
+                            ];
+                        },
+                    },
+                },
             },
             scales: {
-                x: { grid: { display: false }, ticks: { color: "#475569", maxRotation: 45, minRotation: 45 } },
-                y: { beginAtZero: true, ticks: { precision: 0, color: "#475569" }, grid: { color: "rgba(148, 163, 184, 0.18)" } },
+                x: { stacked: true, grid: { display: false }, ticks: { color: "#475569", maxRotation: 45, minRotation: 45 } },
+                y: { stacked: true, beginAtZero: true, ticks: { precision: 0, color: "#475569" }, grid: { color: "rgba(148, 163, 184, 0.18)" } },
             },
         },
     });
@@ -2724,15 +2884,125 @@ function getOverviewYtdYear(rows = []) {
     return hasCurrentYear ? currentYear : latestYear;
 }
 
+// ── Downtime Overview period scope ───────────────────────────────────────────
+// The top KPI strip has its own period control, independent of the page-level
+// period select: "Financial Year (YTD)" scopes to a financial year (Apr-Mar),
+// "Month" scopes to a single month inside it.
+let overviewViewMode = "fy";        // fy | month
+let overviewFinancialYear = "";     // FY start year as a string; "" = all data
+let overviewMonthKey = "";          // "YYYY-MM"
+let overviewScopeInitialised = false;
+
+function getOverviewAvailableFinancialYears(rows = []) {
+    const years = new Set();
+    rows.forEach((row) => {
+        const { year, month } = getOverviewRowYearMonth(row);
+        if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) return;
+        years.add(Number(month) >= MR_FINANCIAL_YEAR_START_MONTH ? Number(year) : Number(year) - 1);
+    });
+    return [...years].sort((a, b) => b - a);
+}
+
+function getOverviewFinancialYearMonthKeys(fyStart) {
+    const startYear = Number(fyStart);
+    if (!Number.isFinite(startYear)) return [];
+    return MR_FINANCIAL_MONTH_ORDER.map((monthIndex) => {
+        const year = monthIndex + 1 >= MR_FINANCIAL_YEAR_START_MONTH ? startYear : startYear + 1;
+        return `${year}-${String(monthIndex + 1).padStart(2, "0")}`;
+    });
+}
+
+function getOverviewMonthLabel(monthKey) {
+    if (!monthKey || !monthKey.includes("-")) return "All Months";
+    const [year, month] = monthKey.split("-");
+    return `${MR_MONTH_LABELS[Number(month) - 1] || month} ${year}`;
+}
+
+// Picks the newest financial year (and its newest month with data) the first
+// time the overview renders, so the strip opens on the live period.
+function initialiseOverviewScope(rows = []) {
+    if (overviewScopeInitialised || !rows.length) return;
+    const financialYears = getOverviewAvailableFinancialYears(rows);
+    if (!financialYears.length) return;
+    overviewFinancialYear = String(financialYears[0]);
+    const monthsWithData = new Set();
+    rows.forEach((row) => {
+        const { year, month } = getOverviewRowYearMonth(row);
+        if (/^\d{4}$/.test(year) && /^\d{2}$/.test(month)) monthsWithData.add(`${year}-${month}`);
+    });
+    const fyMonths = getOverviewFinancialYearMonthKeys(overviewFinancialYear).filter((key) => monthsWithData.has(key));
+    overviewMonthKey = fyMonths.length ? fyMonths[fyMonths.length - 1] : "";
+    overviewScopeInitialised = true;
+}
+
+function syncOverviewScopeControls(rows = []) {
+    const viewSelect = document.getElementById("overview-view-filter");
+    const fySelect = document.getElementById("overview-fy-filter");
+    const monthSelect = document.getElementById("overview-month-filter");
+    const monthField = document.getElementById("overview-month-field");
+    if (viewSelect) viewSelect.value = overviewViewMode;
+    if (monthField) monthField.classList.toggle("hidden", overviewViewMode !== "month");
+
+    const financialYears = getOverviewAvailableFinancialYears(rows);
+    if (overviewFinancialYear && financialYears.length && !financialYears.map(String).includes(String(overviewFinancialYear))) {
+        overviewFinancialYear = String(financialYears[0]);
+    }
+    if (fySelect) {
+        const optionsHtml = financialYears
+            .map((year) => `<option value="${escapeHtml(String(year))}">${escapeHtml(getMrFinancialYearLongLabel(year))}</option>`)
+            .join("") + `<option value="">All Data</option>`;
+        if (fySelect.dataset.optionsSignature !== optionsHtml) {
+            fySelect.innerHTML = optionsHtml;
+            fySelect.dataset.optionsSignature = optionsHtml;
+        }
+        fySelect.value = overviewFinancialYear;
+    }
+    if (monthSelect) {
+        const monthsWithData = new Set(rows.map((row) => {
+            const { year, month } = getOverviewRowYearMonth(row);
+            return /^\d{4}$/.test(year) && /^\d{2}$/.test(month) ? `${year}-${month}` : "";
+        }).filter(Boolean));
+        const monthKeys = overviewFinancialYear
+            ? getOverviewFinancialYearMonthKeys(overviewFinancialYear).filter((key) => monthsWithData.has(key))
+            : [];
+        const optionsHtml = monthKeys.length
+            ? monthKeys.map((key) => `<option value="${escapeHtml(key)}">${escapeHtml(getOverviewMonthLabel(key))}</option>`).join("")
+            : `<option value="">No months available</option>`;
+        if (monthSelect.dataset.optionsSignature !== optionsHtml) {
+            monthSelect.innerHTML = optionsHtml;
+            monthSelect.dataset.optionsSignature = optionsHtml;
+        }
+        if (!monthKeys.includes(overviewMonthKey)) overviewMonthKey = monthKeys[monthKeys.length - 1] || "";
+        monthSelect.value = overviewMonthKey;
+    }
+}
+
+function getOverviewScopeLabel() {
+    if (!overviewFinancialYear) return "All imported data.";
+    if (overviewViewMode === "month" && overviewMonthKey) {
+        return `${getOverviewMonthLabel(overviewMonthKey)} only (${getMrFinancialYearLabel(overviewFinancialYear)}).`;
+    }
+    return `${getMrFinancialYearLongLabel(overviewFinancialYear)} to date.`;
+}
+
 function getOverviewKpiRows(rows = []) {
-    const ytdYear = getOverviewYtdYear(rows);
-    return ytdYear ? filterOverviewRowsByDate(rows, ytdYear, "") : rows;
+    if (!overviewFinancialYear) return rows;
+    if (overviewViewMode === "month" && overviewMonthKey) {
+        return filterOverviewRowsByDate(rows, overviewMonthKey.slice(0, 4), overviewMonthKey.slice(5, 7));
+    }
+    const { start, end } = getMrFinancialYearRange(overviewFinancialYear);
+    return rows.filter((row) => {
+        const { year, month } = getOverviewRowYearMonth(row);
+        if (!/^\d{4}$/.test(year) || !/^\d{2}$/.test(month)) return false;
+        const rowDate = new Date(Number(year), Number(month) - 1, 1);
+        return rowDate >= start && rowDate < end;
+    });
 }
 
 function getOverviewSourceRows(management = getManagement()) {
-    if (Array.isArray(allWorkOrderRowsCache) && allWorkOrderRowsCache.length) return allWorkOrderRowsCache;
+    if (Array.isArray(allWorkOrderRowsCache) && allWorkOrderRowsCache.length) return applyCategoryFilter(allWorkOrderRowsCache);
     const fallbackRows = getFallbackAllWorkOrderRows();
-    if (fallbackRows.length) return fallbackRows;
+    if (fallbackRows.length) return applyCategoryFilter(fallbackRows);
     return getWorkOrderRows(management);
 }
 
@@ -2795,10 +3065,13 @@ function getTopicReliabilityScope() {
     return { year: topicReliabilityYearFilter, month: topicReliabilityMonthFilter, mode: "month" };
 }
 
-function renderDowntimeOverviewFromRows(rows = []) {
+function renderDowntimeOverviewFromRows(rows = [], { renderTopicPanel = false } = {}) {
     downtimeOverviewRowsCache = rows;
     populateTopicYearOptions(rows);
     applyTopicReliabilityDefaultScope(rows);
+    initialiseOverviewScope(rows);
+    syncOverviewScopeControls(rows);
+    setText("overview-scope-label", getOverviewScopeLabel());
     if (!rows.length) {
         setText("kpi-maintenance-resolution-time", "--");
         setText("kpi-maintenance-resolution-sub", "No imported work orders loaded.");
@@ -2809,7 +3082,7 @@ function renderDowntimeOverviewFromRows(rows = []) {
         setHtml("kpi-open-severity-critical-breakdown", `<span class="sl-trend-label">Critical open MR by Service level.</span>`);
         setText("kpi-invalid-work-orders", "--");
         setText("kpi-data-review-count", "--");
-        renderTopicDataReliabilityPanel();
+        if (renderTopicPanel && selectedDashboardTopic === "data-reliability") renderTopicDataReliabilityPanel();
         syncTopicMirrors();
         return;
     }
@@ -2838,16 +3111,21 @@ function renderDowntimeOverviewFromRows(rows = []) {
     setText("kpi-work-order-count-sub", fmtNumber(machinesAffected.size));
     setHtml("kpi-open-severity-breakdown", buildSeverityBreakdownHtml(severityMap));
     setHtml("kpi-open-severity-critical-breakdown", buildSeverityBreakdownCriticalHtml(criticalSeverityMap));
-    // Same composite index as the Data Reliability panel, scoped to YTD so the two
-    // cards measure the same thing and differ only by period.
-    const ytdIndex = buildDataQualityIndex(kpiRows);
-    const ytdYear = getOverviewYtdYear(rows);
-    setText("kpi-data-reliability", fmtPercent(ytdIndex?.index));
+    // Same composite index as the Data Reliability panel, scoped to whatever
+    // period the strip is showing so the two cards measure the same thing and
+    // differ only by period.
+    const scopedIndex = buildDataQualityIndex(kpiRows);
+    const scopeSuffix = overviewFinancialYear
+        ? (overviewViewMode === "month" && overviewMonthKey
+            ? ` — ${getOverviewMonthLabel(overviewMonthKey)}`
+            : ` — ${getMrFinancialYearLabel(overviewFinancialYear)} YTD`)
+        : "";
+    setText("kpi-data-reliability", fmtPercent(scopedIndex?.index));
     setText("kpi-invalid-work-orders", fmtNumber(reliabilityIssueCount));
     setText("kpi-data-review-count", fmtNumber(openWoCount));
-    setText("kpi-data-reliability-sub", `Five-dimension composite${ytdYear ? ` — YTD ${ytdYear}` : ""}. ${fmtNumber(qualityValid)} of ${fmtNumber(kpiRows.length)} records have no reliability issue; open WOs are excluded from date defects.`);
+    setText("kpi-data-reliability-sub", `Five-dimension composite${scopeSuffix}. ${fmtNumber(qualityValid)} of ${fmtNumber(kpiRows.length)} records have no reliability issue; open WOs are excluded from date defects.`);
 
-    renderTopicDataReliabilityPanel();
+    if (renderTopicPanel && selectedDashboardTopic === "data-reliability") renderTopicDataReliabilityPanel();
     syncTopicMirrors();
 }
 
@@ -3341,13 +3619,19 @@ function getCriticalMrItems(rows = []) {
 
 // Returns all normalised items filtered by the currently selected scope.
 // Reuses getPerformanceMachineGroup() — same logic as Machine Explorer group cards.
+let cmcScopeItemsCache = { rows: null, scope: null, items: null };
 function getCmcScopeItems(rows = []) {
+    if (cmcScopeItemsCache.rows === rows && cmcScopeItemsCache.scope === cmcScope && cmcScopeItemsCache.items) {
+        return cmcScopeItemsCache.items;
+    }
     const allItems = normalizeMrTrackingRows(rows).items;
     const selectedScope = normalizeMachineExplorerGroupLabel(cmcScope);
-    if (cmcScope === "Critical") return allItems.filter((item) => isProductionCritical(item.row));
-    if (cmcScope === "all" || selectedScope === MACHINE_EXPLORER_ALL_GROUP) return allItems;
-    // All remaining scopes map to getPerformanceMachineGroup values
-    return allItems.filter((item) => normalizeMachineExplorerGroupLabel(getPerformanceMachineGroup(item.row)) === selectedScope);
+    let items;
+    if (cmcScope === "Critical") items = allItems.filter((item) => isProductionCritical(item.row));
+    else if (cmcScope === "all" || selectedScope === MACHINE_EXPLORER_ALL_GROUP) items = allItems;
+    else items = allItems.filter((item) => normalizeMachineExplorerGroupLabel(getPerformanceMachineGroup(item.row)) === selectedScope);
+    cmcScopeItemsCache = { rows, scope: cmcScope, items };
+    return items;
 }
 
 // Returns scope-specific subtitle text for display.
@@ -3462,7 +3746,7 @@ function renderCmcAllYearsSection(items) {
     // Summary KPI cards — one per year
     grid.innerHTML = yearStats.map((ys) => {
         const s = ys.stats;
-        const closureStr = s.closureRate !== null ? fmtPercent(s.closureRate) : "--";
+        const mtbfStr = s.mtbf !== null ? fmtDaysHours(s.mtbf) : "--";
         return `<div class="cmc-all-years-card">
             <div class="cmc-all-years-yr">${escapeHtml(ys.label)}${ys.isYtd ? ` <span class="cmc-ytd-tag">YTD</span>` : ""}</div>
             <div class="cmc-all-years-metrics">
@@ -3470,7 +3754,7 @@ function renderCmcAllYearsSection(items) {
                 <div class="cmc-ay-row"><span>Finished</span><strong>${fmtNumber(s.finished)}</strong></div>
                 <div class="cmc-ay-row"><span>Open Backlog</span><strong>${fmtNumber(s.openBacklog)}</strong></div>
                 <div class="cmc-ay-row"><span>Not Acknowledged</span><strong>${fmtNumber(s.notAck)}</strong></div>
-                <div class="cmc-ay-row"><span>Closure Rate</span><strong>${closureStr}</strong></div>
+                <div class="cmc-ay-row"><span>MTBF</span><strong>${mtbfStr}</strong></div>
                 <div class="cmc-ay-row"><span>Invalid</span><strong>${fmtNumber(s.invalid)}</strong></div>
             </div>
         </div>`;
@@ -3757,6 +4041,31 @@ function getCmcPeriods() {
             labelB: String(by),
         };
     }
+    if (cmcMode === "financial_year") {
+        const ay = Number(cmcFyA), by = Number(cmcFyB);
+        if (!Number.isFinite(ay) || !Number.isFinite(by) || !ay || !by) return null;
+        const rangeA = getMrFinancialYearRange(ay);
+        const rangeB = getMrFinancialYearRange(by);
+        let endA = new Date(rangeA.end.getTime() - 1);
+        let endB = new Date(rangeB.end.getTime() - 1);
+        let ytd = false;
+        const latestFy = getMrFinancialYearStart(cmcLatestDataDate);
+        if (latestFy !== null && (ay === latestFy || by === latestFy)) {
+            const latestRange = getMrFinancialYearRange(latestFy);
+            const elapsedMs = Math.max(0, Math.min(cmcLatestDataDate.getTime(), latestRange.end.getTime() - 1) - latestRange.start.getTime());
+            endA = new Date(Math.min(endA.getTime(), rangeA.start.getTime() + elapsedMs));
+            endB = new Date(Math.min(endB.getTime(), rangeB.start.getTime() + elapsedMs));
+            endA.setHours(23, 59, 59, 999);
+            endB.setHours(23, 59, 59, 999);
+            ytd = true;
+        }
+        return {
+            a: { start: rangeA.start, end: endA },
+            b: { start: rangeB.start, end: endB },
+            labelA: `${getMrFinancialYearLabel(ay)}${ytd ? " YTD" : ""}`,
+            labelB: `${getMrFinancialYearLabel(by)}${ytd ? " YTD" : ""}`,
+        };
+    }
     if (cmcMode === "custom") {
         const aS = parseDateValue(cmcCustomAStart);
         const aE = parseDateValue(cmcCustomAEnd);
@@ -3776,8 +4085,62 @@ function getCmcPeriods() {
     return null;
 }
 
+// MTBF for a comparison window, using the same rule as the Key Downtime
+// Indicators card: per asset, average the end-to-start gaps between consecutive
+// failures, then average those per-asset values. Returns hours (null when no
+// asset in the window has two usable failures).
+const cmcFailureRecordCache = typeof WeakMap === "function" ? new WeakMap() : null;
+function getCmcFailureRecord(item) {
+    const row = item?.row || {};
+    if (cmcFailureRecordCache?.has(row)) return cmcFailureRecordCache.get(row);
+    let result = null;
+    if (!(row.mixer_related && row.alias_mtbf_include === false)) {
+        const assetId = String(row.canonical_asset_id || row.asset_id || "").trim().toUpperCase();
+        const isGeneralArea = typeof isMtbfGeneralAreaWo === "function" && isMtbfGeneralAreaWo(row);
+        const failureStart = parseDateValue(row.actual_start_time || row.actual_start || row.maintenance_start_time || row.start_time);
+        const failureEnd = parseDateValue(row.actual_end_time || row.actual_end || row.maintenance_end_time || row.end_time);
+        if (assetId && assetId !== "WO-ASSET" && !isGeneralArea && failureStart && failureEnd) {
+            result = { assetId, start: failureStart, end: failureEnd };
+        }
+    }
+    cmcFailureRecordCache?.set(row, result);
+    return result;
+}
+
+function computeCmcMtbfHours(items, start, end) {
+    const byAsset = new Map();
+    items.forEach((item) => {
+        const failure = getCmcFailureRecord(item);
+        // Retain earlier failures so the first interval whose next failure lands
+        // in the selected period is included at a month/FY boundary.
+        if (!failure || failure.start > end) return;
+        if (!byAsset.has(failure.assetId)) byAsset.set(failure.assetId, []);
+        byAsset.get(failure.assetId).push(failure);
+    });
+    let total = 0;
+    let assetsWithMtbf = 0;
+    byAsset.forEach((failures) => {
+        if (failures.length < 2) return;
+        const sorted = failures.sort((a, b) => a.start - b.start);
+        const gaps = [];
+        for (let i = 1; i < sorted.length; i++) {
+            if (sorted[i].start < start || sorted[i].start > end) continue;
+            const gapHours = (sorted[i].start.getTime() - sorted[i - 1].end.getTime()) / 3600000;
+            if (gapHours > MTBF_MIN_GAP_HOURS) gaps.push(gapHours);
+        }
+        if (!gaps.length) return;
+        total += gaps.reduce((sum, value) => sum + value, 0) / gaps.length;
+        assetsWithMtbf += 1;
+    });
+    return assetsWithMtbf ? total / assetsWithMtbf : null;
+}
+
 // Compute all comparison KPIs for one period window.
+const cmcStatsCache = typeof WeakMap === "function" ? new WeakMap() : null;
 function computeCmcStats(items, start, end) {
+    const cacheKey = `${start.getTime()}:${end.getTime()}`;
+    const itemCache = cmcStatsCache?.get(items);
+    if (itemCache?.has(cacheKey)) return itemCache.get(cacheKey);
     // Raised: created date falls within [start, end]
     const raised = items.filter((it) => { const d = it.raised.date; return d && d >= start && d <= end; });
 
@@ -3803,9 +4166,6 @@ function computeCmcStats(items, start, end) {
         return !f || f >= start;
     });
 
-    // Closure rate = finished / raised (handle divide-by-zero)
-    const closureRate = raised.length > 0 ? (finished.length / raised.length) * 100 : null;
-
     // Backlog change = closing backlog − opening backlog (negative = improved)
     const backlogChange = openBacklog.length - openingBacklog.length;
 
@@ -3816,7 +4176,17 @@ function computeCmcStats(items, start, end) {
     // Invalid: records raised in period flagged for data quality review
     const invalid = raised.filter((it) => !isDataQualityValid(it.row)).length;
 
-    return { raised: raised.length, finished: finished.length, openBacklog: openBacklog.length, notAck: notAck.length, closureRate, openingBacklog: openingBacklog.length, backlogChange, avgTtr, invalid };
+    // MTBF over the same window (hours) — replaces closure rate as the headline
+    // reliability KPI, computed with the Key Downtime Indicators rule.
+    const mtbf = computeCmcMtbfHours(items, start, end);
+
+    const result = { raised: raised.length, finished: finished.length, openBacklog: openBacklog.length, notAck: notAck.length, mtbf, openingBacklog: openingBacklog.length, backlogChange, avgTtr, invalid };
+    if (cmcStatsCache) {
+        const nextCache = itemCache || new Map();
+        nextCache.set(cacheKey, result);
+        cmcStatsCache.set(items, nextCache);
+    }
+    return result;
 }
 
 function populateCmcControls(rows) {
@@ -3824,25 +4194,43 @@ function populateCmcControls(rows) {
     const criticalItems = getCmcScopeItems(rows);
     const monthSet = new Set();
     const yearSet = new Set();
+    const fySet = new Set();
+    let latestDataDate = null;
     criticalItems.forEach((it) => {
         const d = it.raised.date;
         if (!d) return;
+        if (!latestDataDate || d > latestDataDate) latestDataDate = d;
+        if (it.finished.date && (!latestDataDate || it.finished.date > latestDataDate)) latestDataDate = it.finished.date;
         monthSet.add(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
         yearSet.add(d.getFullYear());
+        fySet.add(getMrFinancialYearStart(d));
     });
+    cmcLatestDataDate = latestDataDate;
     const months = [...monthSet].sort().reverse();
     const years = [...yearSet].sort((a, b) => b - a);
+    const financialYears = [...fySet].sort((a, b) => b - a);
 
     const monthHtml = months.map((m) => { const [y, mo] = m.split("-").map(Number); return `<option value="${m}">${MR_MONTH_LABELS[mo - 1]} ${y}</option>`; }).join("") || `<option value="">No data</option>`;
     const yearHtml = years.map((y) => `<option value="${y}">${y}</option>`).join("") || `<option value="">No data</option>`;
-    ["cmc-month-a", "cmc-month-b"].forEach((id) => { const el = document.getElementById(id); if (el) el.innerHTML = monthHtml; });
-    ["cmc-year-a", "cmc-year-b"].forEach((id) => { const el = document.getElementById(id); if (el) el.innerHTML = yearHtml; });
+    const fyHtml = financialYears.map((y) => `<option value="${y}">${escapeHtml(getMrFinancialYearLongLabel(y))}</option>`).join("") || `<option value="">No data</option>`;
+    const setOptions = (id, html) => {
+        const el = document.getElementById(id);
+        if (!el || el.dataset.optionsSignature === html) return;
+        el.innerHTML = html;
+        el.dataset.optionsSignature = html;
+    };
+    ["cmc-month-a", "cmc-month-b"].forEach((id) => setOptions(id, monthHtml));
+    ["cmc-year-a", "cmc-year-b"].forEach((id) => setOptions(id, yearHtml));
+    ["cmc-fy-a", "cmc-fy-b"].forEach((id) => setOptions(id, fyHtml));
 
     // Set defaults: month A = previous available, month B = latest
     if (!cmcMonthA || !months.includes(cmcMonthA)) cmcMonthA = months[1] || months[0] || "";
     if (!cmcMonthB || !months.includes(cmcMonthB)) cmcMonthB = months[0] || "";
     if (!cmcYearA || !years.map(String).includes(String(cmcYearA))) cmcYearA = String(years[1] || years[0] || "");
     if (!cmcYearB || !years.map(String).includes(String(cmcYearB))) cmcYearB = String(years[0] || "");
+    // Financial-year defaults: A = previous FY, B = latest FY.
+    if (!cmcFyA || !financialYears.map(String).includes(String(cmcFyA))) cmcFyA = String(financialYears[1] ?? financialYears[0] ?? "");
+    if (!cmcFyB || !financialYears.map(String).includes(String(cmcFyB))) cmcFyB = String(financialYears[0] ?? "");
 
     const sync = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
     sync("cmc-mode", cmcMode);
@@ -3850,6 +4238,8 @@ function populateCmcControls(rows) {
     sync("cmc-month-b", cmcMonthB);
     sync("cmc-year-a", cmcYearA);
     sync("cmc-year-b", cmcYearB);
+    sync("cmc-fy-a", cmcFyA);
+    sync("cmc-fy-b", cmcFyB);
     if (cmcCustomAStart) sync("cmc-custom-a-start", cmcCustomAStart);
     if (cmcCustomAEnd) sync("cmc-custom-a-end", cmcCustomAEnd);
     if (cmcCustomBStart) sync("cmc-custom-b-start", cmcCustomBStart);
@@ -3859,6 +4249,7 @@ function populateCmcControls(rows) {
 function updateCmcControlVisibility() {
     const isMonth = cmcMode === "month";
     const isYear = cmcMode === "year";
+    const isFinancialYear = cmcMode === "financial_year";
     const isCustom = cmcMode === "custom";
     const isAllYears = isYear && cmcYearView === "all";
     const isCompareTwoYears = isYear && cmcYearView === "compare";
@@ -3866,6 +4257,7 @@ function updateCmcControlVisibility() {
     // Year-mode controls: Year View dropdown + Year A/B dropdowns (only in Compare Two Years)
     document.querySelectorAll(".cmc-year-controls").forEach((el) => el.classList.toggle("hidden", !isYear));
     document.querySelectorAll(".cmc-year-ab-controls").forEach((el) => el.classList.toggle("hidden", !isCompareTwoYears));
+    document.querySelectorAll(".cmc-fy-controls").forEach((el) => el.classList.toggle("hidden", !isFinancialYear));
     document.querySelectorAll(".cmc-custom-controls").forEach((el) => el.classList.toggle("hidden", !isCustom));
     // All-years section visibility
     const allYearsSection = document.getElementById("cmc-all-years-section");
@@ -3883,7 +4275,7 @@ const CMC_KPI_DEFS = [
     { key: "finished",      labelKey: "finished",    fmt: "count", lower: false },
     { key: "openBacklog",   labelKey: "backlog",     fmt: "count", lower: true  },
     { key: "notAck",        labelKey: "notAck",      fmt: "count", lower: true  },
-    { key: "closureRate",   labelKey: "closure",     fmt: "pct",   lower: false },
+    { key: "mtbf",          labelKey: "mtbf",        fmt: "days",  lower: false },
     { key: "backlogChange", labelKey: "backlogChg",  fmt: "diff",  lower: true  },
     { key: "avgTtr",        labelKey: "ttr",         fmt: "hours", lower: true  },
     { key: "invalid",       labelKey: "invalid",     fmt: "count", lower: true  },
@@ -3897,7 +4289,7 @@ function getCmcKpis() {
         finished:   `${s}MR Finished`,
         backlog:    `${s}Open Backlog`,
         notAck:     `${s}Not Acknowledged`,
-        closure:    "Closure Rate",
+        mtbf:       "MTBF (avg between failures)",
         backlogChg: "Backlog Change",
         ttr:        "Avg TTR / MTTR",
         invalid:    "Invalid / Missing Dates",
@@ -3905,14 +4297,12 @@ function getCmcKpis() {
     return CMC_KPI_DEFS.map((d) => ({ ...d, label: labelMap[d.labelKey] || d.labelKey }));
 }
 
-// Keep CMC_KPIS as a live getter alias so existing render helpers still work.
-function getCmcKpisLegacy() { return getCmcKpis(); }
-
 function fmtCmcVal(v, fmt) {
     if (v === null || v === undefined) return "--";
     if (fmt === "count") return fmtNumber(v);
     if (fmt === "pct")   return fmtPercent(v);
     if (fmt === "hours") return fmtHours(v);
+    if (fmt === "days")  return fmtDaysHours(v);
     if (fmt === "diff")  return v === 0 ? "0" : (v > 0 ? `+${fmtNumber(v)}` : String(fmtNumber(v)));
     return String(v);
 }
@@ -3936,6 +4326,7 @@ function cmcDiffText(kpi, a, b) {
     }
     if (kpi.fmt === "pct") return `${arrow} ${sign}${Math.round(Math.abs(diff) * 10) / 10} pp`;
     if (kpi.fmt === "hours") return `${arrow} ${fmtHours(Math.abs(diff))} ${diff >= 0 ? "longer" : "shorter"}`;
+    if (kpi.fmt === "days") return `${arrow} ${fmtDaysHours(Math.abs(diff))} ${diff >= 0 ? "longer between failures" : "shorter between failures"}`;
     return "—";
 }
 
@@ -3948,7 +4339,7 @@ function cmcInterpretation(kpi, a, b) {
         finished:     diff > 0 ? "Closure performance improved" : "Fewer MR closed",
         openBacklog:  diff < 0 ? "Backlog reduced" : "Backlog increased",
         notAck:       diff < 0 ? "Acknowledgement improved" : "More unacknowledged MR",
-        closureRate:  diff > 0 ? "Closure rate improved" : "Closure rate declined",
+        mtbf:         diff > 0 ? "Assets run longer between failures" : "Failures are recurring sooner",
         backlogChange:diff < 0 ? "Backlog pressure eased" : "Backlog pressure increased",
         avgTtr:       diff < 0 ? "Faster resolution" : "Slower resolution",
         invalid:      diff < 0 ? "Data quality improved" : "Data quality worsened",
@@ -3963,25 +4354,72 @@ function renderCmcKpiCards(sA, sB, lA, lB) {
         const a = sA[kpi.key], b = sB[kpi.key];
         const sent = cmcSentiment(kpi, a, b);
         const sentCls = sent === "good" ? "cmc-chg-good" : sent === "bad" ? "cmc-chg-bad" : "cmc-chg-neutral";
-        return `<div class="cmc-kpi-card">
+        const selected = cmcSelectedMetric === kpi.key;
+        return `<button type="button" class="cmc-kpi-card${selected ? " selected" : ""}" data-cmc-metric="${escapeHtml(kpi.key)}" aria-pressed="${selected ? "true" : "false"}" title="${selected ? "Click to return to the default charts" : `Plot ${escapeHtml(kpi.label)} on both charts`}">
             <div class="cmc-kpi-lbl">${escapeHtml(kpi.label)}</div>
             <div class="cmc-kpi-row">
                 <div class="cmc-kpi-col"><span class="cmc-plbl">${escapeHtml(lA)}</span><span class="cmc-pval">${escapeHtml(fmtCmcVal(a, kpi.fmt))}</span></div>
                 <div class="cmc-kpi-col"><span class="cmc-plbl">${escapeHtml(lB)}</span><span class="cmc-pval">${escapeHtml(fmtCmcVal(b, kpi.fmt))}</span></div>
                 <div class="cmc-kpi-col ${sentCls}"><span class="cmc-plbl">Change</span><span class="cmc-pval">${escapeHtml(cmcDiffText(kpi, a, b))}</span></div>
             </div>
-        </div>`;
+        </button>`;
     }).join("");
+}
+
+function getCmcSelectedKpi() {
+    if (!cmcSelectedMetric) return null;
+    return getCmcKpis().find((kpi) => kpi.key === cmcSelectedMetric) || null;
 }
 
 function renderCmcBarChart(sA, sB, lA, lB) {
     const canvas = ensureCanvas("cmcBarChart");
     if (!canvas) return;
     destroyChart("cmcBarChart");
+    const scopeStr = cmcScope === "all" ? "All Assets" : cmcScope;
+    const selectedKpi = getCmcSelectedKpi();
+    // A KPI box was clicked: the bar chart drops to that single metric so the
+    // A-vs-B difference for it is readable instead of being squashed next to
+    // counts on a completely different scale.
+    if (selectedKpi) {
+        const a = sA[selectedKpi.key];
+        const b = sB[selectedKpi.key];
+        if (a === null && b === null) { renderEmptyChart("cmcBarChart", `No ${selectedKpi.label} data for the selected periods.`); return; }
+        setText("cmc-bar-title", `${selectedKpi.label}: ${scopeStr} ${lA} vs ${lB}`);
+        chartRefs.cmcBarChart = new Chart(canvas.getContext("2d"), {
+            type: "bar",
+            data: {
+                labels: [lA, lB],
+                datasets: [{
+                    label: selectedKpi.label,
+                    data: [cmcMetricChartValue(selectedKpi, a), cmcMetricChartValue(selectedKpi, b)],
+                    backgroundColor: ["#3b82f6", "#10b981"],
+                    borderRadius: 6,
+                    maxBarThickness: 90,
+                }],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false },
+                    tooltip: { callbacks: { label: (ctx) => `${selectedKpi.label}: ${fmtCmcVal(ctx.dataIndex === 0 ? a : b, selectedKpi.fmt)}` } },
+                },
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: "#475569" } },
+                    y: {
+                        beginAtZero: true,
+                        grid: { color: "rgba(148, 163, 184, 0.18)" },
+                        ticks: { color: "#475569", callback: (value) => cmcMetricAxisTick(selectedKpi, value) },
+                        title: { display: true, text: cmcMetricAxisLabel(selectedKpi) },
+                    },
+                },
+            },
+        });
+        return;
+    }
     const dataA = [sA.raised, sA.finished, sA.openBacklog, sA.notAck, sA.invalid];
     const dataB = [sB.raised, sB.finished, sB.openBacklog, sB.notAck, sB.invalid];
     if (!dataA.some(Boolean) && !dataB.some(Boolean)) { renderEmptyChart("cmcBarChart", "No data for selected periods."); return; }
-    const scopeStr = cmcScope === "all" ? "All Assets" : cmcScope;
     setText("cmc-bar-title", `Comparison: ${scopeStr} ${lA} vs ${lB}`);
     chartRefs.cmcBarChart = new Chart(canvas.getContext("2d"), {
         type: "bar",
@@ -3994,6 +4432,128 @@ function renderCmcBarChart(sA, sB, lA, lB) {
         },
         options: mrTrackingAxisOptions(scopeStr),
     });
+}
+
+// ── Selected-metric chart helpers ────────────────────────────────────────────
+// MTBF is held in hours internally but reads far better in days on a chart axis,
+// so the chart layer converts while the KPI cards keep the exact value.
+function cmcMetricChartValue(kpi, value) {
+    if (value === null || value === undefined) return null;
+    if (kpi.fmt === "days") return Math.round((value / 24) * 10) / 10;
+    if (kpi.fmt === "hours") return Math.round(value * 10) / 10;
+    return value;
+}
+
+function cmcMetricAxisLabel(kpi) {
+    if (kpi.fmt === "days") return "Days between failures";
+    if (kpi.fmt === "hours") return "Hours";
+    if (kpi.fmt === "pct") return "%";
+    return "MR count";
+}
+
+function cmcMetricAxisTick(kpi, value) {
+    if (kpi.fmt === "days") return `${value}d`;
+    if (kpi.fmt === "hours") return `${value}h`;
+    if (kpi.fmt === "pct") return `${value}%`;
+    return fmtNumber(value);
+}
+
+// Cumulative (period-to-date) value of the selected metric at each bucket, so the
+// trend chart can plot any KPI the user clicks — not just raised/backlog.
+// Every metric except MTBF comes straight off the single-pass cumulative series;
+// MTBF needs the gap analysis re-run per bucket, which is why it is the only one
+// that walks the item list again.
+function buildCmcMetricSeries(items, start, end, gran, metricKey, relativeLabels = false) {
+    const base = buildCmcSeries(items, start, end, gran, relativeLabels);
+    const directKey = {
+        raised: "raised",
+        finished: "finished",
+        openBacklog: "backlog",
+        notAck: "notAck",
+        invalid: "invalid",
+        avgTtr: "avgTtr",
+    }[metricKey];
+    if (directKey) return base.map((bucket) => ({ lbl: bucket.lbl, value: bucket[directKey] }));
+    if (metricKey === "backlogChange") {
+        // Change against the backlog carried into the period.
+        const opening = computeCmcStats(items, start, end).openingBacklog;
+        return base.map((bucket) => ({ lbl: bucket.lbl, value: bucket.backlog - opening }));
+    }
+    if (metricKey === "mtbf") {
+        return buildCmcMtbfMetricSeries(items, start, end, gran, base);
+    }
+    return base.map((bucket) => ({ lbl: bucket.lbl, value: null }));
+}
+
+// Build cumulative MTBF once, incrementally. Re-running the full per-asset gap
+// analysis for every month made one KPI click perform 24 full scans/sorts.
+function buildCmcMtbfMetricSeries(items, start, end, gran, baseSeries) {
+    const edges = buildCmcBucketEdges(start, end, gran);
+    const failuresByAsset = new Map();
+    items.forEach((item) => {
+        const failure = getCmcFailureRecord(item);
+        if (!failure || failure.start > end) return;
+        if (!failuresByAsset.has(failure.assetId)) failuresByAsset.set(failure.assetId, []);
+        failuresByAsset.get(failure.assetId).push(failure);
+    });
+    const gapEvents = [];
+    failuresByAsset.forEach((failures, assetId) => {
+        failures.sort((a, b) => a.start - b.start);
+        for (let i = 1; i < failures.length; i++) {
+            const nextStart = failures[i].start;
+            if (nextStart < start || nextStart > end) continue;
+            const hours = (nextStart.getTime() - failures[i - 1].end.getTime()) / 3600000;
+            if (hours > MTBF_MIN_GAP_HOURS) gapEvents.push({ assetId, date: nextStart, hours });
+        }
+    });
+    gapEvents.sort((a, b) => a.date - b.date);
+
+    const assetState = new Map();
+    let totalAssetAverages = 0;
+    let assetCount = 0;
+    let eventIndex = 0;
+    return baseSeries.map((bucket, index) => {
+        const edge = edges[index] || end;
+        while (eventIndex < gapEvents.length && gapEvents[eventIndex].date <= edge) {
+            const event = gapEvents[eventIndex++];
+            const state = assetState.get(event.assetId) || { sum: 0, count: 0 };
+            if (state.count) totalAssetAverages -= state.sum / state.count;
+            else assetCount += 1;
+            state.sum += event.hours;
+            state.count += 1;
+            totalAssetAverages += state.sum / state.count;
+            assetState.set(event.assetId, state);
+        }
+        return { lbl: bucket.lbl, value: assetCount ? totalAssetAverages / assetCount : null };
+    });
+}
+
+// End timestamps for each bucket produced by buildCmcSeries at this granularity.
+function buildCmcBucketEdges(start, end, gran) {
+    const edges = [];
+    if (gran === "day") {
+        const d = new Date(start); d.setHours(23, 59, 59, 999);
+        const endD = new Date(end);
+        while (d <= endD) { edges.push(new Date(d)); d.setDate(d.getDate() + 1); }
+    } else if (gran === "week") {
+        const d = new Date(start); d.setHours(0, 0, 0, 0);
+        while (d <= end) {
+            const bucketEnd = new Date(d);
+            bucketEnd.setDate(bucketEnd.getDate() + 6);
+            bucketEnd.setHours(23, 59, 59, 999);
+            edges.push(bucketEnd > end ? new Date(end) : bucketEnd);
+            d.setDate(d.getDate() + 7);
+        }
+    } else {
+        let y = start.getFullYear(), m = start.getMonth();
+        const ey = end.getFullYear(), em = end.getMonth();
+        while (y < ey || (y === ey && m <= em)) {
+            const bucketEnd = new Date(y, m + 1, 0, 23, 59, 59, 999);
+            edges.push(bucketEnd > end ? new Date(end) : bucketEnd);
+            m++; if (m > 11) { m = 0; y++; }
+        }
+    }
+    return edges;
 }
 
 // Determine trend granularity based on period length in days.
@@ -4021,13 +4581,17 @@ function buildCmcSeries(items, start, end, gran, relativeLabels = false) {
                 date: new Date(d),
                 r: 0,
                 f: 0,
+                n: 0,
+                iv: 0,
+                ttrSum: 0,
+                ttrCount: 0,
             });
             d.setDate(d.getDate() + 1);
         }
     } else if (gran === "week") {
         const d = new Date(start); d.setHours(0, 0, 0, 0);
         let wk = 1;
-        while (d <= end) { buckets.push({ lbl: `Wk ${wk++}`, date: new Date(d), r: 0, f: 0 }); d.setDate(d.getDate() + 7); }
+        while (d <= end) { buckets.push({ lbl: `Wk ${wk++}`, date: new Date(d), r: 0, f: 0, n: 0, iv: 0, ttrSum: 0, ttrCount: 0 }); d.setDate(d.getDate() + 7); }
     } else {
         let y = start.getFullYear(), m = start.getMonth();
         const ey = end.getFullYear(), em = end.getMonth();
@@ -4038,6 +4602,10 @@ function buildCmcSeries(items, start, end, gran, relativeLabels = false) {
                 date: new Date(y, m, 1),
                 r: 0,
                 f: 0,
+                n: 0,
+                iv: 0,
+                ttrSum: 0,
+                ttrCount: 0,
             });
             m++; if (m > 11) { m = 0; y++; }
         }
@@ -4050,11 +4618,37 @@ function buildCmcSeries(items, start, end, gran, relativeLabels = false) {
         return idx;
     };
     items.forEach((it) => {
-        if (it.raised.date && it.raised.date >= start && it.raised.date <= end) { const i = findIdx(it.raised.date); if (i >= 0) buckets[i].r++; }
-        if (isMrFinishedStatus(it.status) && it.finished.date && it.finished.date >= start && it.finished.date <= end) { const i = findIdx(it.finished.date); if (i >= 0) buckets[i].f++; }
+        if (it.raised.date && it.raised.date >= start && it.raised.date <= end) {
+            const i = findIdx(it.raised.date);
+            if (i >= 0) {
+                buckets[i].r++;
+                if (isMrOutstandingAcknowledgement(it)) buckets[i].n++;
+                if (!isDataQualityValid(it.row)) buckets[i].iv++;
+            }
+        }
+        if (isMrFinishedStatus(it.status) && it.finished.date && it.finished.date >= start && it.finished.date <= end) {
+            const i = findIdx(it.finished.date);
+            if (i >= 0) {
+                buckets[i].f++;
+                const ttr = getTtrHours(it.row);
+                if (ttr !== null && ttr > 0) { buckets[i].ttrSum += ttr; buckets[i].ttrCount++; }
+            }
+        }
     });
-    let cr = 0, cf = 0;
-    return buckets.map((b) => { cr += b.r; cf += b.f; return { lbl: b.lbl, raised: cr, finished: cf, backlog: Math.max(0, cr - cf) }; });
+    let cr = 0, cf = 0, cn = 0, civ = 0, cTtrSum = 0, cTtrCount = 0;
+    return buckets.map((b) => {
+        cr += b.r; cf += b.f; cn += b.n; civ += b.iv;
+        cTtrSum += b.ttrSum; cTtrCount += b.ttrCount;
+        return {
+            lbl: b.lbl,
+            raised: cr,
+            finished: cf,
+            backlog: Math.max(0, cr - cf),
+            notAck: cn,
+            invalid: civ,
+            avgTtr: cTtrCount ? cTtrSum / cTtrCount : null,
+        };
+    });
 }
 
 function renderCmcTrendChart(items, periods) {
@@ -4064,15 +4658,82 @@ function renderCmcTrendChart(items, periods) {
     const isCustomMode = cmcMode === "custom";
     const gran = cmcMode === "month"
         ? "day"
-        : cmcMode === "year"
+        : (cmcMode === "year" || cmcMode === "financial_year")
             ? "month"
             : cmcTrendGranularity(periods.a.start, periods.a.end, periods.b.start, periods.b.end);
+    const scopeStr2 = cmcScope === "all" ? "All Assets" : cmcScope;
+    const selectedKpi = getCmcSelectedKpi();
+
+    // A KPI box was clicked: plot that one metric for both periods instead of
+    // the default raised/open pair.
+    if (selectedKpi) {
+        const mA = buildCmcMetricSeries(items, periods.a.start, periods.a.end, gran, selectedKpi.key, isCustomMode);
+        const mB = buildCmcMetricSeries(items, periods.b.start, periods.b.end, gran, selectedKpi.key, isCustomMode);
+        if (!mA.length && !mB.length) { renderEmptyChart("cmcTrendChart", "No trend data for selected periods."); return; }
+        const metricLabels = (mA.length >= mB.length ? mA : mB).map((s) => s.lbl);
+        const padMetric = (arr) => { const a = [...arr]; while (a.length < metricLabels.length) a.push(null); return a; };
+        setText("cmc-trend-title", `${selectedKpi.label} Trend: ${scopeStr2} ${periods.labelA} vs ${periods.labelB}`);
+        chartRefs.cmcTrendChart = new Chart(canvas.getContext("2d"), {
+            type: "line",
+            data: {
+                labels: metricLabels,
+                datasets: [
+                    {
+                        label: `${periods.labelA} ${selectedKpi.label}`,
+                        data: padMetric(mA.map((s) => cmcMetricChartValue(selectedKpi, s.value))),
+                        borderColor: "#3b82f6",
+                        fill: false,
+                        tension: 0.2,
+                        pointRadius: 2,
+                        spanGaps: true,
+                    },
+                    {
+                        label: `${periods.labelB} ${selectedKpi.label}`,
+                        data: padMetric(mB.map((s) => cmcMetricChartValue(selectedKpi, s.value))),
+                        borderColor: "#10b981",
+                        fill: false,
+                        tension: 0.2,
+                        pointRadius: 2,
+                        borderDash: [5, 3],
+                        spanGaps: true,
+                    },
+                ],
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                interaction: { mode: "index", intersect: false },
+                plugins: {
+                    legend: { position: "bottom", labels: { usePointStyle: true, boxWidth: 10 } },
+                    tooltip: {
+                        callbacks: {
+                            label: (ctx) => {
+                                const series = ctx.datasetIndex === 0 ? mA : mB;
+                                const raw = series[ctx.dataIndex]?.value;
+                                return `${ctx.dataset.label}: ${fmtCmcVal(raw, selectedKpi.fmt)}`;
+                            },
+                        },
+                    },
+                },
+                scales: {
+                    x: { grid: { display: false }, ticks: { color: "#64748b", maxRotation: 45 } },
+                    y: {
+                        beginAtZero: selectedKpi.fmt !== "diff",
+                        grid: { color: "rgba(148, 163, 184, 0.18)" },
+                        ticks: { color: "#64748b", callback: (value) => cmcMetricAxisTick(selectedKpi, value) },
+                        title: { display: true, text: cmcMetricAxisLabel(selectedKpi) },
+                    },
+                },
+            },
+        });
+        return;
+    }
+
     const sA = buildCmcSeries(items, periods.a.start, periods.a.end, gran, isCustomMode);
     const sB = buildCmcSeries(items, periods.b.start, periods.b.end, gran, isCustomMode);
     if (!sA.length && !sB.length) { renderEmptyChart("cmcTrendChart", "No trend data for selected periods."); return; }
     const labels = (sA.length >= sB.length ? sA : sB).map((s) => s.lbl);
     const pad = (arr) => { const a = [...arr]; while (a.length < labels.length) a.push(null); return a; };
-    const scopeStr2 = cmcScope === "all" ? "All Assets" : cmcScope;
     setText(
         "cmc-trend-title",
         isCustomMode
@@ -5373,6 +6034,8 @@ function classifyWorkOrderSlaRow(row, index, referenceDate) {
         delayHours,
         validForSla,
         slaStatus,
+        hasInvalidDates: issues.length > 0,
+        isOpenWorkOrder: actualEndState.state === "open",
         repairHours: Number.isFinite(startToEndHours) && startToEndHours >= 0 ? startToEndHours : null,
     };
 }
@@ -5380,31 +6043,50 @@ function classifyWorkOrderSlaRow(row, index, referenceDate) {
 function buildWorkOrderSlaModel(rows = [], referenceDate = getWorkOrderSlaReferenceDate()) {
     warnWorkOrderSlaFieldAvailability(rows);
     const entries = rows.map((row, index) => classifyWorkOrderSlaRow(row, index, referenceDate));
-    const severityRows = [...WORK_ORDER_SLA_TARGETS, WORK_ORDER_SLA_UNCLASSIFIED].map((severity) => {
-        const severityEntries = entries.filter((entry) => entry.severity.key === severity.key);
-        const metTarget = severityEntries.filter((entry) => entry.slaStatus === "Met Target").length;
-        const late = severityEntries.filter((entry) => entry.slaStatus === "Late").length;
-        const openOverdue = severityEntries.filter((entry) => entry.slaStatus === "Open Overdue").length;
-        const missingData = severityEntries.filter((entry) => isWorkOrderSlaMissingStatus(entry.slaStatus)).length;
-        const validCount = metTarget + late + openOverdue;
-        const responseValues = severityEntries.map((entry) => entry.responseHours).filter((value) => Number.isFinite(value));
-        const completionValues = severityEntries.map((entry) => entry.completionHours).filter((value) => Number.isFinite(value));
-        const responseAverage = responseValues.length ? responseValues.reduce((sum, value) => sum + value, 0) / responseValues.length : null;
-        const completionAverage = completionValues.length ? completionValues.reduce((sum, value) => sum + value, 0) / completionValues.length : null;
-        return {
+    // Bucket once instead of re-filtering the whole entry list per severity per
+    // metric — this runs on every SLA re-render over the all-year work orders.
+    const severityBuckets = new Map();
+    [...WORK_ORDER_SLA_TARGETS, WORK_ORDER_SLA_UNCLASSIFIED].forEach((severity) => {
+        severityBuckets.set(severity.key, {
             severity,
-            entries: severityEntries,
-            total: severityEntries.length,
-            metTarget,
-            late,
-            openOverdue,
-            missingData,
+            entries: [],
+            metTarget: 0,
+            late: 0,
+            openOverdue: 0,
+            missingData: 0,
+            responseSum: 0,
+            responseCount: 0,
+            completionSum: 0,
+            completionCount: 0,
+        });
+    });
+    entries.forEach((entry) => {
+        const bucket = severityBuckets.get(entry.severity.key) || severityBuckets.get(WORK_ORDER_SLA_UNCLASSIFIED.key);
+        if (!bucket) return;
+        bucket.entries.push(entry);
+        if (entry.slaStatus === "Met Target") bucket.metTarget += 1;
+        else if (entry.slaStatus === "Late") bucket.late += 1;
+        else if (entry.slaStatus === "Open Overdue") bucket.openOverdue += 1;
+        if (isWorkOrderSlaMissingStatus(entry.slaStatus)) bucket.missingData += 1;
+        if (Number.isFinite(entry.responseHours)) { bucket.responseSum += entry.responseHours; bucket.responseCount += 1; }
+        if (Number.isFinite(entry.completionHours)) { bucket.completionSum += entry.completionHours; bucket.completionCount += 1; }
+    });
+    const severityRows = [...severityBuckets.values()].map((bucket) => {
+        const validCount = bucket.metTarget + bucket.late + bucket.openOverdue;
+        return {
+            severity: bucket.severity,
+            entries: bucket.entries,
+            total: bucket.entries.length,
+            metTarget: bucket.metTarget,
+            late: bucket.late,
+            openOverdue: bucket.openOverdue,
+            missingData: bucket.missingData,
             validCount,
-            slaPct: validCount ? (metTarget / validCount) * 100 : null,
-            responseAverage,
-            responseCount: responseValues.length,
-            completionAverage,
-            completionCount: completionValues.length,
+            slaPct: validCount ? (bucket.metTarget / validCount) * 100 : null,
+            responseAverage: bucket.responseCount ? bucket.responseSum / bucket.responseCount : null,
+            responseCount: bucket.responseCount,
+            completionAverage: bucket.completionCount ? bucket.completionSum / bucket.completionCount : null,
+            completionCount: bucket.completionCount,
         };
     });
 
@@ -5482,16 +6164,25 @@ function renderWorkOrderSlaSummaryTable(model) {
         .map((row) => {
             const completeness = row.total ? (row.validCount / row.total) * 100 : null;
             const completenessTone = completeness === null ? "" : (completeness >= 90 ? "good" : (completeness >= 70 ? "" : "bad"));
+            const sevKey = row.severity.key;
+            const isSelectedRow = woSlaDrilldownSeverity === sevKey;
+            // Every count is a drill-down entry point: clicking one lists exactly
+            // those work orders in the Late / Overdue drill-down below.
+            const countCell = (status, count, tone) => {
+                const selected = isSelectedRow && woSlaDrilldownStatus === status;
+                if (!count) return `<span class="wo-response-metric ${escapeHtml(tone)}">0</span>`;
+                return `<button type="button" class="sla-count-link${selected ? " selected" : ""}" data-sla-severity="${escapeHtml(sevKey)}" data-sla-status="${escapeHtml(status)}" title="List the ${escapeHtml(fmtNumber(count))} ${escapeHtml(row.severity.label)} ${escapeHtml(SLA_DRILLDOWN_STATUS_LABELS[status] || status)} work orders below"><span class="wo-response-metric ${escapeHtml(tone)}">${escapeHtml(fmtNumber(count))}</span></button>`;
+            };
             const missingCell = row.missingData > 0
-                ? `<button type="button" class="sla-missing-link" data-missing-severity="${escapeHtml(row.severity.key)}" title="Show the ${escapeHtml(fmtNumber(row.missingData))} ${escapeHtml(row.severity.label)} missing-data records">${escapeHtml(fmtNumber(row.missingData))}</button>`
+                ? `<button type="button" class="sla-missing-link${isSelectedRow && woSlaDrilldownStatus === "missing" ? " selected" : ""}" data-missing-severity="${escapeHtml(sevKey)}" title="List the ${escapeHtml(fmtNumber(row.missingData))} ${escapeHtml(row.severity.label)} missing-data records below and open the cleansing review">${escapeHtml(fmtNumber(row.missingData))}</button>`
                 : `<span class="wo-response-metric missing">0</span>`;
             return `
-            <tr>
+            <tr class="sla-severity-row${isSelectedRow ? " selected" : ""}" data-sla-severity="${escapeHtml(sevKey)}" tabindex="0" title="Click to list all ${escapeHtml(row.severity.label)} work orders in the drill-down below">
                 <td>${renderWorkOrderSlaSeverityLabel(row.severity)}</td>
-                <td>${escapeHtml(fmtNumber(row.total))}</td>
-                <td><span class="wo-response-metric good">${escapeHtml(fmtNumber(row.metTarget))}</span></td>
-                <td><span class="wo-response-metric bad">${escapeHtml(fmtNumber(row.late))}</span></td>
-                <td><span class="wo-response-metric bad">${escapeHtml(fmtNumber(row.openOverdue))}</span></td>
+                <td>${countCell("all", row.total, "")}</td>
+                <td>${countCell("met", row.metTarget, "good")}</td>
+                <td>${countCell("late", row.late, "bad")}</td>
+                <td>${countCell("open_overdue", row.openOverdue, "bad")}</td>
                 <td>${missingCell}</td>
                 <td><span class="wo-response-metric ${escapeHtml(completenessTone)}">${escapeHtml(completeness === null ? "N/A" : fmtPercent(completeness))}</span></td>
                 <td>${escapeHtml(row.slaPct === null ? "N/A" : fmtPercent(row.slaPct))}</td>
@@ -5529,23 +6220,98 @@ function renderWorkOrderSlaAverageTable(bodyId, rows, type) {
     }).join("");
 }
 
+// Resolves the rows the drill-down shows for the current severity / status
+// selection. With no selection it keeps its original meaning (exceptions only:
+// late, open overdue and missing data). A selection made in the SLA Compliance
+// table can also pull in Met Target / all rows so every count in that table has
+// a matching list below it.
+function getWorkOrderSlaDrilldownRows(model) {
+    const sortRows = (entries) => [...entries].sort((a, b) => {
+        const statusDiff = getWorkOrderSlaStatusPriority(a.slaStatus) - getWorkOrderSlaStatusPriority(b.slaStatus);
+        if (statusDiff !== 0) return statusDiff;
+        const delayDiff = Number(b.delayHours || 0) - Number(a.delayHours || 0);
+        if (delayDiff !== 0) return delayDiff;
+        return (b.created.date?.getTime() || 0) - (a.created.date?.getTime() || 0);
+    });
+    const specialRecordFilter = woSlaDrilldownRecordFilter !== "all";
+    const applyRecordFilter = (entries) => {
+        if (woSlaDrilldownRecordFilter === "invalid_dates") return entries.filter((entry) => entry.hasInvalidDates);
+        if (woSlaDrilldownRecordFilter === "open_wo") return entries.filter((entry) => entry.isOpenWorkOrder);
+        return entries;
+    };
+    let rows;
+    if (!woSlaDrilldownSeverity) {
+        rows = specialRecordFilter ? sortRows(applyRecordFilter(model.entries)) : model.drilldownRows;
+    } else {
+        const severityEntries = model.entries.filter((entry) => entry.severity.key === woSlaDrilldownSeverity);
+        const sorted = sortRows(specialRecordFilter ? applyRecordFilter(severityEntries) : severityEntries);
+        switch (woSlaDrilldownStatus) {
+            case "met":
+                rows = sorted.filter((entry) => entry.slaStatus === "Met Target");
+                break;
+            case "late":
+                rows = sorted.filter((entry) => entry.slaStatus === "Late");
+                break;
+            case "open_overdue":
+                rows = sorted.filter((entry) => entry.slaStatus === "Open Overdue");
+                break;
+            case "missing":
+                rows = sorted.filter((entry) => SLA_MISSING_DATA_STATUSES.has(entry.slaStatus));
+                break;
+            case "all":
+                rows = sorted;
+                break;
+            default:
+                // A special record filter should search all rows in the selected
+                // severity, including open WOs that have not breached SLA yet.
+                rows = specialRecordFilter ? sorted : sorted.filter((entry) => entry.slaStatus !== "Met Target");
+        }
+    }
+    return rows;
+}
+
+function renderWorkOrderSlaDrilldownFilterUi(model, shownCount) {
+    const row = document.getElementById("wo-sla-drilldown-filter-row");
+    const chip = document.getElementById("wo-sla-drilldown-chip");
+    const title = document.getElementById("wo-sla-drilldown-title");
+    const subtitle = document.getElementById("wo-sla-drilldown-subtitle");
+    const active = Boolean(woSlaDrilldownSeverity);
+    const recordLabel = woSlaDrilldownRecordFilter === "invalid_dates"
+        ? "invalid date records"
+        : woSlaDrilldownRecordFilter === "open_wo"
+            ? "open work orders"
+            : "";
+    if (row) row.classList.toggle("hidden", !active);
+    if (!active) {
+        if (title) title.textContent = recordLabel ? `${recordLabel === "open work orders" ? "Open WO" : "Invalid Date"} Drill-down` : "Late / Overdue Drill-down";
+        if (subtitle) subtitle.textContent = recordLabel
+            ? `Showing ${fmtNumber(shownCount)} ${recordLabel} across all SLA statuses. Click a severity row or count above to narrow this list.`
+            : "Late, open overdue, and missing-data work orders only. Click a severity row or count above to narrow this list.";
+        return;
+    }
+    const severityRow = model.severityRows.find((entry) => entry.severity.key === woSlaDrilldownSeverity);
+    const severityLabel = severityRow ? severityRow.severity.label : woSlaDrilldownSeverity;
+    const statusLabel = SLA_DRILLDOWN_STATUS_LABELS[woSlaDrilldownStatus] || "Exceptions (Late / Overdue / Missing Data)";
+    if (chip) chip.textContent = `${severityLabel} — ${statusLabel}`;
+    if (title) title.textContent = `${severityLabel} Drill-down`;
+    if (subtitle) subtitle.textContent = `Showing ${fmtNumber(shownCount)} ${severityLabel} work order${shownCount === 1 ? "" : "s"} (${statusLabel.toLowerCase()})${recordLabel ? ` filtered to ${recordLabel}` : ""} from the SLA Compliance table above.`;
+}
+
 function renderWorkOrderSlaDrilldownTable(model) {
     const body = document.getElementById("wo-sla-drilldown-body");
     const countNode = document.getElementById("wo-sla-drilldown-count");
-    if (countNode) countNode.textContent = `${fmtNumber(model.drilldownRows.length)} row${model.drilldownRows.length === 1 ? "" : "s"}`;
+    const drilldownRows = getWorkOrderSlaDrilldownRows(model);
+    if (countNode) countNode.textContent = `${fmtNumber(drilldownRows.length)} row${drilldownRows.length === 1 ? "" : "s"}`;
+    renderWorkOrderSlaDrilldownFilterUi(model, drilldownRows.length);
     if (!body) return;
-    if (!model.drilldownRows.length) {
-        body.innerHTML = `<tr><td colspan="10" class="empty-cell">No late, overdue, or missing-data work orders in the current SLA scope.</td></tr>`;
+    if (!drilldownRows.length) {
+        body.innerHTML = woSlaDrilldownSeverity
+            ? `<tr><td colspan="7" class="empty-cell">No work orders match this selection in the current SLA scope.</td></tr>`
+            : `<tr><td colspan="7" class="empty-cell">No work orders match this drill-down view in the current SLA scope.</td></tr>`;
         return;
     }
-    body.innerHTML = model.drilldownRows.map((entry) => {
+    body.innerHTML = drilldownRows.slice(0, WO_SLA_DRILLDOWN_RENDER_LIMIT).map((entry) => {
         const severityDetail = entry.severityRaw || entry.severity.label;
-        const targetHtml = entry.targetLines.length
-            ? `<div class="cell-title">${escapeHtml(entry.targetLines[0])}</div>${entry.targetLines[1] ? `<div class="cell-sub">${escapeHtml(entry.targetLines[1])}</div>` : ""}`
-            : `<div class="cell-title">No SLA target</div>`;
-        const actualHtml = entry.actualLines.length
-            ? `<div class="cell-title">${escapeHtml(entry.actualLines[0])}</div>${entry.actualLines[1] ? `<div class="cell-sub">${escapeHtml(entry.actualLines[1])}</div>` : ""}`
-            : `<div class="cell-title">--</div>`;
         const delayHtml = entry.delayLines.length
             ? `<div class="cell-title">${escapeHtml(entry.delayLines[0])}</div>${entry.delayLines[1] ? `<div class="cell-sub">${escapeHtml(entry.delayLines[1])}</div>` : ""}`
             : `<div class="cell-title">--</div>`;
@@ -5563,16 +6329,45 @@ function renderWorkOrderSlaDrilldownTable(model) {
                     <div class="cell-title">${escapeHtml(entry.severity.label)}</div>
                     <div class="cell-sub">${escapeHtml(severityDetail || "--")}</div>
                 </td>
-                <td>${escapeHtml(fmtDateTime(entry.created.date || entry.created.raw))}</td>
                 <td>${escapeHtml(fmtDateTime(entry.actualStart.date || entry.actualStart.raw))}</td>
                 <td>${escapeHtml(fmtDateTime(entry.actualEnd.date || entry.actualEnd.raw))}</td>
-                <td>${targetHtml}</td>
-                <td>${actualHtml}</td>
                 <td>${delayHtml}</td>
                 <td><span class="wo-response-status ${escapeHtml(getSlaStatusTone(entry.slaStatus))}">${escapeHtml(entry.slaStatus)}</span></td>
             </tr>
         `;
-    }).join("");
+    }).join("") + (drilldownRows.length > WO_SLA_DRILLDOWN_RENDER_LIMIT
+        ? `<tr><td colspan="7" class="empty-cell">${fmtNumber(drilldownRows.length - WO_SLA_DRILLDOWN_RENDER_LIMIT)} more work order${drilldownRows.length - WO_SLA_DRILLDOWN_RENDER_LIMIT === 1 ? "" : "s"} hidden for performance. Narrow the year, month, severity, or record view to see them.</td></tr>`
+        : "");
+}
+
+// Applies (or toggles off) a severity/status selection made in the SLA Compliance
+// table. Only the two affected tables re-render — the rest of the SLA section is
+// unchanged by a selection, so a full section re-render would just cost frames.
+function setWorkOrderSlaDrilldownSelection(severityKey, statusKey) {
+    const nextSeverity = String(severityKey || "");
+    const nextStatus = String(statusKey || "");
+    const isSame = nextSeverity === woSlaDrilldownSeverity && nextStatus === woSlaDrilldownStatus;
+    woSlaDrilldownSeverity = isSame ? "" : nextSeverity;
+    woSlaDrilldownStatus = isSame ? "" : nextStatus;
+    if (!lastWorkOrderSlaModel) return;
+    renderWorkOrderSlaSummaryTable(lastWorkOrderSlaModel);
+    renderWorkOrderSlaDrilldownTable(lastWorkOrderSlaModel);
+    const details = document.getElementById("wo-sla-drilldown");
+    if (details && woSlaDrilldownSeverity) {
+        details.open = true;
+        // The drill-down lives inside the collapsible "View Analysis" area — open
+        // it too, otherwise the click appears to do nothing.
+        const panel = details.closest("[data-topic-panel]");
+        const toggle = panel?.querySelector("[data-analysis-toggle]");
+        if (panel && toggle && !panel.classList.contains("analysis-open")) {
+            panel.classList.add("analysis-open");
+            toggle.setAttribute("aria-expanded", "true");
+            toggle.textContent = "Hide Analysis";
+            resizeVisibleCharts();
+        }
+        details.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+    scheduleEmbeddedHeightPost();
 }
 
 // ── Data-cleansing review layer (localStorage; never touches raw source) ──────
@@ -6334,7 +7129,6 @@ function renderWorkOrderResponseSection(rows = []) {
     // analysis chart its own financial-year selector, so feed it the full all-year
     // source rows (NOT the SLA-scoped rows) — otherwise the SLA year filter hides
     // every financial year except the SLA-selected one (past-year data vanished).
-    renderPreventiveCorrectiveSection(sourceRows);
     syncTopicMirrors();
 }
 
@@ -7426,19 +8220,17 @@ function compareMachineHistoryRows(a, b) {
     return compareLatestMrDateDesc(a, b);
 }
 
-function renderMatchCell(row) {
+// Match source/confidence is no longer shown as its own column (the summary line
+// above the table already reports direct / related / coding-mismatch counts), but
+// the smart-match metadata stays on the row and is surfaced as a row tooltip.
+function getMachineHistoryMatchTitle(row) {
     const sm = row.smartMatch;
-    if (!sm) return `<td class="match-cell"><span class="match-na">--</span></td>`;
-    const conf = String(sm.confidence || "").toLowerCase();
-    const mismatch = sm.possibleAssetCodingMismatch
-        ? `<span class="match-flag" title="The record's own Asset ID differs from the matched asset — possible asset coding mismatch.">Possible asset coding mismatch</span>`
-        : "";
-    return `
-        <td class="match-cell">
-            <span class="match-source">${escapeHtml(sm.matchSource || "")}</span>
-            <span class="match-conf match-conf-${escapeHtml(conf)}">${escapeHtml(sm.confidence || "")}</span>
-            ${mismatch}
-        </td>`;
+    if (!sm) return "";
+    const parts = [];
+    if (sm.matchSource) parts.push(`Match: ${sm.matchSource}`);
+    if (sm.confidence) parts.push(`Confidence: ${sm.confidence}`);
+    if (sm.possibleAssetCodingMismatch) parts.push("Possible asset coding mismatch — the record's own Asset ID differs from the matched asset.");
+    return parts.join(" | ");
 }
 
 function renderMachineHistoryRow(row, index) {
@@ -7447,11 +8239,11 @@ function renderMachineHistoryRow(row, index) {
     const actualEnd = parseDateValue(row.actual_end_time || row.maintenance_end_time);
     const qualityFlag = getDataQualityFlag(row);
     const description = getMrDescription(row);
+    const matchTitle = getMachineHistoryMatchTitle(row);
     return `
-        <tr>
+        <tr${matchTitle ? ` class="mh-matched-row" title="${escapeHtml(matchTitle)}"` : ""}>
             <td>${escapeHtml(getMrRequestId(row, index) || "--")}</td>
             <td>${escapeHtml(getMrWorkOrderOnlyId(row) || "--")}</td>
-            ${renderMatchCell(row)}
             <td>${renderBadgeCell("status", getMrStatus(row))}</td>
             <td>${renderBadgeCell("service", getMrServiceLevel(row))}</td>
             <td>${renderBadgeCell("wo-type", row.job_trade || row.maintenance_job_type || "")}</td>
@@ -7466,6 +8258,14 @@ function renderMachineHistoryRow(row, index) {
             <td>${renderBadgeCell("quality", qualityFlag)}</td>
         </tr>
     `;
+}
+
+// Severity / Service Level filter for the Step 3 WO/MR history table. Uses the
+// same S1-S4 resolution as the SLA section (priority -> service_level -> severity)
+// so the codes shown here line up with Work Order Response by Severity.
+function _applyHistorySeverityFilter(rows) {
+    if (!machineHistorySeverity) return rows;
+    return rows.filter((row) => getWorkOrderSlaSeverity(row).key === machineHistorySeverity);
 }
 
 function _applyHistorySearch(rows) {
@@ -7508,10 +8308,10 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
     });
 
     if (viewAll) {
-        const filtered = _applyHistorySearch(filterMachineHistoryPeriodRows(filterMachineExplorerRows(rows, {
+        const filtered = _applyHistorySearch(_applyHistorySeverityFilter(filterMachineHistoryPeriodRows(filterMachineExplorerRows(rows, {
             includeAssetFilter: false,
             includePeriodFilter: false,
-        })).sort(compareMachineHistoryRows));
+        })))).sort(compareMachineHistoryRows);
         renderMachineExplorerKpis(filtered);
         const groupLabel = machineExplorerSelectedGroup && machineExplorerSelectedGroup !== MACHINE_EXPLORER_ALL_GROUP
             ? machineExplorerSelectedGroup
@@ -7522,14 +8322,14 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         setText("machine-explorer-helper", `All Assets view includes every WO/MR that matches the current Machine Explorer filters in ${groupLabel}, plus any history filters applied below.`);
         if (!filtered.length) {
             setHistoryEmpty(true);
-            body.innerHTML = `<tr><td colspan="15" class="empty-cell">No WO/MR records match the current filters.</td></tr>`;
+            body.innerHTML = `<tr><td colspan="14" class="empty-cell">No WO/MR records match the current filters.</td></tr>`;
             return;
         }
         setHistoryEmpty(false);
         const shownHistoryRows = filtered.slice(0, MACHINE_HISTORY_RENDER_LIMIT);
         const hiddenCount = Math.max(0, filtered.length - shownHistoryRows.length);
         body.innerHTML = shownHistoryRows.map((row, index) => renderMachineHistoryRow(row, index)).join("") + (hiddenCount
-            ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
+            ? `<tr><td colspan="14" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
             : "");
         return;
     }
@@ -7543,14 +8343,14 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
         setText("machine-explorer-meta", "Select a machine/asset from Step 2. The table stays empty until an asset is selected.");
         setText("machine-explorer-helper", "Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location.");
         setHistoryEmpty(true);
-        body.innerHTML = `<tr><td colspan="15" class="empty-cell">Select an asset above to view WO/MR history.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="14" class="empty-cell">Select an asset above to view WO/MR history.</td></tr>`;
         return;
     }
 
     // Smart matching: direct Asset ID records + related records detected from
     // name / description / translated description / functional location.
     const matched = getSelectedAssetMatchedRows(rows, selectedAsset.assetId);
-    const filtered = _applyHistorySearch(filterMachineHistoryPeriodRows(matched).sort(compareMachineHistoryRows));
+    const filtered = _applyHistorySearch(_applyHistorySeverityFilter(filterMachineHistoryPeriodRows(matched))).sort(compareMachineHistoryRows);
     renderMachineExplorerKpis(filtered);
     setHistoryEmpty(!filtered.length);
     const refrigType = getRefrigAssetType(selectedAsset.assetId);
@@ -7578,13 +8378,13 @@ function renderMachineExplorerHistory(rows = [], assetRows = []) {
             : 'Selected Asset view includes direct Asset ID records and related records detected from asset name, description, translated description, and functional location. Toggle "Include possible related matches" to also show low-confidence matches.'
     );
     if (!filtered.length) {
-        body.innerHTML = `<tr><td colspan="15" class="empty-cell">No WO/MR records match this asset and the current filters.</td></tr>`;
+        body.innerHTML = `<tr><td colspan="14" class="empty-cell">No WO/MR records match this asset and the current filters.</td></tr>`;
         return;
     }
     const shownHistoryRows = filtered.slice(0, MACHINE_HISTORY_RENDER_LIMIT);
     const hiddenCount = Math.max(0, filtered.length - shownHistoryRows.length);
     body.innerHTML = shownHistoryRows.map((row, index) => renderMachineHistoryRow(row, index)).join("") + (hiddenCount
-        ? `<tr><td colspan="15" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
+        ? `<tr><td colspan="14" class="empty-cell">${fmtNumber(hiddenCount)} more WO/MR record${hiddenCount === 1 ? "" : "s"} hidden for performance. Use year, month, date range, or search filters to narrow the list.</td></tr>`
         : "");
 }
 
@@ -7614,9 +8414,9 @@ function exportMachineExplorerData() {
     // Resolve history rows (same as what's displayed in section 3)
     let historyRows;
     if (machineHistoryViewMode === "all") {
-        historyRows = _applyHistorySearch(filterMachineHistoryPeriodRows(
+        historyRows = _applyHistorySearch(_applyHistorySeverityFilter(filterMachineHistoryPeriodRows(
             filterMachineExplorerRows(rows, { includeAssetFilter: false })
-        ).sort(compareMachineHistoryRows));
+        ))).sort(compareMachineHistoryRows);
     } else {
         const baseRows = filterMachineExplorerRows(rows, { includeAssetFilter: false });
         const assetSummary = buildMachineExplorerAssetRows(baseRows);
@@ -7625,9 +8425,9 @@ function exportMachineExplorerData() {
             alert("Please select an asset first, or switch to \"All Assets\" view before exporting.");
             return;
         }
-        historyRows = _applyHistorySearch(filterMachineHistoryPeriodRows(
+        historyRows = _applyHistorySearch(_applyHistorySeverityFilter(filterMachineHistoryPeriodRows(
             filterMachineExplorerRows(rows, { selectedAssetId: selectedAsset.assetId })
-        ).sort(compareMachineHistoryRows));
+        ))).sort(compareMachineHistoryRows);
     }
     if (!historyRows.length) {
         alert("No WO/MR records to export for the current selection and filters.");
@@ -7911,77 +8711,127 @@ function renderMachineExplorer(rows = []) {
     renderMachineExplorerHistory(periodRows, allAssetRows);
 }
 
+// Hidden topic panels used to be fully rebuilt after every period/category
+// change. On all-year data that meant charts, large tables and duplicate scans
+// were created even though the user could only see one topic. Keep the overview
+// current, and render each topic only when it is selected.
+function renderSelectedDashboardTopic(rows = getCategoryScopedAllRows()) {
+    if (!Array.isArray(rows)) rows = [];
+    switch (selectedDashboardTopic) {
+        case "yearly-movement":
+            renderMrMovementSection(rows);
+            renderCriticalMrComparison(rows);
+            break;
+        case "sla-response":
+            renderWorkOrderResponseSection(rows);
+            break;
+        case "preventive-corrective":
+            renderPreventiveCorrectiveSection(rows);
+            break;
+        case "data-reliability":
+            downtimeOverviewRowsCache = rows;
+            populateTopicYearOptions(rows);
+            applyTopicReliabilityDefaultScope(rows);
+            renderTopicDataReliabilityPanel();
+            renderMachineExplorer(rows);
+            renderDuplicateWoSection(rows);
+            break;
+        case "mr-tracking":
+        default:
+            renderMrTrackingSection(rows);
+            renderMachineMrSection(rows);
+            break;
+    }
+    syncTopicMirrors();
+    resizeVisibleCharts();
+    scheduleEmbeddedHeightPost();
+}
+
+function scheduleSelectedDashboardTopicRender(rows = null, delay = 0) {
+    cancelLowPriorityWork(deferredTopicRenderHandle);
+    const token = ++selectedTopicRenderToken;
+    deferredTopicRenderHandle = scheduleLowPriorityWork(() => {
+        deferredTopicRenderHandle = null;
+        if (token !== selectedTopicRenderToken) return;
+        const sourceRows = Array.isArray(rows) && rows.length ? rows : getCategoryScopedAllRows();
+        if (!sourceRows.length && !downtimePayload) return;
+        renderSelectedDashboardTopic(sourceRows);
+    }, delay);
+}
+
 function renderDynamicsWorkOrderSections(rows = []) {
     renderDowntimeOverviewFromRows(rows);
-    renderCriticalMrComparison(rows);
-    renderMachineMrSection(rows);
-    renderMachineExplorer(rows);
-    populateFilters(getManagement());
-    renderMachineGroupTable();
+    scheduleSelectedDashboardTopicRender(rows, 200);
 }
 
 function scheduleAllYearWorkOrderRefresh(rows = []) {
+    const scopedRows = applyCategoryFilter(rows);
     const token = ++allYearWorkOrderRenderToken;
     cancelLowPriorityWork(deferredAllYearWorkOrderHandle);
     cancelLowPriorityWork(deferredAllYearDynamicsHandle);
     deferredAllYearWorkOrderHandle = scheduleLowPriorityWork(() => {
         deferredAllYearWorkOrderHandle = null;
         if (token !== allYearWorkOrderRenderToken) return;
-        renderWorkOrderResponseSection(rows);
+        renderDowntimeOverviewFromRows(scopedRows);
         deferredAllYearDynamicsHandle = scheduleLowPriorityWork(() => {
             deferredAllYearDynamicsHandle = null;
             if (token !== allYearWorkOrderRenderToken) return;
-            renderDynamicsWorkOrderSections(rows);
-            renderDuplicateWoSection(rows);
-        }, 1200);
-    }, 900);
+            renderSelectedDashboardTopic(scopedRows);
+            scheduleLowPriorityWork(() => {
+                if (token !== allYearWorkOrderRenderToken) return;
+                populateMtbfPeriodFilters();
+                updateKdiSection();
+            }, 700);
+        }, 500);
+    }, 250);
 }
 
-function requestMrMovementLoad() {
-    const currentRows = getWorkOrderRows(getManagement());
-    const previewRows = allWorkOrderRowsCache || currentRows;
-    renderMrMovementSection(previewRows);
-    renderMrTrackingSection(previewRows);
+async function requestHistoricalDataLoad() {
+    if (historicalDataLoadState === "loading") return;
     if (allWorkOrderRowsCache) {
+        setHistoricalDataLoadUi("loaded", `${getHistoricalDataSpanLabel(allWorkOrderRowsCache)} loaded and cached.`);
         scheduleAllYearWorkOrderRefresh(allWorkOrderRowsCache);
         return;
     }
+
+    const generation = _stageFetchGeneration;
+    setHistoricalDataLoadUi("loading");
     renderDuplicateWoSection(null);
-    if (allWorkOrderRowsPromise) return;
-    loadAllWorkOrderRowsForMovement()
-        .then((rows) => {
-            syncMrMovementYearToPeriod(rows);
-            renderMrMovementSection(rows);
-            renderMrTrackingSection(rows);
-            scheduleAllYearWorkOrderRefresh(rows);
-        })
-        .catch((error) => {
-            console.error("MR movement load failed:", error);
-            const fallbackRows = getFallbackAllWorkOrderRows();
-            renderMrMovementSection(fallbackRows);
-            renderMrTrackingSection(fallbackRows);
-            scheduleAllYearWorkOrderRefresh(fallbackRows);
-            setMrMovementWarning(`MR movement is using loaded dashboard rows because all-year data could not be loaded: ${error.message}`);
-        });
+    try {
+        const rows = await loadAllWorkOrderRowsForMovement();
+        if (generation !== _stageFetchGeneration || !rows.length || allWorkOrderRowsCache !== rows) return;
+        const scopedRows = applyCategoryFilter(rows);
+        syncMrMovementYearToPeriod(scopedRows);
+        setHistoricalDataLoadUi("loaded", `${getHistoricalDataSpanLabel(rows)} loaded and cached. Only the visible section is rendered.`);
+        scheduleAllYearWorkOrderRefresh(rows);
+        requestMtbfHistoryLoad();
+    } catch (error) {
+        if (generation !== _stageFetchGeneration) return;
+        console.error("Historical work-order load failed:", error);
+        setHistoricalDataLoadUi("error", `Older data could not be loaded (${error.message}). Current-period values are unchanged; retry when ready.`);
+        setMrMovementWarning(`Historical comparison is using current-period rows because older data could not be loaded: ${error.message}`);
+    }
 }
 
 function scheduleMrMovementLoad() {
     cancelLowPriorityWork(deferredMrMovementHandle);
     const currentRows = getWorkOrderRows(getManagement());
-    if (downtimePayload?.meta?.period !== "all_years") {
-        renderMrMovementSection(currentRows);
-        renderMrTrackingSection(currentRows);
-        scheduleAllYearWorkOrderRefresh(currentRows);
+    const previewRows = applyCategoryFilter(allWorkOrderRowsCache || currentRows);
+
+    // First paint only the visible topic from whatever is already in memory.
+    // Hidden sections are populated lazily when opened.
+    scheduleSelectedDashboardTopicRender(previewRows, 100);
+
+    if (allWorkOrderRowsCache) {
+        setHistoricalDataLoadUi("loaded", `${getHistoricalDataSpanLabel(allWorkOrderRowsCache)} loaded and cached.`);
         return;
     }
-    const delay = downtimePayload?.meta?.period === "all_years" ? 900 : MR_MOVEMENT_BACKGROUND_LOAD_DELAY_MS;
-    deferredMrMovementHandle = { type: "timeout", id: window.setTimeout(() => {
-        deferredMrMovementHandle = null;
-        deferredMrMovementHandle = scheduleLowPriorityWork(() => {
-            deferredMrMovementHandle = null;
-            requestMrMovementLoad();
-        }, 1500);
-    }, delay) };
+
+    // Full history is deliberately opt-in. Until the user presses Load Older
+    // Data, comparison sections use the already-loaded current-period rows.
+    if (historicalDataLoadState !== "loading" && historicalDataLoadState !== "error") {
+        setHistoricalDataLoadUi("idle");
+    }
 }
 
 function parseTimeToMinutes(value) {
@@ -8487,6 +9337,10 @@ async function loadDowntimeData(period, month, start, end) {
     }
 
     downtimePayload = payload;
+    if (payload?.meta?.period === "all_years" && Array.isArray(payload?.management?.work_orders)) {
+        allWorkOrderRowsCache = payload.management.work_orders;
+        setHistoricalDataLoadUi("loaded", `${getHistoricalDataSpanLabel(allWorkOrderRowsCache)} loaded and cached.`);
+    }
     applySlaTargetConfig(downtimePayload);
     await renderDowntimePage();
     lastDowntimeRefreshAt = Date.now();
@@ -9479,6 +10333,7 @@ function buildAssetListLookup() {
                 asset_machine_group: String(asset.mappedMachineGroup || "").trim(),
                 criticality: machine.criticality,
                 location: machine.location,
+                mappedStage: String(asset.mappedStage || asset.stage || machine.mappedStage || machine.stage || "").trim(),
             };
             lookup.set(key, meta);
             lookup.set(key.toUpperCase(), meta);
@@ -10180,7 +11035,9 @@ async function renderDowntimePage() {
 
     await _yieldToMainThread();
     if (!stillCurrent()) return;
-    renderWorkOrderResponseSection(getWorkOrderRows(management));
+    if (selectedDashboardTopic === "sla-response") {
+        renderWorkOrderResponseSection(getWorkOrderRows(management));
+    }
 
     await _yieldToMainThread();
     if (!stillCurrent()) return;
@@ -10388,34 +11245,11 @@ function setPerformanceView(view) {
 }
 
 async function exportMaintenancePptFromDowntime() {
-    const button = document.getElementById("downtime-export-ppt-btn");
-    const selectedStage = getSelectedDowntimeStage();
-    const overviewStage = selectedStage === "Stage 1" ? "stage1" : selectedStage === "Stage 2" ? "stage2" : "all";
-    const stageLabel = overviewStage === "stage1" ? "Stage 1" : overviewStage === "stage2" ? "Stage 2" : "All Stages";
-    if (typeof window.exportMiraOverviewPPT !== "function") {
-        alert("The PowerPoint exporter is still loading. Please try again in a moment.");
+    if (window.DowntimeMonthlyPpt?.open) {
+        window.DowntimeMonthlyPpt.open();
         return;
     }
-    if (button) {
-        button.disabled = true;
-        button.textContent = `Generating ${stageLabel}…`;
-    }
-    try {
-        const reportYear = getOverviewYtdYear(downtimeOverviewRowsCache || []) || new Date().getFullYear();
-        await window.exportMiraOverviewPPT({ stage: overviewStage, year: reportYear, periodMode: "ytd" });
-        if (button) button.textContent = "PPT Downloaded";
-    } catch (error) {
-        console.error("Downtime PPT export failed:", error);
-        alert("PPT export error: " + (error?.message || "Unknown error."));
-        if (button) button.textContent = "Export PPT";
-    } finally {
-        if (button) {
-            window.setTimeout(() => {
-                button.disabled = false;
-                button.textContent = "Export PPT";
-            }, 1200);
-        }
-    }
+    alert("The monthly PowerPoint exporter is still loading. Please try again in a moment.");
 }
 
 function wireFilters() {
@@ -10567,9 +11401,35 @@ function wireFilters() {
         });
     }
     document.getElementById("wo-sla-severity-body")?.addEventListener("click", (e) => {
-        const btn = e.target.closest("[data-missing-severity]");
-        if (!btn) return;
-        openMissingDataDrilldownForSeverity(btn.dataset.missingSeverity);
+        const missingBtn = e.target.closest("[data-missing-severity]");
+        if (missingBtn) {
+            // Missing Data keeps opening the editable cleansing review, and now also
+            // lists the same records in the drill-down so both views agree.
+            setWorkOrderSlaDrilldownSelection(missingBtn.dataset.missingSeverity, "missing");
+            openMissingDataDrilldownForSeverity(missingBtn.dataset.missingSeverity);
+            return;
+        }
+        const countBtn = e.target.closest("[data-sla-status]");
+        if (countBtn) {
+            setWorkOrderSlaDrilldownSelection(countBtn.dataset.slaSeverity, countBtn.dataset.slaStatus);
+            return;
+        }
+        const severityRow = e.target.closest("[data-sla-severity]");
+        if (severityRow) setWorkOrderSlaDrilldownSelection(severityRow.dataset.slaSeverity, "");
+    });
+    document.getElementById("wo-sla-severity-body")?.addEventListener("keydown", (e) => {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        const severityRow = e.target.closest("tr[data-sla-severity]");
+        if (!severityRow) return;
+        e.preventDefault();
+        setWorkOrderSlaDrilldownSelection(severityRow.dataset.slaSeverity, "");
+    });
+    document.getElementById("wo-sla-drilldown-clear")?.addEventListener("click", () => {
+        setWorkOrderSlaDrilldownSelection("", "");
+    });
+    document.getElementById("wo-sla-record-filter")?.addEventListener("change", (event) => {
+        woSlaDrilldownRecordFilter = event.target.value || "all";
+        if (lastWorkOrderSlaModel) renderWorkOrderSlaDrilldownTable(lastWorkOrderSlaModel);
     });
     // Work Type Classification table
     document.getElementById("wt-classification-card")?.addEventListener("change", (e) => {
@@ -10601,11 +11461,18 @@ function wireFilters() {
     });
     document.getElementById("pm-cm-list-filter")?.addEventListener("change", (event) => {
         preventiveCorrectiveListFilter = event.target.value || "review";
-        renderWorkOrderResponseSection(applyCategoryFilter(allWorkOrderRowsCache || getWorkOrderRows(getManagement())));
+        renderPreventiveCorrectiveSection(getCategoryScopedAllRows());
     });
     document.getElementById("pm-cm-list-body")?.addEventListener("click", handlePreventiveCorrectiveReviewAction);
     // MR Comparison & Trend Analysis controls
-    const cmcRefresh = () => renderCriticalMrComparison(getCategoryScopedAllRows());
+    let cmcRefreshFrame = 0;
+    const cmcRefresh = () => {
+        if (cmcRefreshFrame) window.cancelAnimationFrame(cmcRefreshFrame);
+        cmcRefreshFrame = window.requestAnimationFrame(() => {
+            cmcRefreshFrame = 0;
+            renderCriticalMrComparison(getCategoryScopedAllRows());
+        });
+    };
     document.getElementById("cmc-scope")?.addEventListener("change", (e) => { cmcScope = e.target.value || "all"; cmcRefresh(); });
     document.getElementById("cmc-mode")?.addEventListener("change", (e) => { cmcMode = e.target.value || "month"; updateCmcControlVisibility(); cmcRefresh(); });
     document.getElementById("cmc-year-view")?.addEventListener("change", (e) => { cmcYearView = e.target.value || "compare"; updateCmcControlVisibility(); cmcRefresh(); });
@@ -10613,6 +11480,16 @@ function wireFilters() {
     document.getElementById("cmc-month-b")?.addEventListener("change", (e) => { cmcMonthB = e.target.value || ""; cmcRefresh(); });
     document.getElementById("cmc-year-a")?.addEventListener("change", (e) => { cmcYearA = e.target.value || ""; cmcRefresh(); });
     document.getElementById("cmc-year-b")?.addEventListener("change", (e) => { cmcYearB = e.target.value || ""; cmcRefresh(); });
+    document.getElementById("cmc-fy-a")?.addEventListener("change", (e) => { cmcFyA = e.target.value || ""; cmcRefresh(); });
+    document.getElementById("cmc-fy-b")?.addEventListener("change", (e) => { cmcFyB = e.target.value || ""; cmcRefresh(); });
+    // Clicking a KPI box plots that metric on both charts (click again to reset).
+    document.getElementById("cmc-kpi-grid")?.addEventListener("click", (e) => {
+        const card = e.target.closest("[data-cmc-metric]");
+        if (!card) return;
+        const metric = card.dataset.cmcMetric || "";
+        cmcSelectedMetric = cmcSelectedMetric === metric ? "" : metric;
+        cmcRefresh();
+    });
     [["cmc-custom-a-start", () => cmcCustomAStart], ["cmc-custom-a-end", () => cmcCustomAEnd], ["cmc-custom-b-start", () => cmcCustomBStart], ["cmc-custom-b-end", () => cmcCustomBEnd]].forEach(([id]) => {
         document.getElementById(id)?.addEventListener("change", (e) => {
             if (id === "cmc-custom-a-start") cmcCustomAStart = e.target.value;
@@ -10666,6 +11543,36 @@ function wireFilters() {
     document.getElementById("machine-history-search")?.addEventListener("input", (event) => {
         machineHistorySearch = event.target.value || "";
         renderMachineExplorer(getCategoryScopedAllRows());
+    });
+    document.getElementById("machine-history-severity")?.addEventListener("change", (event) => {
+        machineHistorySeverity = event.target.value || "";
+        renderMachineExplorer(getCategoryScopedAllRows());
+    });
+    document.getElementById("load-history-btn")?.addEventListener("click", () => {
+        requestHistoricalDataLoad();
+    });
+    // ── Downtime Overview period controls (KPI strip only) ──
+    const refreshOverviewScope = () => {
+        overviewScopeInitialised = true;
+        renderDowntimeOverviewFromRows(downtimeOverviewRowsCache || []);
+    };
+    document.getElementById("overview-view-filter")?.addEventListener("change", (event) => {
+        overviewViewMode = event.target.value === "month" ? "month" : "fy";
+        refreshOverviewScope();
+    });
+    document.getElementById("overview-fy-filter")?.addEventListener("change", (event) => {
+        overviewFinancialYear = event.target.value || "";
+        overviewMonthKey = "";
+        refreshOverviewScope();
+    });
+    document.getElementById("overview-month-filter")?.addEventListener("change", (event) => {
+        overviewMonthKey = event.target.value || "";
+        refreshOverviewScope();
+    });
+    document.getElementById("kdi-financial-year")?.addEventListener("change", (event) => {
+        kdiFinancialYear = event.target.value || "";
+        kdiFinancialYearInitialised = true;
+        updateKdiSection();
     });
     document.getElementById("include-related-matches")?.addEventListener("change", (event) => {
         includeRelatedMatches = !!event.target.checked;
@@ -11949,7 +12856,6 @@ async function _runOrganizedDowntimeExport(btn) {
         const rowMap = new Map();
         sourceRows.forEach((row, index) => rowMap.set(getExportWorkOrderKey(row, index), row));
         const rows = [...rowMap.values()];
-        allWorkOrderRowsCache = rows;
         if (!rows.length) throw new Error("No work order rows available to export.");
 
         const assetLookup = buildAssetListLookup();
@@ -12925,6 +13831,7 @@ function applyEquipmentLoadingDeepLink(context) {
 async function init() {
     wireDashboardTopicControls();
     wireFilters();
+    setHistoricalDataLoadUi(historicalDataLoadState);
     wireInactiveCriticalMachineDrawer();
     setSummaryView("criticality");
     setPerformanceView("utilities");
@@ -12939,6 +13846,10 @@ async function init() {
     const machineHistorySortEl = document.getElementById("machine-history-sort");
     if (machineHistorySortEl) {
         machineHistorySortEl.value = machineHistorySort;
+    }
+    const machineHistorySeverityEl = document.getElementById("machine-history-severity");
+    if (machineHistorySeverityEl) {
+        machineHistorySeverityEl.value = machineHistorySeverity;
     }
     const machineHistoryYearEl = document.getElementById("machine-history-year");
     if (machineHistoryYearEl) {
@@ -13667,7 +14578,7 @@ function refreshDuplicateWoCounts() {
 function refreshDataReviewViews() {
     try {
         if (typeof downtimeOverviewRowsCache !== "undefined" && Array.isArray(downtimeOverviewRowsCache) && downtimeOverviewRowsCache.length) {
-            renderDowntimeOverviewFromRows(downtimeOverviewRowsCache);
+            renderDowntimeOverviewFromRows(downtimeOverviewRowsCache, { renderTopicPanel: true });
         } else {
             renderTopicDataReliabilityPanel();
         }
@@ -13745,36 +14656,72 @@ let kdiCritCmpType = "both";      // both | s1 | s2
 let kdiCritCmpMetric = "average"; // average | median
 let kdiCritCmpCategory = "all";   // all | Production Equipment | Utilities
 
-// Auto-YTD: pick the latest year present in the loaded work orders. Falls back
-// to the current calendar year when no dated rows are available. This means the
-// indicator section automatically rolls over when imports for a new year begin.
-function kdiGetAutoYtdYear(rows) {
-    const today = new Date();
-    let maxYear = today.getFullYear();
+// The indicator section runs on the FINANCIAL year (Apr-Mar), not the calendar
+// year, so it lines up with the rest of the management reporting. "" = every
+// financial year (used by the "All Financial Years" option).
+let kdiFinancialYear = "";
+let kdiFinancialYearInitialised = false;
+
+// The date a work order is attributed to for KDI scoping. Same field precedence
+// the MTTR/MTBF computations use, so a row can never be counted in one financial
+// year and measured in another.
+function kdiWorkOrderDate(wo) {
+    return parseDateValue(
+        wo?.start_time || wo?.actual_start_time || wo?.actual_start
+        || wo?.request_created_time || wo?.created_date || wo?.maintenance_start_time
+    );
+}
+
+// Auto-scope: the financial year holding the latest work order in the data, so
+// the section rolls over on its own once a new financial year starts importing.
+function kdiGetAutoFinancialYear(rows) {
+    let latest = null;
     if (Array.isArray(rows)) {
         for (const wo of rows) {
-            const raw = wo?.start_time || wo?.actual_start_time || wo?.actual_start
-                || wo?.request_created_time || wo?.created_date || wo?.maintenance_start_time;
-            if (!raw) continue;
-            const yearStr = String(raw).slice(0, 4);
-            const year = Number(yearStr);
-            if (Number.isFinite(year) && year > maxYear) maxYear = year;
+            const date = kdiWorkOrderDate(wo);
+            if (date && (!latest || date > latest)) latest = date;
         }
     }
-    return String(maxYear);
+    return String(getMrFinancialYearStart(latest || new Date()));
 }
 
-function kdiGetSelectedYear() {
-    let allWos = (typeof getAllWorkOrdersForMtbf === "function") ? getAllWorkOrdersForMtbf() : [];
-    if (!allWos.length && typeof getWorkOrderRows === "function") {
-        allWos = getWorkOrderRows(typeof getManagement === "function" ? getManagement() : null);
+function kdiGetAvailableFinancialYears(rows) {
+    const years = new Set();
+    (rows || []).forEach((wo) => {
+        const date = kdiWorkOrderDate(wo);
+        if (date) years.add(getMrFinancialYearStart(date));
+    });
+    return [...years].sort((a, b) => b - a);
+}
+
+// Resolves the active financial year and keeps the header select in step.
+function kdiSyncFinancialYearSelect(rows) {
+    const available = kdiGetAvailableFinancialYears(rows);
+    if (!kdiFinancialYearInitialised) {
+        kdiFinancialYear = kdiGetAutoFinancialYear(rows);
+        kdiFinancialYearInitialised = true;
     }
-    return kdiGetAutoYtdYear(allWos);
+    if (kdiFinancialYear && available.length && !available.map(String).includes(String(kdiFinancialYear))) {
+        kdiFinancialYear = String(available[0]);
+    }
+    const select = document.getElementById("kdi-financial-year");
+    if (select) {
+        const optionYears = available.length ? available : [Number(kdiFinancialYear) || getMrFinancialYearStart(new Date())];
+        const optionsHtml = optionYears
+            .map((year) => `<option value="${escapeHtml(String(year))}">${escapeHtml(getMrFinancialYearLongLabel(year))}</option>`)
+            .join("") + `<option value="">All Financial Years</option>`;
+        if (select.dataset.optionsSignature !== optionsHtml) {
+            select.innerHTML = optionsHtml;
+            select.dataset.optionsSignature = optionsHtml;
+        }
+        select.value = kdiFinancialYear;
+    }
+    return kdiFinancialYear;
 }
 
-function kdiGetSelectedMonth() {
-    // Indicator section is YTD by design — no month scoping.
-    return "";
+function kdiFinancialYearPeriodLabel(fyStart) {
+    if (!fyStart) return "All financial years";
+    return `${getMrFinancialYearLabel(fyStart)} (financial year Apr-Mar)`;
 }
 
 function kdiNormalizeSearchTerm(value) {
@@ -13847,16 +14794,21 @@ function kdiPopulateMachineGroupSelect(selectId, entries = [], selectedValue = "
     return nextValue;
 }
 
-function kdiFilterWorkOrders(wos, year, month) {
-    if (!year && !month) return wos;
-    return wos.filter((wo) => {
-        const t = String(wo.start_time || wo.actual_start_time || wo.actual_start || "").trim();
-        if (!t) return false;
-        if (year && month) return t.startsWith(`${year}-${month}`);
-        if (year) return t.startsWith(year);
-        // month-only: match any year but specific month slice
-        return t.length >= 7 && t.slice(5, 7) === month;
+// Financial-year (Apr-Mar) scoping for the indicator cards. Memoised on the
+// source array + selected year because updateKdiSection() runs on every filter
+// change and this walks the whole all-year work-order set.
+let _kdiFyFilterCache = { rows: null, fy: null, result: null };
+let _kdiMetricsCache = { rows: null, fy: null, assets: null, value: null };
+function kdiFilterWorkOrdersByFinancialYear(wos, fyStart) {
+    if (!fyStart) return wos;
+    if (_kdiFyFilterCache.rows === wos && _kdiFyFilterCache.fy === fyStart) return _kdiFyFilterCache.result;
+    const { start, end } = getMrFinancialYearRange(fyStart);
+    const result = wos.filter((wo) => {
+        const date = kdiWorkOrderDate(wo);
+        return date && date >= start && date < end;
     });
+    _kdiFyFilterCache = { rows: wos, fy: fyStart, result };
+    return result;
 }
 
 function kdiNormalizeCriticality(raw) {
@@ -14433,11 +15385,8 @@ function kdiRenderMttrAssetDrilldown(assetMap, critFilter, groupOrMgFilter = "")
 
 // ── MTBF ─────────────────────────────────────────────────────────────────────
 
-function kdiComputeMtbfMetrics(wos, assetLookup, baselineData = null) {
+function kdiComputeMtbfMetrics(wos, assetLookup, intervalRange = null) {
     const byAsset = new Map();
-    const baselineByAsset = new Map((baselineData?.allAssets || [])
-        .map((entry) => [String(entry?.assetId || "").trim(), entry])
-        .filter(([assetId]) => assetId));
 
     wos.forEach((wo) => {
         if (wo?.mixer_related && wo?.alias_mtbf_include === false) return;
@@ -14466,10 +15415,13 @@ function kdiComputeMtbfMetrics(wos, assetLookup, baselineData = null) {
                 criticality: kdiGetAssetCriticality(wo, assetLookup),
                 wos: [],
                 lastFailureDate: null,
+                scopedWoCount: 0,
             });
         }
         const entry = byAsset.get(assetId);
-        if (start && (!entry.lastFailureDate || start > entry.lastFailureDate)) {
+        const inScope = !intervalRange || (start >= intervalRange.start && start < intervalRange.end);
+        if (inScope) entry.scopedWoCount += 1;
+        if (inScope && (!entry.lastFailureDate || start > entry.lastFailureDate)) {
             entry.lastFailureDate = start;
         }
         // Only store WO if we have both start and a valid actual end (strict end-to-start).
@@ -14484,9 +15436,11 @@ function kdiComputeMtbfMetrics(wos, assetLookup, baselineData = null) {
     const allAssets = [];
 
     byAsset.forEach((entry) => {
+        if (!entry.scopedWoCount) return;
         const sorted = [...entry.wos].sort((a, b) => a._start - b._start);
         const gaps = [];
         for (let i = 1; i < sorted.length; i++) {
+            if (intervalRange && (sorted[i]._start < intervalRange.start || sorted[i]._start >= intervalRange.end)) continue;
             // Previous WO must have an actual end (_end was only stored when valid).
             // Gap = next Actual Start − previous Actual End (end-to-start, no fallback).
             const gapHrs = (sorted[i]._start.getTime() - sorted[i - 1]._end.getTime()) / 3600000;
@@ -14503,33 +15457,14 @@ function kdiComputeMtbfMetrics(wos, assetLookup, baselineData = null) {
                 minMtbf: Math.min(...gaps),
                 maxMtbf: Math.max(...gaps),
                 gapCount: gaps.length,
-                woCount: sorted.length,
+                woCount: entry.scopedWoCount,
                 hasMtbf: true,
             };
             assetResults.push(result);
             allAssets.push(result);
         } else {
-            const baseline = baselineByAsset.get(String(entry.assetId || "").trim());
-            if (baseline && baseline.avgMtbf !== null && baseline.avgMtbf !== undefined) {
-                const result = {
-                    ...entry,
-                    avgMtbf: baseline.avgMtbf,
-                    minMtbf: baseline.minMtbf ?? null,
-                    maxMtbf: baseline.maxMtbf ?? null,
-                    gapCount: baseline.gapCount || 0,
-                    woCount: sorted.length,
-                    hasMtbf: true,
-                    mtbfBaseline: "Historical MTBF baseline",
-                };
-                totalMtbfHours += result.avgMtbf;
-                totalGaps += result.gapCount;
-                assetsWithMtbf++;
-                assetResults.push(result);
-                allAssets.push(result);
-            } else {
-                assetsInsufficient++;
-                allAssets.push({ ...entry, avgMtbf: null, minMtbf: null, maxMtbf: null, gapCount: 0, woCount: sorted.length, hasMtbf: false });
-            }
+            assetsInsufficient++;
+            allAssets.push({ ...entry, avgMtbf: null, minMtbf: null, maxMtbf: null, gapCount: 0, woCount: entry.scopedWoCount, hasMtbf: false });
         }
     });
 
@@ -14815,12 +15750,8 @@ function kdiGetMtbfStatusBadge(overallMtbf, assetsWithMtbf) {
     return { label: "Good", cls: "kdi-status-good" };
 }
 
-function kdiPeriodLabel(year, month) {
-    const monthNames = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-    if (!year && !month) return "All available data";
-    if (year && month) return `${monthNames[parseInt(month, 10)] || month} ${year}`;
-    if (year) return `Year ${year}`;
-    return `All years — ${monthNames[parseInt(month, 10)] || month} only`;
+function kdiPeriodLabel(fyStart) {
+    return kdiFinancialYearPeriodLabel(fyStart);
 }
 
 function kdiRenderCriticalityBtns(containerId, selected, onSelect) {
@@ -14858,27 +15789,35 @@ function kdiRenderRankToggle(containerId, selectedMode, onSelect) {
 // ── Main KDI update ───────────────────────────────────────────────────────────
 
 function updateKdiSection() {
-    const year = kdiGetSelectedYear();
-    const month = kdiGetSelectedMonth();
-
     let allWos = getAllWorkOrdersForMtbf();
     if (!allWos.length) allWos = getWorkOrderRows(getManagement());
 
-    const filtered = kdiFilterWorkOrders(allWos, year, month);
-    const assetLookup = buildAssetListLookup();
-
-    // Compute and store metrics
-    const mttrData = kdiComputeMttrMetrics(filtered, assetLookup);
-    kdiCurrentMttrData = { ...mttrData, assetLookup };
-
-    const historicalMtbfData = allWos.length !== filtered.length
-        ? kdiComputeMtbfMetrics(allWos, assetLookup)
+    const fyStart = kdiSyncFinancialYearSelect(allWos);
+    let metrics = _kdiMetricsCache.rows === allWos
+        && _kdiMetricsCache.fy === fyStart
+        && _kdiMetricsCache.assets === assetListData
+        ? _kdiMetricsCache.value
         : null;
-    const mtbfData = kdiComputeMtbfMetrics(filtered, assetLookup, historicalMtbfData);
+    if (!metrics) {
+        const filtered = kdiFilterWorkOrdersByFinancialYear(allWos, fyStart);
+        const assetLookup = buildAssetListLookup();
+        const intervalRange = fyStart ? getMrFinancialYearRange(fyStart) : null;
+        metrics = {
+            assetLookup,
+            mttrData: kdiComputeMttrMetrics(filtered, assetLookup),
+            // Use all history and select intervals by the NEXT failure date. This
+            // preserves the first valid MTBF interval at the Apr-1 boundary.
+            mtbfData: kdiComputeMtbfMetrics(allWos, assetLookup, intervalRange),
+        };
+        _kdiMetricsCache = { rows: allWos, fy: fyStart, assets: assetListData, value: metrics };
+    }
+
+    const { assetLookup, mttrData, mtbfData } = metrics;
+    kdiCurrentMttrData = { ...mttrData, assetLookup };
     kdiCurrentMtbfData = { ...mtbfData, assetLookup };
 
-    const periodLabel = kdiPeriodLabel(year, month);
-    setText("kdi-ytd-pill", year ? `YTD ${year}` : "YTD");
+    const periodLabel = kdiPeriodLabel(fyStart);
+    setText("kdi-ytd-pill", fyStart ? `YTD ${getMrFinancialYearLabel(fyStart)}` : "All Financial Years");
 
     // ── Render MTTR card ──
     const mttrStatus = kdiGetMttrStatusBadge(mttrData.averageMttr, mttrData.validCount, mttrData.missingCount);

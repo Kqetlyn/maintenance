@@ -352,6 +352,271 @@ html.downtime-embed .dashboard-content {
 
 .kpi-section-header {
     margin-bottom: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.overview-scope-controls {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.overview-scope-controls .filter-inline.hidden {
+    display: none;
+}
+
+.overview-scope-controls .inline-select {
+    min-width: 200px;
+}
+
+.overview-history-loader {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    max-width: 290px;
+}
+
+.history-load-btn {
+    min-height: 38px;
+    padding: 8px 14px;
+    border: 1px solid #2563eb;
+    border-radius: 8px;
+    background: #2563eb;
+    color: #fff;
+    font: inherit;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, opacity 0.15s ease;
+}
+
+.history-load-btn:hover:not(:disabled) {
+    background: #1d4ed8;
+    border-color: #1d4ed8;
+}
+
+.history-load-btn:disabled {
+    cursor: default;
+    opacity: 0.72;
+}
+
+.history-load-btn.is-loaded {
+    background: #15803d;
+    border-color: #15803d;
+}
+
+.history-load-btn.is-error {
+    background: #b45309;
+    border-color: #b45309;
+}
+
+.history-load-status {
+    color: var(--text-muted);
+    font-size: 0.72rem;
+    line-height: 1.3;
+}
+
+.monthly-ppt-dialog {
+    width: min(760px, calc(100vw - 32px));
+    max-height: calc(100vh - 24px);
+    max-height: calc(100dvh - 24px);
+    padding: 0;
+    border: 0;
+    border-radius: 14px;
+    background: #fff;
+    color: var(--text-primary);
+    box-shadow: 0 24px 70px rgba(15, 23, 42, 0.28);
+    overflow: auto;
+}
+
+.monthly-ppt-dialog[open] {
+    position: fixed;
+    inset: max(12px, env(safe-area-inset-top)) 0 auto;
+    margin: 0 auto;
+}
+
+.monthly-ppt-dialog::backdrop {
+    background: rgba(15, 23, 42, 0.56);
+    backdrop-filter: blur(2px);
+}
+
+.monthly-ppt-form {
+    padding: 24px;
+}
+
+.monthly-ppt-dialog-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid #e2e8f0;
+}
+
+.monthly-ppt-dialog-header h2 {
+    margin: 3px 0 6px;
+    color: #1f2937;
+    font-size: 1.35rem;
+}
+
+.monthly-ppt-dialog-header p {
+    max-width: 610px;
+    margin: 0;
+    color: #64748b;
+    font-size: 0.85rem;
+    line-height: 1.45;
+}
+
+.monthly-ppt-eyebrow {
+    color: #ef2536;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.monthly-ppt-close {
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    border: 1px solid #cbd5e1;
+    border-radius: 999px;
+    background: #fff;
+    color: #475569;
+    font-size: 1.35rem;
+    line-height: 1;
+    cursor: pointer;
+}
+
+.monthly-ppt-filter-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+    margin-top: 20px;
+}
+
+.monthly-ppt-field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.monthly-ppt-field-wide {
+    grid-column: 1 / -1;
+}
+
+.monthly-ppt-field > span {
+    color: #334155;
+    font-size: 0.78rem;
+    font-weight: 750;
+}
+
+.monthly-ppt-field input,
+.monthly-ppt-field select {
+    width: 100%;
+    min-height: 40px;
+    padding: 8px 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 8px;
+    background: #fff;
+    color: #0f172a;
+    font: inherit;
+    font-size: 0.86rem;
+}
+
+.monthly-ppt-field input:focus,
+.monthly-ppt-field select:focus {
+    border-color: #ef2536;
+    outline: 3px solid rgba(239, 37, 54, 0.12);
+}
+
+.monthly-ppt-field small {
+    color: #64748b;
+    font-size: 0.69rem;
+    line-height: 1.35;
+}
+
+.monthly-ppt-scope-summary {
+    margin-top: 18px;
+    padding: 11px 13px;
+    border-left: 3px solid #ef2536;
+    background: #f8fafc;
+    color: #475569;
+    font-size: 0.78rem;
+    line-height: 1.45;
+}
+
+.monthly-ppt-status {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    background: #eff6ff;
+    color: #1d4ed8;
+    font-size: 0.78rem;
+    font-weight: 650;
+}
+
+.monthly-ppt-status.hidden {
+    display: none;
+}
+
+.monthly-ppt-status.error {
+    background: #fff7ed;
+    color: #b45309;
+}
+
+.monthly-ppt-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 20px;
+}
+
+.monthly-ppt-secondary-btn,
+.monthly-ppt-generate-btn {
+    min-height: 40px;
+    padding: 9px 16px;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 0.82rem;
+    font-weight: 750;
+    cursor: pointer;
+}
+
+.monthly-ppt-secondary-btn {
+    border: 1px solid #cbd5e1;
+    background: #fff;
+    color: #475569;
+}
+
+.monthly-ppt-generate-btn {
+    border: 1px solid #ef2536;
+    background: #ef2536;
+    color: #fff;
+}
+
+.monthly-ppt-generate-btn:hover:not(:disabled) {
+    background: #d91f31;
+    border-color: #d91f31;
+}
+
+.monthly-ppt-generate-btn:disabled,
+.monthly-ppt-secondary-btn:disabled,
+.monthly-ppt-close:disabled {
+    cursor: wait;
+    opacity: 0.62;
+}
+
+@media (max-width: 680px) {
+    .monthly-ppt-form { padding: 18px; }
+    .monthly-ppt-filter-grid { grid-template-columns: 1fr; }
+    .monthly-ppt-field-wide { grid-column: auto; }
 }
 
 .dashboard-topic-switcher {
@@ -775,6 +1040,31 @@ html.downtime-embed .dashboard-content {
     border: 1px solid var(--border);
     border-radius: 12px;
     padding: 14px 16px;
+    /* Each box is a button: clicking it plots that metric on both charts. */
+    width: 100%;
+    text-align: left;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+    transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.cmc-kpi-card:hover {
+    border-color: #93c5fd;
+    box-shadow: 0 4px 12px rgba(15, 23, 42, 0.08);
+}
+
+.cmc-kpi-card.selected {
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.18);
+}
+
+.cmc-kpi-card.selected .cmc-kpi-lbl {
+    color: #1d4ed8;
+}
+
+.cmc-kpi-hint {
+    margin: 0 0 8px;
 }
 
 .cmc-kpi-lbl {
@@ -1251,6 +1541,100 @@ html.downtime-embed .dashboard-content {
     border-color: #ef4444;
 }
 
+.sla-missing-link.selected {
+    background: #fecaca;
+    border-color: #dc2626;
+    box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.16);
+}
+
+/* Every count in SLA Compliance by Severity drills into the list below. */
+.sla-count-link {
+    border: 1px solid transparent;
+    background: transparent;
+    padding: 2px 7px;
+    border-radius: 999px;
+    cursor: pointer;
+    font: inherit;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.sla-count-link:hover {
+    background: #eff6ff;
+    border-color: #bfdbfe;
+}
+
+.sla-count-link.selected {
+    background: #dbeafe;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.16);
+}
+
+.sla-severity-row {
+    cursor: pointer;
+    transition: background 0.15s ease;
+}
+
+.sla-severity-row:hover {
+    background: #f8fafc;
+}
+
+.sla-severity-row.selected {
+    background: #eff6ff;
+    box-shadow: inset 3px 0 0 #3b82f6;
+}
+
+.sla-drilldown-filter-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 0 4px;
+    flex-wrap: wrap;
+}
+
+.sla-drilldown-filter-row.hidden {
+    display: none;
+}
+
+.sla-drilldown-record-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 10px 0 4px;
+    flex-wrap: wrap;
+}
+
+.sla-drilldown-record-filter .inline-select {
+    min-width: 240px;
+}
+
+.sla-drilldown-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 11px;
+    border-radius: 999px;
+    background: #dbeafe;
+    border: 1px solid #93c5fd;
+    color: #1d4ed8;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.sla-drilldown-clear-btn {
+    border: 1px solid #cbd5e1;
+    background: #fff;
+    color: #475569;
+    border-radius: 999px;
+    padding: 3px 11px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+}
+
+.sla-drilldown-clear-btn:hover {
+    background: #f1f5f9;
+    border-color: #94a3b8;
+}
+
 .missing-data-card {
     margin-top: 18px;
 }
@@ -1502,6 +1886,22 @@ html.downtime-embed .dashboard-content {
     color: var(--danger);
     font-weight: 800;
 }
+
+/* Monthly MR movement — % Finished row */
+.mr-movement-percent-row td {
+    border-top: 1px solid rgba(148, 163, 184, 0.35);
+    font-weight: 700;
+}
+
+.mr-percent-cell {
+    font-variant-numeric: tabular-nums;
+}
+
+.mr-percent-good { color: #047857; }
+.mr-percent-ok { color: #0f766e; }
+.mr-percent-low { color: #b45309; }
+.mr-percent-none { color: #94a3b8; }
+.mr-percent-carryover { color: #64748b; }
 
 .logged-kpi-grid .kpi-card {
     min-height: 130px;
@@ -5087,6 +5487,18 @@ tr:hover td {
     align-items: center;
     flex-wrap: wrap;
     flex-shrink: 0;
+}
+
+.kdi-header-controls {
+    display: flex;
+    align-items: flex-end;
+    gap: 14px;
+    flex-wrap: wrap;
+    flex-shrink: 0;
+}
+
+.kdi-header-controls .inline-select {
+    min-width: 220px;
 }
 
 .kdi-ytd-pill {
