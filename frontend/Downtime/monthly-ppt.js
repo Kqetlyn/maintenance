@@ -2,6 +2,8 @@
     "use strict";
 
     const COLORS = {
+        primary: "17365D",
+        primaryDark: "102A43",
         red: "EF2536",
         redDark: "D91F31",
         green: "2E7D32",
@@ -24,6 +26,7 @@
     const PPTXGEN_LOCAL_URL = "/shared/vendor/pptxgen.bundle.js?v=3.12.0-local-1";
     const PPTXGEN_CDN_URL = "https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js";
     const MAX_ACTION_ROWS = 7;
+    const APPENDIX_ROWS_PER_SLIDE = 16;
     const state = {
         rowCache: { stage: "", rows: null, promise: null },
         reportCache: { rows: null, key: "", report: null },
@@ -271,11 +274,15 @@
         return stageKey(getSelectedDowntimeStage()) === stage;
     }
 
-    async function loadRows(stage) {
+    async function loadRows(stage, { force = false } = {}) {
         const key = stageKey(stage);
+        if (force) {
+            state.rowCache = { stage: "", rows: null, promise: null };
+            state.reportCache = { rows: null, key: "", report: null };
+        }
         if (state.rowCache.stage === key && Array.isArray(state.rowCache.rows)) return state.rowCache.rows;
         if (state.rowCache.stage === key && state.rowCache.promise) return state.rowCache.promise;
-        if (canReuseDashboardHistory(key)) {
+        if (!force && canReuseDashboardHistory(key)) {
             state.rowCache = { stage: key, rows: allWorkOrderRowsCache, promise: null };
             return allWorkOrderRowsCache;
         }
@@ -470,6 +477,27 @@
         return /\bproduction\s*(?:work\s*)?area\b|\bwork\s*area\b|\bgeneral\s*(?:production\s*)?area\b|\b(?:production\s*)?(?:high|medium|low)\s*risk\b/.test(text);
     }
 
+    function mapActionTableRow(row, index, assetLookup, referenceDate = new Date()) {
+        const assetId = getMachineAssetId(row);
+        const meta = getAssetMetaFromLookup(assetLookup, assetId);
+        const original = typeof getMrDescriptionThai === "function" ? getMrDescriptionThai(row) : (getMrDescription(row) || "--");
+        const english = typeof getMrDescriptionEnglish === "function"
+            ? getMrDescriptionEnglish(row)
+            : (String(row?.translated_description || "").trim() || "--");
+        return {
+            id: getMrRequestId(row, index) || getMrWorkOrderOnlyId(row) || "--",
+            severity: severityCode(row) || "--",
+            stage: workOrderStageLabel(row, meta),
+            status: actionStatus(row),
+            assetId: assetId || "--",
+            asset: kdiCanonicalAssetName(row, meta, assetId) || getMachineEquipmentName(row),
+            original,
+            english,
+            openAge: actionOpenAge(row, referenceDate),
+            raised: getMrRaisedDate(row).date,
+        };
+    }
+
     function buildActionRows(rows, cutoffRange, assetLookup) {
         const referenceDate = new Date();
         return rows
@@ -495,26 +523,19 @@
                 if (raisedDelta) return raisedDelta;
                 return severityRank(a) - severityRank(b);
             })
-            .map((row, index) => {
-                const assetId = getMachineAssetId(row);
-                const meta = getAssetMetaFromLookup(assetLookup, assetId);
-                const original = typeof getMrDescriptionThai === "function" ? getMrDescriptionThai(row) : (getMrDescription(row) || "--");
-                const english = typeof getMrDescriptionEnglish === "function"
-                    ? getMrDescriptionEnglish(row)
-                    : (String(row?.translated_description || "").trim() || "--");
-                return {
-                    id: getMrRequestId(row, index) || getMrWorkOrderOnlyId(row) || "--",
-                    severity: severityCode(row),
-                    stage: workOrderStageLabel(row, meta),
-                    status: actionStatus(row),
-                    assetId: assetId || "--",
-                    asset: kdiCanonicalAssetName(row, meta, assetId) || getMachineEquipmentName(row),
-                    original,
-                    english,
-                    openAge: actionOpenAge(row, referenceDate),
-                    raised: getMrRaisedDate(row).date,
-                };
-            });
+            .map((row, index) => mapActionTableRow(row, index, assetLookup, referenceDate));
+    }
+
+    function buildAllRaisedRows(rows, cutoffRange, assetLookup) {
+        const referenceDate = new Date();
+        return rows
+            .filter((row) => isDateInRange(getMrRaisedDate(row).date, cutoffRange))
+            .sort((a, b) => {
+                const raisedDelta = (getMrRaisedDate(b).date?.getTime() || 0) - (getMrRaisedDate(a).date?.getTime() || 0);
+                if (raisedDelta) return raisedDelta;
+                return severityRank(a) - severityRank(b);
+            })
+            .map((row, index) => mapActionTableRow(row, index, assetLookup, referenceDate));
     }
 
     function buildReportModel(rows, filters) {
@@ -552,6 +573,19 @@
         // raised on the selected day. Specific machine assets rank ahead of general
         // production-area/risk-zone records before the seven-row limit is applied.
         const actionAll = buildActionRows(rows, actionDay, assetLookup);
+        const allActionDayRows = buildAllRaisedRows(rows, actionDay, assetLookup);
+        let latestQualifyingActionDate = null;
+        rows.forEach((row, index) => {
+            const raised = getMrRaisedDate(row).date;
+            if (
+                !raised
+                || raised >= actionDay.end
+                || !["S1", "S2"].includes(severityCode(row))
+                || !isProductionMachine(row, assetLookup)
+                || !isCorrectiveActionRow(row, index)
+            ) return;
+            if (!latestQualifyingActionDate || raised > latestQualifyingActionDate) latestQualifyingActionDate = raised;
+        });
         const oldestOpenS1 = inScope
             .filter((row) => severityCode(row) === "S1" && !isMrFinishedStatus(getMrStatus(row)) && getMrRaisedDate(row).date)
             .sort((a, b) => getMrRaisedDate(a).date - getMrRaisedDate(b).date)[0] || null;
@@ -583,6 +617,12 @@
             mtbfGapCount: mtbfData.totalGaps,
             actionTotal: actionAll.length,
             actionRows: actionAll.slice(0, MAX_ACTION_ROWS),
+            actionDaySourceCount: allActionDayRows.length,
+            allActionDayRows,
+            actionAppendixRequired: actionAll.length < MAX_ACTION_ROWS,
+            actionLatestQualifyingLabel: latestQualifyingActionDate
+                ? latestQualifyingActionDate.toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" })
+                : "",
             oldestOpenS1: oldestOpenS1 ? {
                 id: getMrRequestId(oldestOpenS1) || getMrWorkOrderOnlyId(oldestOpenS1) || "--",
                 asset: kdiCanonicalAssetName(oldestOpenS1, getAssetMetaFromLookup(assetLookup, getMachineAssetId(oldestOpenS1)), getMachineAssetId(oldestOpenS1)),
@@ -648,8 +688,8 @@
     function addBarRanking(slide, pptx, x, y, w, h, title, subtitle, rows, color, formatter) {
         addPanel(slide, pptx, x, y, w, h, COLORS.border);
         slide.addShape(pptx.ShapeType.rect, { x: x + 0.12, y: y + 0.10, w: 0.04, h: 0.20, fill: { color }, line: { color, transparency: 100 } });
-        slide.addText(title, { x: x + 0.22, y: y + 0.075, w: w - 0.34, h: 0.20, fontFace: HEAD_FONT, fontSize: 12.5, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
-        slide.addText(subtitle, { x: x + 0.22, y: y + 0.29, w: w - 0.34, h: 0.15, fontFace: FONT, fontSize: 7.2, color: COLORS.slate, margin: 0, fit: "shrink" });
+        slide.addText(title, { x: x + 0.22, y: y + 0.065, w: w - 0.34, h: 0.22, fontFace: HEAD_FONT, fontSize: 13.5, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
+        slide.addText(subtitle, { x: x + 0.22, y: y + 0.29, w: w - 0.34, h: 0.16, fontFace: FONT, fontSize: 8.0, color: COLORS.slate, margin: 0, fit: "shrink" });
         if (!rows.length) {
             slide.addText("No valid production-machine data for this financial-year scope.", { x: x + 0.3, y: y + 1.0, w: w - 0.6, h: 0.35, fontFace: FONT, fontSize: 10, color: COLORS.muted, align: "center", margin: 0 });
             return;
@@ -664,9 +704,9 @@
         rows.forEach((row, index) => {
             const ry = startY + (index * rowH);
             const width = Math.max(0.05, barW * ((Number(row.value) || 0) / maxValue));
-            slide.addText(shortText(row.name, 25), { x: x + 0.15, y: ry - 0.01, w: labelW - 0.08, h: 0.16, fontFace: FONT, fontSize: 7.8, bold: index === 0, color: COLORS.black, align: "right", margin: 0, fit: "shrink" });
+            slide.addText(shortText(row.name, 23), { x: x + 0.15, y: ry - 0.01, w: labelW - 0.08, h: 0.17, fontFace: FONT, fontSize: 8.6, bold: index === 0, color: COLORS.black, align: "right", margin: 0, fit: "shrink" });
             slide.addShape(pptx.ShapeType.rect, { x: barX, y: ry + 0.01, w: width, h: 0.115, fill: { color }, line: { color, transparency: 100 } });
-            slide.addText(formatter(row.value), { x: barX + width + 0.05, y: ry - 0.01, w: valueW, h: 0.16, fontFace: FONT, fontSize: 7.8, bold: index === 0, color: COLORS.black, margin: 0, fit: "shrink" });
+            slide.addText(formatter(row.value), { x: barX + width + 0.05, y: ry - 0.01, w: valueW, h: 0.17, fontFace: FONT, fontSize: 8.6, bold: index === 0, color: COLORS.black, margin: 0, fit: "shrink" });
         });
     }
 
@@ -677,8 +717,8 @@
         const headers = ["MR No.", "SL", "Stage", "Status", "Asset ID", "Asset", "Issue - as reported", "Issue - English", "Open"];
         let cursorX = x;
         headers.forEach((header, index) => {
-            slide.addShape(pptx.ShapeType.rect, { x: cursorX, y, w: widths[index], h: 0.25, fill: { color: COLORS.red }, line: { color: COLORS.red, transparency: 100 } });
-            slide.addText(header, { x: cursorX + 0.04, y: y + 0.035, w: widths[index] - 0.08, h: 0.15, fontFace: FONT, fontSize: 7.2, bold: true, color: COLORS.white, margin: 0, fit: "shrink", align: index === 8 ? "right" : "left" });
+            slide.addShape(pptx.ShapeType.rect, { x: cursorX, y, w: widths[index], h: 0.25, fill: { color: COLORS.primary }, line: { color: COLORS.primary, transparency: 100 } });
+            slide.addText(header, { x: cursorX + 0.04, y: y + 0.03, w: widths[index] - 0.08, h: 0.17, fontFace: FONT, fontSize: 7.8, bold: true, color: COLORS.white, margin: 0, fit: "shrink", align: index === 8 ? "right" : "left" });
             cursorX += widths[index];
         });
 
@@ -688,27 +728,34 @@
             const fill = rowIndex % 2 === 0 ? COLORS.white : COLORS.light;
             slide.addShape(pptx.ShapeType.rect, { x, y: ry, w: widths.reduce((sum, value) => sum + value, 0), h: 0.235, fill: { color: fill }, line: { color: "E6E6E6", width: 0.25 } });
             if (row.empty) {
-                slide.addText("No corrective S1/S2 production-machine requests were raised on the selected date.", { x: x + 0.08, y: ry + 0.045, w: 12.2, h: 0.14, fontFace: FONT, fontSize: 7.5, italic: true, color: COLORS.muted, margin: 0 });
+                const sourceCount = Number(report.actionDaySourceCount || 0);
+                const latestText = report.actionLatestQualifyingLabel
+                    ? ` Newest qualifying MR loaded: ${report.actionLatestQualifyingLabel}.`
+                    : " No qualifying MR-raised date was found in the loaded import.";
+                const emptyText = sourceCount
+                    ? `${numberText(sourceCount)} MR row${sourceCount === 1 ? " was" : "s were"} loaded for the selected date, but none matched corrective S1/S2 production-machine rules.${latestText}`
+                    : `No MR rows with a recognised raised date were loaded for the selected date.${latestText}`;
+                slide.addText(emptyText, { x: x + 0.08, y: ry + 0.035, w: 12.2, h: 0.16, fontFace: FONT, fontSize: 8.3, italic: true, color: COLORS.muted, margin: 0, fit: "shrink" });
                 return;
             }
             const values = [
                 shortText(row.id, 18), row.severity, row.stage, shortText(row.status, 18), shortText(row.assetId, 16),
-                shortText(row.asset, 30), shortText(row.original, 48), shortText(row.english, 55), row.openAge,
+                shortText(row.asset, 27), shortText(row.original, 42), shortText(row.english, 48), row.openAge,
             ];
             cursorX = x;
             values.forEach((value, index) => {
                 if (index === 1) {
                     const badgeColor = COLORS[String(row.severity || "").toLowerCase()] || COLORS.s4;
                     slide.addShape(pptx.ShapeType.roundRect, { x: cursorX + 0.05, y: ry + 0.035, w: widths[index] - 0.10, h: 0.16, fill: { color: badgeColor }, line: { color: badgeColor, transparency: 100 } });
-                    slide.addText(value, { x: cursorX + 0.05, y: ry + 0.058, w: widths[index] - 0.10, h: 0.10, fontFace: FONT, fontSize: 6.8, bold: true, color: COLORS.white, align: "center", margin: 0 });
+                    slide.addText(value, { x: cursorX + 0.05, y: ry + 0.053, w: widths[index] - 0.10, h: 0.115, fontFace: FONT, fontSize: 7.3, bold: true, color: COLORS.white, align: "center", margin: 0 });
                 } else {
                     const isStatusAttention = index === 3 && /new|not ack/i.test(value);
                     const isAsset = index === 5;
                     const isOpen = index === 8 && value !== "Closed";
                     slide.addText(value, {
-                        x: cursorX + 0.04, y: ry + 0.055, w: widths[index] - 0.08, h: 0.11,
+                        x: cursorX + 0.04, y: ry + 0.045, w: widths[index] - 0.08, h: 0.135,
                         fontFace: index === 6 ? "Leelawadee UI" : FONT,
-                        fontSize: index >= 6 || index === 2 ? 6.4 : 6.8,
+                        fontSize: index >= 6 || index === 2 ? 7.0 : 7.4,
                         bold: isAsset || isOpen,
                         color: isStatusAttention ? COLORS.red : (isOpen ? COLORS.amber : COLORS.black),
                         align: index === 8 ? "right" : "left", margin: 0, fit: "shrink",
@@ -717,6 +764,81 @@
                 cursorX += widths[index];
             });
         });
+    }
+
+    function addAllMrAppendixTable(slide, pptx, rows) {
+        const x = 0.40;
+        const y = 1.43;
+        const widths = [1.05, 0.40, 0.58, 1.02, 0.78, 1.55, 2.70, 3.75, 0.70];
+        const headers = ["MR No.", "SL", "Stage", "Status", "Asset ID", "Asset", "Issue - as reported", "Issue - English", "Open"];
+        let cursorX = x;
+        headers.forEach((header, index) => {
+            slide.addShape(pptx.ShapeType.rect, { x: cursorX, y, w: widths[index], h: 0.32, fill: { color: COLORS.primary }, line: { color: COLORS.primary, transparency: 100 } });
+            slide.addText(header, { x: cursorX + 0.04, y: y + 0.055, w: widths[index] - 0.08, h: 0.18, fontFace: FONT, fontSize: 8.4, bold: true, color: COLORS.white, margin: 0, fit: "shrink", align: index === 8 ? "right" : "left" });
+            cursorX += widths[index];
+        });
+
+        if (!rows.length) {
+            slide.addShape(pptx.ShapeType.rect, { x, y: y + 0.32, w: 12.53, h: 0.46, fill: { color: COLORS.white }, line: { color: COLORS.border, width: 0.5 } });
+            slide.addText("No MRs with a recognised raised date were loaded for the selected previous-day date.", { x: x + 0.10, y: y + 0.46, w: 12.30, h: 0.18, fontFace: FONT, fontSize: 10, italic: true, color: COLORS.muted, margin: 0, fit: "shrink" });
+            return;
+        }
+
+        rows.forEach((row, rowIndex) => {
+            const ry = y + 0.32 + (rowIndex * 0.32);
+            const fill = rowIndex % 2 === 0 ? COLORS.white : COLORS.light;
+            slide.addShape(pptx.ShapeType.rect, { x, y: ry, w: 12.53, h: 0.32, fill: { color: fill }, line: { color: "E6E6E6", width: 0.25 } });
+            const values = [
+                shortText(row.id, 18), row.severity, row.stage, shortText(row.status, 18), shortText(row.assetId, 16),
+                shortText(row.asset, 25), shortText(row.original, 40), shortText(row.english, 52), row.openAge,
+            ];
+            cursorX = x;
+            values.forEach((value, index) => {
+                if (index === 1 && /^S[1-4]$/.test(String(value || ""))) {
+                    const badgeColor = COLORS[String(value).toLowerCase()] || COLORS.s4;
+                    slide.addShape(pptx.ShapeType.roundRect, { x: cursorX + 0.05, y: ry + 0.065, w: widths[index] - 0.10, h: 0.19, fill: { color: badgeColor }, line: { color: badgeColor, transparency: 100 } });
+                    slide.addText(value, { x: cursorX + 0.05, y: ry + 0.085, w: widths[index] - 0.10, h: 0.13, fontFace: FONT, fontSize: 7.8, bold: true, color: COLORS.white, align: "center", margin: 0 });
+                } else {
+                    const isStatusAttention = index === 3 && /new|not ack/i.test(value);
+                    const isAsset = index === 5;
+                    const isOpen = index === 8 && value !== "Closed";
+                    slide.addText(value, {
+                        x: cursorX + 0.04, y: ry + 0.085, w: widths[index] - 0.08, h: 0.15,
+                        fontFace: index === 6 ? "Leelawadee UI" : FONT,
+                        fontSize: index >= 6 || index === 2 ? 7.7 : 8.2,
+                        bold: isAsset || isOpen,
+                        color: isStatusAttention ? COLORS.red : (isOpen ? COLORS.amber : COLORS.black),
+                        align: index === 8 ? "right" : "left", margin: 0, fit: "shrink",
+                    });
+                }
+                cursorX += widths[index];
+            });
+        });
+    }
+
+    function addAllMrAppendixSlides(pptx, logo, report) {
+        if (!report.actionAppendixRequired) return 0;
+        const allRows = Array.isArray(report.allActionDayRows) ? report.allActionDayRows : [];
+        const pages = allRows.length
+            ? Array.from({ length: Math.ceil(allRows.length / APPENDIX_ROWS_PER_SLIDE) }, (_, index) => allRows.slice(index * APPENDIX_ROWS_PER_SLIDE, (index + 1) * APPENDIX_ROWS_PER_SLIDE))
+            : [[]];
+
+        pages.forEach((pageRows, pageIndex) => {
+            const slide = pptx.addSlide();
+            slide.background = { color: COLORS.white };
+            slide.addText(`All MRs raised on ${report.actionDateLabel}`, { x: 0.40, y: 0.16, w: 8.7, h: 0.42, fontFace: HEAD_FONT, fontSize: 25, bold: true, color: COLORS.primary, margin: 0, fit: "shrink" });
+            slide.addText("Reference list for manual selection when fewer than seven MRs meet the recommended S1/S2 corrective production-machine criteria.", { x: 0.40, y: 0.65, w: 10.4, h: 0.22, fontFace: FONT, fontSize: 10.2, color: COLORS.slate, margin: 0, fit: "shrink" });
+            slide.addText(`${numberText(allRows.length)} total MRs  |  Page ${pageIndex + 1} of ${pages.length}`, { x: 9.1, y: 1.08, w: 3.83, h: 0.18, fontFace: FONT, fontSize: 9.2, color: COLORS.muted, align: "right", margin: 0, fit: "shrink" });
+            slide.addImage({ data: logo, x: 11.28, y: 0.13, w: 1.62, h: 0.66 });
+            slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 0.96, w: 12.53, h: 0.025, fill: { color: COLORS.primary }, line: { color: COLORS.primary, transparency: 100 } });
+            slide.addText("Copy the preferred MR rows into the main-slide action list if the automatic recommendation needs adjustment.", { x: 0.40, y: 1.07, w: 8.4, h: 0.18, fontFace: FONT, fontSize: 9.2, italic: true, color: COLORS.slate, margin: 0, fit: "shrink" });
+            addAllMrAppendixTable(slide, pptx, pageRows);
+            slide.addText(`SATS Food Solutions Thailand  |  Source: all MRs loaded with a raised date of ${report.actionDateLabel}  |  Generated ${report.generatedAt.toLocaleString("en-GB")}`, { x: 0.40, y: 7.31, w: 12.53, h: 0.12, fontFace: FONT, fontSize: 6.5, italic: true, color: COLORS.muted, margin: 0, fit: "shrink" });
+            if (typeof slide.addNotes === "function") {
+                slide.addNotes(`[Sources]\n- Internal Downtime page all-year work-order source, filtered only to the selected raised date for this reference appendix.\n- Asset classification from the loaded Asset Master mapping.\n- SATS logo: ${LOGO_URL}.`);
+            }
+        });
+        return pages.length;
     }
 
     async function generatePpt(report, { download = true } = {}) {
@@ -733,75 +855,77 @@
         const slide = pptx.addSlide();
         slide.background = { color: COLORS.white };
 
-        slide.addText("Maintenance Monthly Report", { x: 0.40, y: 0.13, w: 8.9, h: 0.42, fontFace: HEAD_FONT, fontSize: 26, bold: true, color: COLORS.red, margin: 0, fit: "shrink" });
+        slide.addText("Maintenance Monthly Report", { x: 0.40, y: 0.11, w: 8.9, h: 0.45, fontFace: HEAD_FONT, fontSize: 28, bold: true, color: COLORS.primary, margin: 0, fit: "shrink" });
         const subtitle = `${report.monthLabel}  |  ${report.stageLabel}  |  ${report.scopeLabel}  |  vs. ${report.previousMonthLabel}  |  MTTR/MTBF ${report.fyLabel} YTD`;
-        slide.addText(subtitle, { x: 0.40, y: 0.62, w: 10.5, h: 0.17, fontFace: FONT, fontSize: 8.5, color: COLORS.slate, margin: 0, fit: "shrink" });
+        slide.addText(subtitle, { x: 0.40, y: 0.62, w: 10.5, h: 0.18, fontFace: FONT, fontSize: 9.5, color: COLORS.slate, margin: 0, fit: "shrink" });
         slide.addImage({ data: logo, x: 11.28, y: 0.13, w: 1.62, h: 0.66 });
-        slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 0.91, w: 12.53, h: 0.025, fill: { color: COLORS.red }, line: { color: COLORS.red, transparency: 100 } });
+        slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 0.91, w: 12.53, h: 0.025, fill: { color: COLORS.primary }, line: { color: COLORS.primary, transparency: 100 } });
 
-        addPanel(slide, pptx, 0.40, 1.00, 4.54, 1.17, COLORS.red);
-        slide.addText(`MR RAISED - ${report.monthLabelUpper}`, { x: 0.53, y: 1.13, w: 2.1, h: 0.16, fontFace: FONT, fontSize: 8.2, color: COLORS.slate, margin: 0, fit: "shrink" });
-        slide.addText(numberText(report.raised), { x: 0.53, y: 1.36, w: 1.75, h: 0.45, fontFace: HEAD_FONT, fontSize: 34, bold: true, color: COLORS.red, margin: 0, fit: "shrink" });
+        addPanel(slide, pptx, 0.40, 1.00, 4.54, 1.17, COLORS.primary);
+        slide.addText(`MR RAISED - ${report.monthLabelUpper}`, { x: 0.53, y: 1.11, w: 2.1, h: 0.20, fontFace: FONT, fontSize: 10.0, color: COLORS.slate, margin: 0, fit: "shrink" });
+        slide.addText(numberText(report.raised), { x: 0.53, y: 1.34, w: 1.75, h: 0.48, fontFace: HEAD_FONT, fontSize: 36, bold: true, color: COLORS.primary, margin: 0, fit: "shrink" });
         const changeArrow = report.raisedChangePct === null ? "-" : report.raisedChangePct >= 0 ? "▲" : "▼";
         const changeText = report.raisedChangePct === null ? "No prior-month baseline" : `${changeArrow} ${Math.abs(report.raisedChangePct).toFixed(1)}% vs ${report.previousMonthLabel} (${numberText(report.previousRaised)})`;
-        slide.addText(changeText, { x: 0.53, y: 1.88, w: 2.25, h: 0.14, fontFace: FONT, fontSize: 7.3, bold: report.raisedChangePct !== null, color: report.raisedChangePct >= 0 ? COLORS.amber : COLORS.green, margin: 0, fit: "shrink" });
+        slide.addText(changeText, { x: 0.53, y: 1.86, w: 2.25, h: 0.18, fontFace: FONT, fontSize: 9.0, bold: report.raisedChangePct !== null, color: report.raisedChangePct >= 0 ? COLORS.amber : COLORS.green, margin: 0, fit: "shrink" });
         const doughnutValues = report.raised ? [report.finished, report.open] : [1, 0];
         slide.addChart(pptx.ChartType.doughnut, [{ name: "MR status", labels: ["Finished", "Still open"], values: doughnutValues }], {
             x: 2.66, y: 1.18, w: 1.10, h: 0.82, holeSize: 62, showLegend: false, showTitle: false,
             showValue: false, showPercent: false, showCategoryName: false, chartColors: [COLORS.green, COLORS.amber],
             border: { color: COLORS.white, pt: 0 }, showBorder: false,
         });
-        slide.addText(`■ ${pct(report.finishedPct)}`, { x: 3.77, y: 1.36, w: 0.98, h: 0.16, fontFace: FONT, fontSize: 9.5, bold: true, color: COLORS.green, margin: 0, fit: "shrink" });
-        slide.addText(`${numberText(report.finished)} finished`, { x: 3.88, y: 1.54, w: 0.78, h: 0.14, fontFace: FONT, fontSize: 6.9, color: COLORS.slate, margin: 0, fit: "shrink" });
-        slide.addText(`■ ${pct(report.openPct)}`, { x: 3.77, y: 1.73, w: 0.98, h: 0.16, fontFace: FONT, fontSize: 9.5, bold: true, color: COLORS.amber, margin: 0, fit: "shrink" });
-        slide.addText(`${numberText(report.open)} still open`, { x: 3.88, y: 1.91, w: 0.78, h: 0.14, fontFace: FONT, fontSize: 6.9, color: COLORS.slate, margin: 0, fit: "shrink" });
+        slide.addText(`■ ${pct(report.finishedPct)}`, { x: 3.74, y: 1.32, w: 1.05, h: 0.20, fontFace: FONT, fontSize: 12.0, bold: true, color: COLORS.green, margin: 0, fit: "shrink" });
+        slide.addText(`${numberText(report.finished)} finished`, { x: 3.86, y: 1.54, w: 0.88, h: 0.17, fontFace: FONT, fontSize: 8.5, color: COLORS.slate, margin: 0, fit: "shrink" });
+        slide.addText(`■ ${pct(report.openPct)}`, { x: 3.74, y: 1.70, w: 1.05, h: 0.20, fontFace: FONT, fontSize: 12.0, bold: true, color: COLORS.amber, margin: 0, fit: "shrink" });
+        slide.addText(`${numberText(report.open)} still open`, { x: 3.86, y: 1.92, w: 0.88, h: 0.17, fontFace: FONT, fontSize: 8.5, color: COLORS.slate, margin: 0, fit: "shrink" });
 
         addPanel(slide, pptx, 5.08, 1.00, 5.55, 1.17, COLORS.black);
-        slide.addText("MR RAISED BY SERVICE LEVEL", { x: 5.20, y: 1.13, w: 3.0, h: 0.16, fontFace: FONT, fontSize: 8.2, color: COLORS.slate, margin: 0 });
-        slide.addText(`${numberText(report.raised)} total`, { x: 9.75, y: 1.13, w: 0.72, h: 0.16, fontFace: FONT, fontSize: 7.4, color: COLORS.muted, align: "right", margin: 0 });
+        slide.addText("MR RAISED BY SERVICE LEVEL", { x: 5.20, y: 1.10, w: 3.2, h: 0.21, fontFace: FONT, fontSize: 10.5, color: COLORS.slate, margin: 0, fit: "shrink" });
+        slide.addText(`${numberText(report.raised)} total`, { x: 9.60, y: 1.10, w: 0.87, h: 0.20, fontFace: FONT, fontSize: 9.0, color: COLORS.muted, align: "right", margin: 0, fit: "shrink" });
         ["S1", "S2", "S3", "S4"].forEach((code, index) => {
             const x = 5.20 + (index * 1.30);
             const count = report.severityCounts[code] || 0;
             const color = COLORS[code.toLowerCase()];
             slide.addShape(pptx.ShapeType.rect, { x, y: 1.38, w: 1.16, h: 0.018, fill: { color }, line: { color, transparency: 100 } });
-            slide.addText(code, { x, y: 1.47, w: 0.45, h: 0.14, fontFace: FONT, fontSize: 7.8, bold: true, color, margin: 0 });
-            slide.addText(numberText(count), { x, y: 1.67, w: 1.05, h: 0.28, fontFace: HEAD_FONT, fontSize: 23, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
-            slide.addText(`${pct(report.raised ? (count / report.raised) * 100 : null)} of raised`, { x, y: 1.98, w: 1.12, h: 0.12, fontFace: FONT, fontSize: 6.6, color: COLORS.slate, margin: 0, fit: "shrink" });
+            slide.addText(code, { x, y: 1.44, w: 0.50, h: 0.18, fontFace: FONT, fontSize: 9.5, bold: true, color, margin: 0 });
+            slide.addText(numberText(count), { x, y: 1.61, w: 1.05, h: 0.35, fontFace: HEAD_FONT, fontSize: 28, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
+            slide.addText(`${pct(report.raised ? (count / report.raised) * 100 : null)} of raised`, { x, y: 1.97, w: 1.16, h: 0.16, fontFace: FONT, fontSize: 8.2, color: COLORS.slate, margin: 0, fit: "shrink" });
         });
 
         addPanel(slide, pptx, 10.77, 1.00, 2.16, 1.17, COLORS.amber);
-        slide.addText("DATA RELIABILITY INDEX", { x: 10.90, y: 1.13, w: 1.90, h: 0.16, fontFace: FONT, fontSize: 7.7, color: COLORS.slate, margin: 0, fit: "shrink" });
-        slide.addText(pct(report.reliabilityIndex), { x: 10.90, y: 1.52, w: 1.85, h: 0.45, fontFace: HEAD_FONT, fontSize: 30, bold: true, color: COLORS.amber, margin: 0, fit: "shrink" });
-        slide.addText(`${numberText(report.reliabilityTotal)} monthly records`, { x: 10.90, y: 2.00, w: 1.85, h: 0.12, fontFace: FONT, fontSize: 6.4, color: COLORS.muted, margin: 0 });
+        slide.addText("DATA RELIABILITY INDEX", { x: 10.90, y: 1.10, w: 1.90, h: 0.20, fontFace: FONT, fontSize: 9.5, color: COLORS.slate, margin: 0, fit: "shrink" });
+        slide.addText(pct(report.reliabilityIndex), { x: 10.90, y: 1.47, w: 1.85, h: 0.50, fontFace: HEAD_FONT, fontSize: 34, bold: true, color: COLORS.amber, margin: 0, fit: "shrink" });
+        slide.addText(`${numberText(report.reliabilityTotal)} monthly records`, { x: 10.90, y: 1.98, w: 1.85, h: 0.16, fontFace: FONT, fontSize: 8.0, color: COLORS.muted, margin: 0, fit: "shrink" });
 
-        addBarRanking(slide, pptx, 0.40, 2.30, 6.14, 2.25, "Slowest to repair - Avg MTTR by machine group", `Top 6 production groups | ${report.fyLabel} YTD to ${report.fyCutoffLabel} | lower is better`, report.mttrGroups, COLORS.red, mttrText);
+        addBarRanking(slide, pptx, 0.40, 2.30, 6.14, 2.25, "Slowest to repair - Avg MTTR by machine group", `Top 6 production groups | ${report.fyLabel} YTD to ${report.fyCutoffLabel} | lower is better`, report.mttrGroups, COLORS.primary, mttrText);
         addBarRanking(slide, pptx, 6.68, 2.30, 6.25, 2.25, "Fails most often - Avg MTBF by machine group", `Bottom 6 production groups | ${report.fyLabel} YTD to ${report.fyCutoffLabel} | higher is better`, report.mtbfGroups, COLORS.teal, mtbfText);
 
         slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 4.68, w: 12.53, h: 0.30, fill: { color: COLORS.light }, line: { color: COLORS.light, transparency: 100 } });
-        slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 4.68, w: 0.045, h: 0.30, fill: { color: COLORS.red }, line: { color: COLORS.red, transparency: 100 } });
+        slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 4.68, w: 0.045, h: 0.30, fill: { color: COLORS.primary }, line: { color: COLORS.primary, transparency: 100 } });
         const worst = report.mttrGroups[0];
         const shortest = report.mtbfGroups[0];
         const oldest = report.oldestOpenS1;
-        slide.addText(`WORST MTTR - ${worst ? `${shortText(worst.name, 22)} ${mttrText(worst.value)}, ${worst.count} repairs` : "No valid data"}`, { x: 0.57, y: 4.77, w: 3.65, h: 0.12, fontFace: FONT, fontSize: 7.2, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
-        slide.addText(`SHORTEST MTBF - ${shortest ? `${shortText(shortest.name, 22)} ${mtbfText(shortest.value)}, ${shortest.count} gaps` : "No valid data"}`, { x: 4.45, y: 4.77, w: 3.65, h: 0.12, fontFace: FONT, fontSize: 7.2, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
-        slide.addText(`OLDEST OPEN S1 - ${oldest ? `${oldest.id} ${shortText(oldest.asset, 24)}, open ${oldest.age}` : "No open S1"}`, { x: 8.34, y: 4.77, w: 4.35, h: 0.12, fontFace: FONT, fontSize: 7.2, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
+        slide.addText(`WORST MTTR - ${worst ? `${shortText(worst.name, 22)} ${mttrText(worst.value)}, ${worst.count} repairs` : "No valid data"}`, { x: 0.57, y: 4.76, w: 3.65, h: 0.14, fontFace: FONT, fontSize: 7.8, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
+        slide.addText(`SHORTEST MTBF - ${shortest ? `${shortText(shortest.name, 22)} ${mtbfText(shortest.value)}, ${shortest.count} gaps` : "No valid data"}`, { x: 4.45, y: 4.76, w: 3.65, h: 0.14, fontFace: FONT, fontSize: 7.8, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
+        slide.addText(`OLDEST OPEN S1 - ${oldest ? `${oldest.id} ${shortText(oldest.asset, 24)}, open ${oldest.age}` : "No open S1"}`, { x: 8.34, y: 4.76, w: 4.35, h: 0.14, fontFace: FONT, fontSize: 7.8, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
 
-        slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 5.09, w: 0.045, h: 0.20, fill: { color: COLORS.red }, line: { color: COLORS.red, transparency: 100 } });
-        slide.addText(`Action list - S1/S2 corrective production MRs raised on ${report.actionDateLabel}`, { x: 0.54, y: 5.08, w: 8.4, h: 0.20, fontFace: HEAD_FONT, fontSize: 12, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
-        slide.addText(`${numberText(report.actionTotal)} eligible | ${numberText(report.actionRows.length)} shown | specific assets first, newest next`, { x: 9.0, y: 5.12, w: 3.93, h: 0.14, fontFace: FONT, fontSize: 6.8, italic: true, color: COLORS.muted, align: "right", margin: 0, fit: "shrink" });
+        slide.addShape(pptx.ShapeType.rect, { x: 0.40, y: 5.09, w: 0.045, h: 0.20, fill: { color: COLORS.primary }, line: { color: COLORS.primary, transparency: 100 } });
+        slide.addText(`Recommended action list - S1/S2 corrective production MRs raised on ${report.actionDateLabel}`, { x: 0.54, y: 5.07, w: 8.7, h: 0.22, fontFace: HEAD_FONT, fontSize: 13, bold: true, color: COLORS.black, margin: 0, fit: "shrink" });
+        slide.addText(`${numberText(report.actionTotal)} recommended | ${numberText(report.actionRows.length)} shown | specific assets first, newest next`, { x: 9.1, y: 5.11, w: 3.83, h: 0.16, fontFace: FONT, fontSize: 7.4, italic: true, color: COLORS.muted, align: "right", margin: 0, fit: "shrink" });
         addActionTable(slide, pptx, report);
 
         const footer = `SATS Food Solutions Thailand  |  Source: Downtime page, ${report.stageLabel}  |  ${report.scopeLabel}; action list is corrective S1/S2 production only  |  Generated ${report.generatedAt.toLocaleString("en-GB")}`;
-        slide.addText(footer, { x: 0.40, y: 7.34, w: 12.53, h: 0.10, fontFace: FONT, fontSize: 5.7, italic: true, color: COLORS.muted, margin: 0, fit: "shrink" });
+        slide.addText(footer, { x: 0.40, y: 7.33, w: 12.53, h: 0.11, fontFace: FONT, fontSize: 6.2, italic: true, color: COLORS.muted, margin: 0, fit: "shrink" });
         if (typeof slide.addNotes === "function") {
             slide.addNotes(`[Sources]\n- Internal Downtime page all-year work-order source, filtered to ${report.stageLabel}.\n- Asset classification from the loaded Asset Master mapping.\n- SATS logo: ${LOGO_URL}.`);
         }
+
+        const appendixSlideCount = addAllMrAppendixSlides(pptx, logo, report);
 
         const safeStage = report.stageLabel.replace(/\s+/g, "-");
         const safeScope = report.filters.scope === "production" ? "Production" : "All-Machines";
         const fileName = `Maintenance_Monthly_Report_${report.filters.month}_${safeStage}_${safeScope}.pptx`;
         if (download) await pptx.writeFile({ fileName });
-        return { pptx, fileName };
+        return { pptx, fileName, appendixSlideCount };
     }
 
     async function handleSubmit(event) {
@@ -815,13 +939,14 @@
         setBusy(true);
         setStatus(`Loading ${selectedStageLabel(filters.stage)} work-order history...`);
         try {
-            const rows = await loadRows(filters.stage);
+            const rows = await loadRows(filters.stage, { force: true });
             setStatus(`Calculating monthly, ${getMrFinancialYearLabel(filters.financialYear)} YTD, and latest corrective S1/S2 production issues...`);
             await new Promise((resolve) => window.requestAnimationFrame(resolve));
             const report = buildReportModel(rows, filters);
-            setStatus("Building the one-slide PowerPoint report...");
-            await generatePpt(report);
-            setStatus(`Downloaded ${report.monthLabel} report with ${numberText(report.actionRows.length)} action-list rows.`);
+            setStatus(report.actionAppendixRequired ? "Building the main report and previous-day MR reference appendix..." : "Building the PowerPoint report...");
+            const result = await generatePpt(report);
+            const appendixText = result.appendixSlideCount ? ` plus ${numberText(result.appendixSlideCount)} reference slide${result.appendixSlideCount === 1 ? "" : "s"}` : "";
+            setStatus(`Downloaded ${report.monthLabel} report with ${numberText(report.actionRows.length)} recommended action-list rows${appendixText}.`);
             window.setTimeout(() => {
                 setBusy(false);
                 close();
@@ -847,6 +972,7 @@
             aggregateMttrGroups,
             aggregateMtbfGroups,
             buildActionRows,
+            buildAllRaisedRows,
             isCorrectiveActionRow,
             isProductionAreaWorkOrder,
             workOrderStageLabel,

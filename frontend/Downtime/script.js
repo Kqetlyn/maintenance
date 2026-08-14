@@ -6227,11 +6227,18 @@ function renderWorkOrderSlaAverageTable(bodyId, rows, type) {
 // a matching list below it.
 function getWorkOrderSlaDrilldownRows(model) {
     const sortRows = (entries) => [...entries].sort((a, b) => {
+        // Keep the operational list chronological: the newest Actual Start is
+        // always first. Rows without a usable Actual Start fall back to Created
+        // Date, then the remaining SLA fields provide deterministic tie-breaks.
+        const aLatest = a.actualStart.date?.getTime() || a.created.date?.getTime() || 0;
+        const bLatest = b.actualStart.date?.getTime() || b.created.date?.getTime() || 0;
+        const latestDiff = bLatest - aLatest;
+        if (latestDiff !== 0) return latestDiff;
         const statusDiff = getWorkOrderSlaStatusPriority(a.slaStatus) - getWorkOrderSlaStatusPriority(b.slaStatus);
         if (statusDiff !== 0) return statusDiff;
         const delayDiff = Number(b.delayHours || 0) - Number(a.delayHours || 0);
         if (delayDiff !== 0) return delayDiff;
-        return (b.created.date?.getTime() || 0) - (a.created.date?.getTime() || 0);
+        return String(b.id || "").localeCompare(String(a.id || ""), undefined, { numeric: true, sensitivity: "base" });
     });
     const specialRecordFilter = woSlaDrilldownRecordFilter !== "all";
     const applyRecordFilter = (entries) => {
@@ -6267,7 +6274,7 @@ function getWorkOrderSlaDrilldownRows(model) {
                 rows = specialRecordFilter ? sorted : sorted.filter((entry) => entry.slaStatus !== "Met Target");
         }
     }
-    return rows;
+    return sortRows(rows);
 }
 
 function renderWorkOrderSlaDrilldownFilterUi(model, shownCount) {
@@ -6285,8 +6292,8 @@ function renderWorkOrderSlaDrilldownFilterUi(model, shownCount) {
     if (!active) {
         if (title) title.textContent = recordLabel ? `${recordLabel === "open work orders" ? "Open WO" : "Invalid Date"} Drill-down` : "Late / Overdue Drill-down";
         if (subtitle) subtitle.textContent = recordLabel
-            ? `Showing ${fmtNumber(shownCount)} ${recordLabel} across all SLA statuses. Click a severity row or count above to narrow this list.`
-            : "Late, open overdue, and missing-data work orders only. Click a severity row or count above to narrow this list.";
+            ? `Showing ${fmtNumber(shownCount)} ${recordLabel} across all SLA statuses, newest Actual Start first. Click a severity row or count above to narrow this list.`
+            : "Late, open overdue, and missing-data work orders only, newest Actual Start first. Click a severity row or count above to narrow this list.";
         return;
     }
     const severityRow = model.severityRows.find((entry) => entry.severity.key === woSlaDrilldownSeverity);
@@ -6294,7 +6301,7 @@ function renderWorkOrderSlaDrilldownFilterUi(model, shownCount) {
     const statusLabel = SLA_DRILLDOWN_STATUS_LABELS[woSlaDrilldownStatus] || "Exceptions (Late / Overdue / Missing Data)";
     if (chip) chip.textContent = `${severityLabel} — ${statusLabel}`;
     if (title) title.textContent = `${severityLabel} Drill-down`;
-    if (subtitle) subtitle.textContent = `Showing ${fmtNumber(shownCount)} ${severityLabel} work order${shownCount === 1 ? "" : "s"} (${statusLabel.toLowerCase()})${recordLabel ? ` filtered to ${recordLabel}` : ""} from the SLA Compliance table above.`;
+    if (subtitle) subtitle.textContent = `Showing ${fmtNumber(shownCount)} ${severityLabel} work order${shownCount === 1 ? "" : "s"} (${statusLabel.toLowerCase()})${recordLabel ? ` filtered to ${recordLabel}` : ""} from the SLA Compliance table above, newest Actual Start first.`;
 }
 
 function renderWorkOrderSlaDrilldownTable(model) {

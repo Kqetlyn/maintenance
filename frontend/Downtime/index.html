@@ -2124,7 +2124,7 @@
                 <div>
                     <div class="monthly-ppt-eyebrow">PowerPoint Report</div>
                     <h2 id="monthly-ppt-dialog-title">Monthly Maintenance Report</h2>
-                    <p>Select each reporting scope. Monthly KPIs, financial-year indicators, and the daily action list are calculated separately.</p>
+                    <p>Select each reporting scope. Monthly KPIs, financial-year indicators, the recommended action list, and any previous-day reference appendix are calculated separately.</p>
                 </div>
                 <button type="button" class="monthly-ppt-close" id="monthly-ppt-close" aria-label="Close report filters">&times;</button>
             </div>
@@ -2142,7 +2142,7 @@
                 <label class="monthly-ppt-field">
                     <span>Action-list Date</span>
                     <input type="date" id="monthly-ppt-action-date" required>
-                    <small>Defaults to yesterday; shows up to 7 corrective S1/S2 production-machine MRs raised on that date.</small>
+                    <small>Defaults to yesterday. The main slide recommends up to 7 corrective S1/S2 production-machine MRs; if fewer qualify, an appendix lists every MR raised on that date.</small>
                 </label>
                 <label class="monthly-ppt-field">
                     <span>Stage</span>
@@ -2159,7 +2159,7 @@
                         <option value="production" selected>Production machines only</option>
                         <option value="all">All mapped machines</option>
                     </select>
-                    <small>Applied to monthly and YTD metrics. The action list always uses corrective S1/S2 production machines only.</small>
+                    <small>Applied to monthly and YTD metrics. The main recommendation uses corrective S1/S2 production machines; the reference appendix includes all MRs raised on the selected date.</small>
                 </label>
             </div>
             <div class="monthly-ppt-scope-summary" id="monthly-ppt-scope-summary" aria-live="polite"></div>
@@ -2222,8 +2222,8 @@
 
     <script src="/shared/asset-matcher.js?v=20260608-asset-matcher-1" defer></script>
     <script src="/shared/mira/mira-overview.js?v=20260813-sats-ppt-standard-1" defer></script>
-    <script src="script.js?v=20260814-monthly-ppt-3" defer></script>
-    <script src="monthly-ppt.js?v=20260814-monthly-ppt-7" defer></script>
+    <script src="script.js?v=20260814-open-wo-sort-1" defer></script>
+    <script src="monthly-ppt.js?v=20260814-monthly-ppt-10" defer></script>
 
 </body>
 </html>
